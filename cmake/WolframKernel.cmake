@@ -5,7 +5,7 @@ if(CMAKE_HOST_WIN32)
 elseif(CMAKE_HOST_APPLE)
 	set(MATHEMATICA_INSTALL_DIR /Applications/Mathematica.app/Contents)
 else()
-	set(MATHEMATICA_INSTALL_DIR /usr/local/Wolfram/Mathematica/13.1)
+	set(MATHEMATICA_INSTALL_DIR /home/tonya/Wolfram/Wolfram/15.0)
 endif()
 endif()
 

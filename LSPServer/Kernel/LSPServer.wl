@@ -88,6 +88,7 @@ $BracketMatcherDelayAfterLastChange
 $DiagnosticsDelayAfterLastChange
 $ImplicitTokensDelayAfterLastChange
 
+$WorkspaceRootPath
 
 $startupMessagesText
 
@@ -117,27 +118,6 @@ If[!FailureQ[$startupMessagesFile],
 
 
 
-Needs["LSPServer`BracketMismatches`"]
-Needs["LSPServer`CodeAction`"]
-Needs["LSPServer`Color`"]
-Needs["LSPServer`Definitions`"]
-Needs["LSPServer`Diagnostics`"]
-Needs["LSPServer`DocumentSymbol`"]
-Needs["LSPServer`FoldingRange`"]
-Needs["LSPServer`Formatting`"]
-Needs["LSPServer`Hover`"]
-Needs["LSPServer`ImplicitTokens`"]
-Needs["LSPServer`Library`"]
-Needs["LSPServer`ListenSocket`"]
-Needs["LSPServer`References`"]
-Needs["LSPServer`SelectionRange`"]
-Needs["LSPServer`SemanticTokens`"]
-Needs["LSPServer`ServerDiagnostics`"]
-Needs["LSPServer`Socket`"]
-Needs["LSPServer`StdIO`"]
-Needs["LSPServer`Utils`"]
-Needs["LSPServer`Workspace`"]
-
 Needs["CodeFormatter`"]
 Needs["CodeInspector`"]
 Needs["CodeInspector`Format`"]
@@ -155,6 +135,10 @@ TODO: when targeting 12.1 as a minimum, then use paclet["AssetLocation", "BuiltI
 *)
 location = "Location" /. PacletInformation["LSPServer"]
 
+(*
+Load data files FIRST - these are needed by several modules at load time
+Modules like Completion.wl, Diagnostics.wl, and Hover.wl use these data variables
+*)
 WolframLanguageSyntax`Generate`$builtinFunctions = Get[FileNameJoin[{location, "Resources", "Data", "BuiltinFunctions.wl"}]]
 WolframLanguageSyntax`Generate`$options = Get[FileNameJoin[{location, "Resources", "Data", "Options.wl"}]]
 WolframLanguageSyntax`Generate`$constants = Get[FileNameJoin[{location, "Resources", "Data", "Constants.wl"}]]
@@ -163,6 +147,35 @@ WolframLanguageSyntax`Generate`$obsoleteSymbols = Get[FileNameJoin[{location, "R
 WolframLanguageSyntax`Generate`$systemCharacters = Get[FileNameJoin[{location, "Resources", "Data", "SystemCharacters.wl"}]]
 WolframLanguageSyntax`Generate`$systemLongNames = Get[FileNameJoin[{location, "Resources", "Data", "SystemLongNames.wl"}]]
 WolframLanguageSyntax`Generate`$undocumentedSymbols = Get[FileNameJoin[{location, "Resources", "Data", "UndocumentedSymbols.wl"}]]
+
+(*
+Load LSPServer submodules using Get with explicit paths
+This ensures all modules are loaded regardless of the paclet cache state
+Data files must be loaded above BEFORE these modules
+*)
+Get[FileNameJoin[{location, "Kernel", "Utils.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Library.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "StdIO.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Socket.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "ListenSocket.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "ServerDiagnostics.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "DocumentSymbol.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "PacletIndex.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "BracketMismatches.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "CodeAction.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Color.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Completion.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Definitions.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Diagnostics.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "FoldingRange.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Formatting.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Hover.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "ImplicitTokens.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "InlayHints.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "References.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "SelectionRange.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "SemanticTokens.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "Workspace.wl"}]]
 
 
 (*
@@ -891,6 +904,32 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
     log["$SemanticTokens: ", $SemanticTokens]
   ];
 
+  (*
+  Extract workspace root path from params
+  Try workspaceFolders first (LSP 3.6+), then fall back to rootUri/rootPath
+  *)
+  $WorkspaceRootPath = None;
+  
+  If[KeyExistsQ[params, "workspaceFolders"] && ListQ[params["workspaceFolders"]] && Length[params["workspaceFolders"]] > 0,
+    $WorkspaceRootPath = normalizeURI[params["workspaceFolders"][[1]]["uri"]];
+    If[$Debug2,
+      log["workspace root from workspaceFolders: ", $WorkspaceRootPath]
+    ]
+    ,
+    If[KeyExistsQ[params, "rootUri"] && StringQ[params["rootUri"]],
+      $WorkspaceRootPath = normalizeURI[params["rootUri"]];
+      If[$Debug2,
+        log["workspace root from rootUri: ", $WorkspaceRootPath]
+      ]
+      ,
+      If[KeyExistsQ[params, "rootPath"] && StringQ[params["rootPath"]],
+        $WorkspaceRootPath = params["rootPath"];
+        If[$Debug2,
+          log["workspace root from rootPath: ", $WorkspaceRootPath]
+        ]
+      ]
+    ]
+  ];
 
   $ColorProvider = True;
 
@@ -1077,7 +1116,33 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
         "documentSymbolProvider" -> True,
         "selectionRangeProvider" -> True,
         "semanticTokensProvider" -> semanticTokensProviderValue,
-        "foldingRangeProvider" -> True
+        "foldingRangeProvider" -> True,
+        (*
+        Completion support
+        *)
+        "completionProvider" -> <|
+          "triggerCharacters" -> {"$", "`", "["},
+          "resolveProvider" -> True
+        |>,
+        (*
+        Inlay hints support (Rust-style type hints)
+        *)
+        "inlayHintProvider" -> <|
+          "resolveProvider" -> False
+        |>,
+        (*
+        Workspace symbol search support
+        *)
+        "workspaceSymbolProvider" -> True,
+        (*
+        Workspace folders support
+        *)
+        "workspace" -> <|
+          "workspaceFolders" -> <|
+            "supported" -> True,
+            "changeNotifications" -> True
+          |>
+        |>
       |>
     |>
   |>};
@@ -1106,6 +1171,16 @@ Module[{warningMessages},
     Some simple thing to warm-up
     *)
     ML4Code`SuggestBracketEdits["f["];
+  ];
+
+  (*
+  Initialize paclet index if workspace root is set
+  *)
+  If[StringQ[$WorkspaceRootPath],
+    If[$Debug2,
+      log["initializing paclet index for: ", $WorkspaceRootPath]
+    ];
+    InitializePacletIndex[$WorkspaceRootPath]
   ];
 
   warningMessages = ServerDiagnosticWarningMessages[];
@@ -1321,6 +1396,13 @@ Module[{params, doc, uri, text, entry},
   |>;
 
   $OpenFilesMap[uri] = entry;
+
+  (*
+  Update the paclet index for this file
+  *)
+  If[StringQ[$WorkspaceRootPath],
+    UpdateFileIndex[uri, text]
+  ];
 
   {}
 ]]
@@ -1713,6 +1795,12 @@ Module[{params, doc, uri},
 
   $OpenFilesMap[uri] =.;
 
+  (*
+  Note: We don't remove from paclet index on close, because the file still exists
+  and we want workspace-wide features to still work for closed files.
+  The index is only updated when files are actually modified.
+  *)
+
   {}
 ]
 
@@ -1820,6 +1908,20 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
   |>;
 
   $OpenFilesMap[uri] = entry;
+
+  (*
+  Schedule paclet index update (debounced with other scheduled jobs)
+  *)
+  If[StringQ[$WorkspaceRootPath],
+    AppendTo[entry["ScheduledJobs"],
+      Function[{e}, If[Now - e["LastChange"] > Quantity[$DiagnosticsDelayAfterLastChange, "Seconds"],
+        UpdateFileIndex[uri, e["Text"]];
+        {{}, True},
+        {{}, False}]
+      ]
+    ];
+    $OpenFilesMap[uri] = entry
+  ];
 
   {}
 ]]

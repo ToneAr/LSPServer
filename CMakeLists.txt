@@ -90,6 +90,7 @@ set(STATIC_WL_PACLET_KERNEL_SOURCES
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/BracketMismatches.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/CodeAction.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Color.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Completion.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Definitions.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Diagnostics.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/DocumentSymbol.wl
@@ -97,9 +98,11 @@ set(STATIC_WL_PACLET_KERNEL_SOURCES
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Formatting.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Hover.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/ImplicitTokens.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/InlayHints.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Library.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/ListenSocket.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/LSPServer.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/PacletIndex.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/References.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/SelectionRange.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/SemanticTokens.wl

@@ -3,6 +3,7 @@ BeginPackage["LSPServer`References`"]
 Begin["`Private`"]
 
 Needs["LSPServer`"]
+Needs["LSPServer`PacletIndex`"]
 Needs["LSPServer`Utils`"]
 Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
@@ -50,7 +51,8 @@ Module[{params, id, doc, uri},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/referencesFencepost"]] :=
 Catch[
-Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entry, locations},
+Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entry, locations,
+  localLocations, pacletReferences, pacletLocations, includeDeclaration, context},
   
   If[$Debug2,
     log["textDocument/referencesFencepost: enter"]
@@ -85,6 +87,12 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
   pos = params["position"];
   line = pos["line"];
   char = pos["character"];
+  
+  (*
+  Check if we should include the declaration
+  *)
+  context = Lookup[params, "context", <||>];
+  includeDeclaration = Lookup[context, "includeDeclaration", True];
 
   (*
   convert from 0-based to 1-based
@@ -116,12 +124,20 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
   sym = cases[[1]];
 
   name = sym["String"];
+  
+  (*
+  Remove context prefix for matching
+  *)
+  name = StringReplace[name, __ ~~ "`" -> ""];
 
-  cases = Cases[cst, LeafNode[Symbol, name, _], Infinity];
+  (*
+  Find references in current file
+  *)
+  cases = Cases[cst, LeafNode[Symbol, n_ /; StringReplace[n, __ ~~ "`" -> ""] === name, _], Infinity];
 
   srcs = #[[3, Key[Source]]]& /@ cases;
 
-  locations =
+  localLocations =
     Function[{src}, <|
       "uri" -> uri,
       "range" -> <|
@@ -129,6 +145,70 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
         "end" -> <| "line" -> #[[2, 1]], "character" -> #[[2, 2]] |>
       |>
     |>&[Map[Max[#, 0]&, src-1, {2}]]] /@ srcs;
+
+  (*
+  Find references across the paclet (workspace)
+  *)
+  pacletLocations = {};
+  
+  If[StringQ[$WorkspaceRootPath],
+    (*
+    Get references from paclet index
+    *)
+    pacletReferences = GetSymbolReferences[name];
+    
+    If[$Debug2,
+      log["paclet references for ", name, ": ", Length[pacletReferences]]
+    ];
+    
+    (*
+    Convert to LSP locations, excluding current file (already handled above)
+    *)
+    pacletLocations = Table[
+      <|
+        "uri" -> ref["uri"],
+        "range" -> <|
+          "start" -> <| "line" -> ref["source"][[1, 1]] - 1, "character" -> ref["source"][[1, 2]] - 1 |>,
+          "end" -> <| "line" -> ref["source"][[2, 1]] - 1, "character" -> ref["source"][[2, 2]] - 1 |>
+        |>
+      |>,
+      {ref, Select[pacletReferences, #["uri"] =!= uri &]}
+    ];
+    
+    (*
+    Optionally include definitions as references
+    *)
+    If[includeDeclaration,
+      Module[{pacletDefs, defLocations},
+        pacletDefs = GetSymbolDefinitions[name];
+        defLocations = Table[
+          <|
+            "uri" -> def["uri"],
+            "range" -> <|
+              "start" -> <| "line" -> def["source"][[1, 1]] - 1, "character" -> def["source"][[1, 2]] - 1 |>,
+              "end" -> <| "line" -> def["source"][[2, 1]] - 1, "character" -> def["source"][[2, 2]] - 1 |>
+            |>
+          |>,
+          {def, Select[pacletDefs, #["uri"] =!= uri &]}
+        ];
+        pacletLocations = Join[pacletLocations, defLocations]
+      ]
+    ]
+  ];
+
+  (*
+  Combine local and paclet-wide references
+  *)
+  locations = Join[localLocations, pacletLocations];
+  
+  (*
+  Remove duplicates
+  *)
+  locations = DeleteDuplicatesBy[locations, {#["uri"], #["range"]["start"]["line"], #["range"]["start"]["character"]}&];
+
+  If[$Debug2,
+    log["total references: ", Length[locations]]
+  ];
 
   {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> locations |>}
 ]]
