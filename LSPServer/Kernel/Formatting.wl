@@ -9,10 +9,22 @@ Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
 
 
+(*
+Default formatting options
+*)
+$DefaultFormattingOptions = <|
+  "LineWidth" -> 120,
+  "NewlinesBetweenTopLevelExpressions" -> 2,
+  "NewlinesBetweenSemicolons" -> Automatic,
+  "SpaceAfterComma" -> True,
+  "SpaceAfterOperator" -> True,
+  "SafetyMargin" -> False
+|>
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/formatting"]] :=
 Catch[
 Module[{params, doc, uri, id, cst, formatted, startLineCol, endLineCol, textEdit, options, tabSize, insertSpaces,
-  indentationString, entry, text},
+  indentationString, entry, text, lineWidth, formattingOptions},
 
   log[1, "textDocument/formatting: enter"];
 
@@ -56,6 +68,13 @@ Module[{params, doc, uri, id, cst, formatted, startLineCol, endLineCol, textEdit
 
   log[2, "after CodeConcreteParse"];
 
+  (*
+  Handle empty files gracefully
+  *)
+  If[Length[cst[[2]]] == 0,
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
+  ];
+
   startLineCol = cst[[2, 1, 3, Key[Source], 1]];
   endLineCol = cst[[2, -1, 3, Key[Source], 2]];
 
@@ -71,10 +90,35 @@ Module[{params, doc, uri, id, cst, formatted, startLineCol, endLineCol, textEdit
     indentationString = "\t"
   ];
 
-  formatted = CodeFormatCST[cst, "TabWidth" -> tabSize, "IndentationString" -> indentationString];
+  (*
+  Get line width from editor options or use default
+  *)
+  lineWidth = Lookup[options, "lineWidth", $DefaultFormattingOptions["LineWidth"]];
+
+  (*
+  Build formatting options
+  *)
+  formattingOptions = {
+    "TabWidth" -> tabSize,
+    "IndentationString" -> indentationString,
+    "LineWidth" -> lineWidth,
+    (*
+    Preserve existing newlines between top-level expressions
+    *)
+    "NewlinesBetweenTopLevelExpressions" -> $DefaultFormattingOptions["NewlinesBetweenTopLevelExpressions"]
+  };
+
+  If[$Debug2,
+    log["formatting with options: ", formattingOptions]
+  ];
+
+  formatted = CodeFormatCST[cst, Sequence @@ formattingOptions];
 
   If[FailureQ[formatted],
-    Throw[formatted]
+    If[$Debug2,
+      log["formatting failed: ", formatted]
+    ];
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
   textEdit = <| "range" -> <| "start" -> <| "line" -> startLineCol[[1]], "character" -> startLineCol[[2]] |>,
@@ -90,7 +134,7 @@ Module[{params, doc, uri, id, cst, formatted, startLineCol, endLineCol, textEdit
 handleContent[content:KeyValuePattern["method" -> "textDocument/rangeFormatting"]] :=
 Catch[
 Module[{params, doc, uri, id, formatted, textEdit, entry, text, options, tabSize,
-  insertSpaces, rangeSource, lines, range, indentationString},
+  insertSpaces, rangeSource, lines, range, indentationString, lineWidth, formattingOptions},
 
   log[1, "textDocument/rangeFormatting: enter"];
 
@@ -137,22 +181,45 @@ Module[{params, doc, uri, id, formatted, textEdit, entry, text, options, tabSize
   text = entry["Text"];
 
   lines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
+  
+  (*
+  Validate range
+  *)
+  If[rangeSource[[1, 1]] > Length[lines] || rangeSource[[2, 1]] > Length[lines],
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
+  
   lines = lines[[rangeSource[[1, 1]];;rangeSource[[2, 1]]]];
   If[rangeSource[[1, 1]] == rangeSource[[2, 1]],
     (*
     single line selection
     *)
-    text = StringTake[lines[[1]], {rangeSource[[1, 2]], rangeSource[[2, 2]] - 1}]
+    If[rangeSource[[2, 2]] > rangeSource[[1, 2]] && rangeSource[[2, 2]] - 1 <= StringLength[lines[[1]]],
+      text = StringTake[lines[[1]], {rangeSource[[1, 2]], rangeSource[[2, 2]] - 1}]
+      ,
+      text = ""
+    ]
     ,
     (*
     multiple line selection
     *)
-    lines[[1]] = StringDrop[lines[[1]], rangeSource[[1, 2]] - 1];
-    lines[[-1]] = StringTake[lines[[-1]], rangeSource[[2, 2]] - 1];
+    If[rangeSource[[1, 2]] - 1 < StringLength[lines[[1]]],
+      lines[[1]] = StringDrop[lines[[1]], rangeSource[[1, 2]] - 1]
+    ];
+    If[rangeSource[[2, 2]] - 1 <= StringLength[lines[[-1]]],
+      lines[[-1]] = StringTake[lines[[-1]], rangeSource[[2, 2]] - 1]
+    ];
     (*
     FIXME: use the correct newline
     *)
     text = StringJoin[Riffle[lines, "\n"]]
+  ];
+
+  (*
+  Skip empty selections
+  *)
+  If[StringTrim[text] === "",
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
   ];
 
   If[insertSpaces,
@@ -161,10 +228,24 @@ Module[{params, doc, uri, id, formatted, textEdit, entry, text, options, tabSize
     indentationString = "\t"
   ];
 
-  formatted = CodeFormat[text, "TabWidth" -> tabSize, "IndentationString" -> indentationString];
+  (*
+  Get line width from editor options or use default
+  *)
+  lineWidth = Lookup[options, "lineWidth", $DefaultFormattingOptions["LineWidth"]];
+
+  formattingOptions = {
+    "TabWidth" -> tabSize,
+    "IndentationString" -> indentationString,
+    "LineWidth" -> lineWidth
+  };
+
+  formatted = CodeFormat[text, Sequence @@ formattingOptions];
 
   If[FailureQ[formatted],
-    Throw[formatted]
+    If[$Debug2,
+      log["range formatting failed: ", formatted]
+    ];
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
   textEdit = <| "range" -> range,

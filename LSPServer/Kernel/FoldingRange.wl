@@ -17,9 +17,14 @@ $FoldingRangeKind = <|
 	"Imports" -> "imports",
 	"Region" -> "region",
   (*
-  custom range kinds
+  custom range kinds - these map to "region" for clients that don't support custom kinds
   *)
-  "Function" -> "function"
+  "Function" -> "region",
+  "Block" -> "region",
+  "Conditional" -> "region",
+  "Loop" -> "region",
+  "List" -> "region",
+  "Association" -> "region"
 |>
 
 
@@ -66,7 +71,7 @@ Module[{params, id, doc, uri, res},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/foldingRangeFencepost"]] :=
 Catch[
-Module[{id, params, doc, uri, cst, entry, foldingRange,
+Module[{id, params, doc, uri, cst, entry, foldingRange, outlineFolds, cstFolds,
   flatBag, comments, sorted, toInsert, completed, nodeList},
 
   log[1, "textDocument/foldingRangeFencepost: enter"];
@@ -100,17 +105,127 @@ Module[{id, params, doc, uri, cst, entry, foldingRange,
   ];
   
   nodeList = Lookup[entry, "NodeList", Null];
+  cst = Lookup[entry, "CST", Null];
 
-  If[nodeList === Null,
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
-  ];
+  (*
+  Collect folding ranges from the outline (sections, functions, etc.)
+  *)
+  outlineFolds = If[nodeList === Null, {}, Flatten[walkOutline /@ nodeList]];
 
-  foldingRange = Flatten[walkOutline /@ nodeList];
+  (*
+  Collect additional folding ranges from the CST (expression blocks, comments, lists, etc.)
+  *)
+  cstFolds = If[cst === Null, {}, collectCSTFoldingRanges[cst]];
+
+  (*
+  Combine and deduplicate folding ranges
+  *)
+  foldingRange = DeleteDuplicatesBy[Join[outlineFolds, cstFolds], {#["startLine"], #["endLine"]}&];
 
   log[1, "textDocument/foldingRangeFencepost: exit"];
 
   {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> foldingRange |>}
 ]]
+
+
+(*
+Collect folding ranges from CST for expression blocks
+*)
+collectCSTFoldingRanges[cst_] :=
+Module[{ranges},
+  ranges = Internal`Bag[];
+  walkCSTForFolding[ranges, cst];
+  Internal`BagPart[ranges, All]
+]
+
+(*
+Walk the CST and collect multi-line expression blocks
+*)
+walkCSTForFolding[bag_, node_] :=
+Module[{src, startLine, endLine, kind},
+  
+  (*
+  Only consider nodes that span multiple lines
+  *)
+  If[MatchQ[node, _[_, _, KeyValuePattern[Source -> _]]],
+    src = node[[3, Key[Source]]];
+    startLine = src[[1, 1]];
+    endLine = src[[2, 1]];
+    
+    If[endLine > startLine,
+      kind = getFoldingKind[node];
+      If[kind =!= None,
+        Internal`StuffBag[bag, <|
+          "kind" -> kind,
+          "startLine" -> startLine - 1, (* Convert to 0-based *)
+          "endLine" -> endLine - 1
+        |>]
+      ]
+    ]
+  ];
+  
+  (*
+  Recurse into children
+  *)
+  If[MatchQ[node, _[_, children_List, _]],
+    Scan[walkCSTForFolding[bag, #]&, children]
+  ]
+]
+
+(*
+Determine the folding kind based on the node type
+*)
+
+(* Multi-line comments *)
+getFoldingKind[LeafNode[Token`Comment, str_, data_]] /; 
+  data[Source][[2, 1]] > data[Source][[1, 1]] := $FoldingRangeKind["Comment"]
+
+(* Module/Block/With/DynamicModule scoping constructs *)
+getFoldingKind[CallNode[LeafNode[Symbol, "Module" | "Block" | "With" | "DynamicModule" | "Internal`InheritedBlock", _], _, _]] := 
+  $FoldingRangeKind["Block"]
+
+(* Function expressions - both pure and explicit *)
+getFoldingKind[CallNode[LeafNode[Symbol, "Function", _], _, _]] := 
+  $FoldingRangeKind["Function"]
+
+(* Conditionals: If, Which, Switch, Piecewise *)
+getFoldingKind[CallNode[LeafNode[Symbol, "If" | "Which" | "Switch" | "Piecewise" | "Condition", _], _, _]] := 
+  $FoldingRangeKind["Conditional"]
+
+(* Loops: Do, For, While, Table, Map, etc. *)
+getFoldingKind[CallNode[LeafNode[Symbol, "Do" | "For" | "While" | "Table" | "Array" | "Map" | "MapThread" | "MapIndexed" | "Scan" | "Fold" | "FoldList" | "Nest" | "NestList" | "NestWhile" | "FixedPoint" | "FixedPointList", _], _, _]] := 
+  $FoldingRangeKind["Loop"]
+
+(* CompoundExpression (;) - multi-statement blocks *)
+getFoldingKind[InfixNode[CompoundExpression, _, _]] := 
+  $FoldingRangeKind["Block"]
+
+(* List literals {...} *)
+getFoldingKind[GroupNode[List, _, _]] := 
+  $FoldingRangeKind["List"]
+
+(* Association literals <|...|> *)
+getFoldingKind[GroupNode[Association, _, _]] := 
+  $FoldingRangeKind["Association"]
+
+(* Grouped expressions (...) that span multiple lines *)
+getFoldingKind[GroupNode[GroupParen, _, _]] := 
+  $FoldingRangeKind["Region"]
+
+(* SetDelayed/Set definitions - function bodies *)
+getFoldingKind[BinaryNode[SetDelayed | Set | TagSetDelayed | UpSetDelayed, _, _]] := 
+  $FoldingRangeKind["Function"]
+
+(* Pattern matching constructs *)
+getFoldingKind[CallNode[LeafNode[Symbol, "Cases" | "Select" | "DeleteCases" | "Replace" | "ReplaceAll" | "ReplaceRepeated" | "MatchQ" | "FreeQ", _], _, _]] := 
+  $FoldingRangeKind["Block"]
+
+(* Exception handling *)
+getFoldingKind[CallNode[LeafNode[Symbol, "Catch" | "Check" | "Quiet" | "AbortProtect" | "CheckAbort", _], _, _]] := 
+  $FoldingRangeKind["Block"]
+
+(* Default: no folding for other nodes *)
+getFoldingKind[_] := None
 
 
 

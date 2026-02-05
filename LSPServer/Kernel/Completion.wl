@@ -1,26 +1,18 @@
+(* ::Package:: *)
+
 BeginPackage["LSPServer`Completion`"]
 
 Begin["`Private`"]
 
 Needs["LSPServer`"]
-Needs["LSPServer`Hover`"]
-Needs["LSPServer`ReplaceLongNamePUA`"]
+Needs["LSPServer`PacletIndex`"]
 Needs["LSPServer`Utils`"]
-Needs["CodeFormatter`"]
 Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
-Needs["CodeParser`Scoping`"]
 
 
-(* Maximum number of suggested system symbols in completion popup menu *)
-$maxSuggestedFunction = 10;
-
-
-(* 
-	 The kind of the completion item. Based of the kind an icon is chosen by the editor. The 
-   standardized set of available values is defined in LSPServer specification page.
-	  
-   https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionItemKind
+(*
+LSP Completion Item Kinds
 *)
 $CompletionItemKind = <|
   "Text" -> 1,
@@ -51,32 +43,94 @@ $CompletionItemKind = <|
 |>
 
 
-handleContent[content:KeyValuePattern["method" -> "textDocument/completion"]] :=
+(*
+Handle textDocument/completion request
+*)
+expandContent[content:KeyValuePattern["method" -> "textDocument/completion"], pos_] :=
 Catch[
-Module[{id, params, doc, uri, position, line, char, entry, text, ast, cstTabs, textLines, textInCurrentLine, scopedLocalVars,
-  tokenSymbol, userSymbols, systemSymbols, optionSymbols, userSymbolItems, systemSymbolItems, optionSymbolItems, items},
+Module[{params, id, doc, uri},
+
+  If[$Debug2,
+    log["textDocument/completion: enter expand"]
+  ];
+
+  id = content["id"];
+  params = content["params"];
+
+  If[Lookup[$CancelMap, id, False],
+
+    $CancelMap[id] =.;
+
+    If[$Debug2,
+      log["canceled"]
+    ];
+
+    Throw[{<| "method" -> "textDocument/completionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
+  ];
+
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
+
+    If[$Debug2,
+      log["stale"]
+    ];
+
+    Throw[{<| "method" -> "textDocument/completionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
+  ];
+
+  <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
+    "textDocument/completionFencepost"
+  }
+]]
 
 
-  log[1, "textDocument/completion: enter"];
+handleContent[content:KeyValuePattern["method" -> "textDocument/completionFencepost"]] :=
+Catch[
+Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
+  completions, systemCompletions, pacletCompletions, optionCompletions,
+  contextCompletions, externalCompletions, result},
 
+  If[$Debug2,
+    log["textDocument/completionFencepost: enter"]
+  ];
 
   id = content["id"];
 
- 
+  If[Lookup[$CancelMap, id, False],
+
+    $CancelMap[id] =.;
+
+    If[$Debug2,
+      log["canceled"]
+    ];
+
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
-  position = params["position"];
+  If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
 
-  
+    If[$Debug2,
+      log["stale"]
+    ];
+
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
+
+  position = params["position"];
   line = position["line"];
   char = position["character"];
+
   (*
-  convert from 0-based to 1-based
+  Convert from 0-based to 1-based
   *)
-  line+=1; (* line number of the cursor position *)
-  char+=1; (* character number of the cursor position from the start of the line *)
+  line += 1;
+  char += 1;
 
 
   entry = Lookup[$OpenFilesMap, uri, Null];
@@ -85,140 +139,429 @@ Module[{id, params, doc, uri, position, line, char, entry, text, ast, cstTabs, t
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
 
-  (* Full text of the file *)
   text = entry["Text"];
-  ast = Lookup[entry, "AST", Null];
 
-
-  If[ast === Null,
-    ast = Lookup[entry, "PreviousAST", Null]
-  ];
-
-  cstTabs = Lookup[entry, "CSTTabs", Null];
-
-  textLines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
-
-  (* Text in same line where the cursor is *)
-  textInCurrentLine = StringTake[textLines[[line]], char-1];
-
-  (* 
-  If the text contains tab, then the cursor column position needs to be adjusted.
-  Depending upon the position of the tab cursor column position goes to the nearest multiple of 4.
+  (*
+  Get the prefix at the cursor position
   *)
-  If[StringContainsQ[text, "\t"],
-    (*
-    FIXME: Must use the tab width from the editor
-    *)
-    char = 1;
-    Scan[(If[# == "\t", char = 4 * (Quotient[char-1, 4] + 1) + 1, char++])&, Characters[textInCurrentLine]];
+  prefix = getCompletionPrefix[text, line, char];
+
+  If[$Debug2,
+    log["completion prefix: ", prefix]
   ];
 
   (*
-  Using "TabWidth" -> 4 here because the notific
-  ation is rendered down to HTML and tabs need to be expanded in HTML
-  FIXME: Must use the tab width from the editor
+  If prefix is empty or too short, return empty list
   *)
-  cstTabs = CodeConcreteParse[textInCurrentLine, "TabWidth" -> 4];
+  If[StringLength[prefix] < 1,
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "isIncomplete" -> False, "items" -> {} |> |>}]
+  ];
 
-  (* 
-  Find the symbol available at the cursor column position char.
-  SourceMemberQ condition takes only the symbol available at char.
-  The line no is 1 as we are using cstTabs of a single line.
-
-  As cstTabs is CST of a line, finding the token symbol upto Infinity level 
-  is not computationally expensive.
+  (*
+  Collect completions from different sources
   *)
-  tokenSymbol = Cases[cstTabs, 
-    LeafNode[Symbol, ts_, 
-      KeyValuePattern[Source -> src_ /; SourceMemberQ[src, {1, char}]] 
-    ] :> ts, 
-    Infinity
-  ];
-  
-  log[2, "tokenSymbol :> ", InputForm[tokenSymbol]];
-  
-  scopedLocalVars = findScopedLocalVarsAST[ast, {line, char}];
+  systemCompletions = getSystemSymbolCompletions[prefix];
+  pacletCompletions = getPacletSymbolCompletions[prefix];
+  optionCompletions = getOptionCompletions[text, line, char, prefix];
+  contextCompletions = getContextCompletions[prefix];
+  externalCompletions = getExternalSymbolCompletions[prefix];
 
-  If[tokenSymbol === {},
-    Throw[{
-      <|
-        "jsonrpc" -> "2.0", 
-        "id" -> id, 
-        "result" -> <| "isIncomplete" -> True, "items" -> <||> |> 
-      |>
-    }]
-  ];
+  (*
+  Combine and deduplicate
+  Priority order: paclet symbols, external package symbols, system symbols, options, contexts
+  *)
+  completions = Join[pacletCompletions, externalCompletions, systemCompletions, optionCompletions, contextCompletions];
+  completions = DeleteDuplicatesBy[completions, #["label"]&];
 
-  tokenSymbol = First[tokenSymbol];
+  (*
+  Limit the number of results
+  *)
+  completions = Take[completions, UpTo[100]];
 
-  userSymbols = Lookup[entry, "UserSymbols", Null];
+  result = <|
+    "isIncomplete" -> Length[completions] >= 100,
+    "items" -> completions
+  |>;
 
-  If[userSymbols === Null,
-    userSymbols = Lookup[entry, "PreviousUserSymbols", Null]
-  ];
-
-  userSymbols = Join[userSymbols, scopedLocalVars];
-
-
-  (* Find the user defined symbols that are starting with tokenSymbol *)
-  userSymbols = ReplaceAll[
-    StringCases[userSymbols, StartOfString ~~ tokenSymbol ~~ ___], {{x_} :> x}
-  ];
-
-  userSymbols = DeleteCases[userSymbols, {}];
-
-
-  systemSymbols = Names["System`" <> tokenSymbol <> "*", IgnoreCase -> True];
-  systemSymbols = Take[systemSymbols, UpTo[$maxSuggestedFunction]];
-  optionSymbols = Intersection[WolframLanguageSyntax`Generate`$options, systemSymbols];
-  systemSymbols = Complement[systemSymbols, optionSymbols];
-
-  userSymbolItems = <| "label" -> #, "kind" -> $CompletionItemKind["Variable"], "detail" -> "User Defined Symbol" |>& /@ userSymbols;
-
-  systemSymbolItems = <| 
-    "label" -> #, 
-    "kind" -> $CompletionItemKind["Function"], 
-    "detail" -> "System Function", 
-    "documentation" ->  <| "kind" -> "markdown"
-                          , "value" -> mdUsage[#] 
-                        |>
-  |>& /@ systemSymbols;
-
-  optionSymbolItems = <|
-    "label" -> #, 
-    "kind" -> $CompletionItemKind["Field"], 
-    "detail" -> "Function Option", 
-    "documentation" -> <| "kind" -> "markdown", "value" -> mdUsage[#] |>
-  |>& /@ optionSymbols;
-
-  items = Join[userSymbolItems, systemSymbolItems, optionSymbolItems];
-
-
-  log[1, "completion: exiting"];
-
-
-  {<| "jsonrpc" -> "2.0", "id" ->id, "result" -> <| "isIncomplete" -> True, "items" -> items |> |>}
+  {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> result |>}
 ]]
 
 
-
-mdUsage[sym_] := 
-Module[{symbolUsage},
-  symbolUsage = ToExpression[sym <> "::usage"];
-  symbolUsage = ReplaceAll[symbolUsage, 
-    {
-      _MessageName :> "No usage message.",
-      _ :> StringJoin[linearToMDSyntax[symbolUsage]]
-    }
+(*
+Get the identifier prefix at the cursor position
+*)
+getCompletionPrefix[text_String, line_Integer, char_Integer] :=
+Module[{lines, currentLine, beforeCursor, prefix},
+  
+  lines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
+  
+  If[line > Length[lines],
+    Return[""]
+  ];
+  
+  currentLine = lines[[line]];
+  
+  If[char > StringLength[currentLine] + 1,
+    Return[""]
+  ];
+  
+  beforeCursor = StringTake[currentLine, char - 1];
+  
+  (*
+  Extract the identifier being typed
+  Wolfram identifiers can contain letters, digits, $ and `
+  *)
+  prefix = StringCases[beforeCursor, 
+    RegularExpression["[a-zA-Z$`][a-zA-Z0-9$`]*$"] :> "$0"
+  ];
+  
+  If[prefix === {},
+    "",
+    Last[prefix]
   ]
 ]
 
-(* 
-A sorted list of all the scoped symbols available from the level 
-specified by the cursorPosition upto the last level. 
-*)
-findScopedLocalVarsAST[ast_, cursorPosition_List] := Union[Last /@ ScopingData[ast, SourceMemberQ[#[[3, Key[Source]]], cursorPosition] &]]
 
+(*
+Cached set of constants for O(1) lookup
+*)
+$constantsSet := $constantsSet = Association[Thread[WolframLanguageSyntax`Generate`$constants -> True]]
+
+(*
+Cached combined list of all system symbols
+*)
+$allSystemSymbols := $allSystemSymbols = Join[
+  WolframLanguageSyntax`Generate`$builtinFunctions,
+  WolframLanguageSyntax`Generate`$constants
+]
+
+(*
+Get completions from system symbols
+*)
+getSystemSymbolCompletions[prefix_String] :=
+Module[{matching, completions},
+  
+  (*
+  Filter by prefix - use cached combined list
+  *)
+  matching = Select[
+    $allSystemSymbols,
+    StringStartsQ[#, prefix, IgnoreCase -> True]&
+  ];
+  
+  (*
+  Sort by relevance (exact prefix match first, then shorter names)
+  *)
+  matching = SortBy[matching, {
+    !StringStartsQ[#, prefix]&,  (* Exact case match first *)
+    StringLength[#]&              (* Shorter names first *)
+  }];
+  
+  (*
+  Create completion items - use cached constant set for O(1) lookup
+  *)
+  completions = Table[
+    Module[{kind, isConstant},
+      isConstant = KeyExistsQ[$constantsSet, sym];
+      kind = If[isConstant, 
+        $CompletionItemKind["Constant"], 
+        $CompletionItemKind["Function"]
+      ];
+      
+      <|
+        "label" -> sym,
+        "kind" -> kind,
+        "detail" -> If[isConstant, "System Constant", "System Function"],
+        "sortText" -> "1_" <> sym  (* System symbols sort after paclet symbols *)
+      |>
+    ],
+    {sym, Take[matching, UpTo[50]]}
+  ];
+  
+  completions
+]
+
+
+(*
+Get completions from paclet symbols
+*)
+getPacletSymbolCompletions[prefix_String] :=
+Module[{pacletSymbols, completions},
+  
+  pacletSymbols = GetSymbolsForCompletion[prefix];
+  
+  completions = Table[
+    Module[{kind, detail, item},
+      kind = Switch[sym["kind"],
+        "function", $CompletionItemKind["Function"],
+        "constant", $CompletionItemKind["Constant"],
+        "option", $CompletionItemKind["Property"],
+        "attribute", $CompletionItemKind["Property"],
+        _, $CompletionItemKind["Variable"]
+      ];
+      
+      detail = If[sym["usage"] =!= None,
+        StringTake[sym["usage"], UpTo[100]],
+        "Paclet Symbol"
+      ];
+      
+      item = <|
+        "label" -> sym["name"],
+        "kind" -> kind,
+        "detail" -> detail,
+        "sortText" -> "0_" <> sym["name"]  (* Paclet symbols sort first *)
+      |>;
+      
+      (* Only add documentation if usage is available *)
+      If[sym["usage"] =!= None,
+        item["documentation"] = <| "kind" -> "markdown", "value" -> sym["usage"] |>
+      ];
+      
+      item
+    ],
+    {sym, Take[pacletSymbols, UpTo[50]]}
+  ];
+  
+  completions
+]
+
+
+(*
+Get option completions when inside a function call
+*)
+getOptionCompletions[text_String, line_Integer, char_Integer, prefix_String] :=
+Module[{options, matching, completions},
+  
+  (*
+  Get all known options from the loaded data
+  *)
+  options = WolframLanguageSyntax`Generate`$options;
+  
+  (*
+  Filter by prefix
+  *)
+  matching = Select[options, StringStartsQ[#, prefix, IgnoreCase -> True]&];
+  
+  matching = SortBy[matching, StringLength];
+  
+  completions = Table[
+    <|
+      "label" -> opt,
+      "kind" -> $CompletionItemKind["Property"],
+      "detail" -> "Option",
+      "sortText" -> "2_" <> opt,
+      "insertText" -> opt <> " -> "
+    |>,
+    {opt, Take[matching, UpTo[20]]}
+  ];
+  
+  completions
+]
+
+
+(*
+Get context completions (for `name patterns)
+*)
+getContextCompletions[prefix_String] :=
+Module[{contexts, matching, completions},
+  
+  (*
+  If prefix contains `, it might be a context-qualified symbol
+  *)
+  If[!StringContainsQ[prefix, "`"],
+    Return[{}]
+  ];
+  
+  (*
+  Get contexts from the paclet index
+  *)
+  contexts = Keys[$PacletIndex["Contexts"]];
+  
+  (*
+  Also get system contexts
+  *)
+  contexts = Join[contexts, {"System`", "Global`", "Developer`", "Internal`"}];
+  
+  (*
+  Filter by prefix
+  *)
+  matching = Select[contexts, StringStartsQ[#, prefix, IgnoreCase -> True]&];
+  
+  completions = Table[
+    <|
+      "label" -> ctx,
+      "kind" -> $CompletionItemKind["Module"],
+      "detail" -> "Context",
+      "sortText" -> "3_" <> ctx
+    |>,
+    {ctx, Take[matching, UpTo[20]]}
+  ];
+  
+  completions
+]
+
+
+(*
+Get completions from external loaded packages (dependencies)
+*)
+getExternalSymbolCompletions[prefix_String] :=
+Module[{deps, allExternalSymbols, matching, completions},
+  
+  (*
+  Get dependency contexts that have been loaded
+  *)
+  deps = GetDependencyContexts[];
+  
+  If[Length[deps] == 0,
+    Return[{}]
+  ];
+  
+  (*
+  Get symbols from each dependency context
+  *)
+  allExternalSymbols = Flatten[
+    Table[
+      Quiet[
+        Names[ctx <> "*"],
+        {Names::notfound}
+      ],
+      {ctx, deps}
+    ]
+  ];
+  
+  (*
+  Extract just the symbol names (without context prefix) for matching
+  *)
+  matching = Select[allExternalSymbols, 
+    Function[{fullName},
+      Module[{bareSymbol},
+        bareSymbol = Last[StringSplit[fullName, "`"]];
+        StringStartsQ[bareSymbol, prefix, IgnoreCase -> True]
+      ]
+    ]
+  ];
+  
+  (*
+  Sort by relevance
+  *)
+  matching = SortBy[matching, {
+    !StringStartsQ[Last[StringSplit[#, "`"]], prefix]&,  (* Exact case match first *)
+    StringLength[#]&  (* Shorter names first *)
+  }];
+  
+  (*
+  Create completion items
+  *)
+  completions = Table[
+    Module[{bareSymbol, symContext, usage, detail, item},
+      bareSymbol = Last[StringSplit[fullName, "`"]];
+      symContext = StringJoin[Riffle[Most[StringSplit[fullName, "`"]], "`"]] <> "`";
+      
+      (*
+      Try to get usage message
+      *)
+      usage = Quiet[
+        Check[
+          ToExpression[fullName <> "::usage"],
+          None,
+          {MessageName::noinfo}
+        ],
+        {MessageName::noinfo, ToExpression::notstrbox}
+      ];
+      
+      (*
+      Clean up usage for display - remove newlines and truncate
+      *)
+      detail = If[StringQ[usage],
+        StringTake[
+          StringReplace[usage, {"\n" -> " ", "\r" -> " ", RegularExpression["\\s+"] -> " "}],
+          UpTo[80]
+        ],
+        symContext
+      ];
+      
+      item = <|
+        "label" -> bareSymbol,
+        "kind" -> $CompletionItemKind["Function"],
+        "detail" -> detail,
+        "sortText" -> "1_" <> bareSymbol,  (* Sort after paclet symbols but with system symbols *)
+        "labelDetails" -> <| "description" -> symContext |>
+      |>;
+      
+      (*
+      Add full documentation if usage is available
+      *)
+      If[StringQ[usage],
+        item["documentation"] = <| "kind" -> "markdown", "value" -> usage |>
+      ];
+      
+      item
+    ],
+    {fullName, Take[matching, UpTo[30]]}
+  ];
+  
+  completions
+]
+
+
+(*
+Handle completion item resolve for additional details
+*)
+handleContent[content:KeyValuePattern["method" -> "completionItem/resolve"]] :=
+Catch[
+Module[{id, params, label, documentation, result},
+
+  If[$Debug2,
+    log["completionItem/resolve: enter"]
+  ];
+
+  id = content["id"];
+  params = content["params"];
+  label = params["label"];
+
+  (*
+  Try to get documentation for the symbol
+  *)
+  documentation = getSymbolDocumentation[label];
+
+  result = params;
+  
+  If[documentation =!= None,
+    result["documentation"] = <| "kind" -> "markdown", "value" -> documentation |>
+  ];
+
+  {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> result |>}
+]]
+
+
+(*
+Get documentation for a symbol
+*)
+getSymbolDocumentation[symbolName_String] :=
+Module[{usage, pacletUsages},
+  
+  (*
+  First try system symbol usage
+  *)
+  If[NameQ[symbolName] && Context[symbolName] === "System`",
+    usage = Quiet[ToExpression[symbolName <> "::usage"]];
+    If[StringQ[usage],
+      Return[usage]
+    ]
+  ];
+  
+  (*
+  Then try paclet index
+  *)
+  If[KeyExistsQ[$PacletIndex["Symbols"], symbolName],
+    pacletUsages = $PacletIndex["Symbols", symbolName, "Usages"];
+    If[Length[pacletUsages] > 0,
+      Return[pacletUsages[[1]]]
+    ]
+  ];
+  
+  None
+]
 
 
 End[]

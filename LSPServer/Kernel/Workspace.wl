@@ -139,6 +139,126 @@ Module[{},
 ]
 
 
+(*
+Handle workspace/symbol search request
+*)
+handleContent[content:KeyValuePattern["method" -> "workspace/symbol"]] :=
+Catch[
+Module[{id, params, query, symbols, results, symbolKindMap},
+
+  If[$Debug2,
+    log["workspace/symbol: enter"]
+  ];
+
+  id = content["id"];
+
+  If[Lookup[$CancelMap, id, False],
+
+    $CancelMap[id] =.;
+
+    If[$Debug2,
+      log["canceled"]
+    ];
+
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
+  ];
+  
+  params = content["params"];
+  query = Lookup[params, "query", ""];
+
+  If[$Debug2,
+    log["workspace/symbol query: ", query]
+  ];
+
+  (*
+  Search workspace symbols
+  *)
+  symbols = SearchWorkspaceSymbols[query];
+
+  (*
+  Map internal kind to LSP SymbolKind
+  *)
+  symbolKindMap = <|
+    "function" -> 12,  (* Function *)
+    "constant" -> 14,  (* Constant *)
+    "option" -> 7,     (* Property *)
+    "attribute" -> 7,  (* Property *)
+    "unknown" -> 13    (* Variable *)
+  |>;
+
+  (*
+  Convert to LSP format
+  *)
+  results = Table[
+    <|
+      "name" -> sym["name"],
+      "kind" -> Lookup[symbolKindMap, sym["kind"], 13],
+      "location" -> sym["location"],
+      "containerName" -> sym["containerName"]
+    |>,
+    {sym, Take[symbols, UpTo[100]]}
+  ];
+
+  {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> results |>}
+]]
+
+
+(*
+Handle workspace folder changes
+*)
+handleContent[content:KeyValuePattern["method" -> "workspace/didChangeWorkspaceFolders"]] :=
+Module[{params, event, added, removed},
+
+  If[$Debug2,
+    log["workspace/didChangeWorkspaceFolders: enter"]
+  ];
+
+  params = content["params"];
+  event = params["event"];
+  added = Lookup[event, "added", {}];
+  removed = Lookup[event, "removed", {}];
+
+  (*
+  Handle removed folders - remove files from index
+  *)
+  Scan[
+    Function[{folder},
+      Module[{folderPath, filesToRemove},
+        folderPath = normalizeURI[folder["uri"]];
+        filesToRemove = Select[Keys[$PacletIndex["Files"]], StringStartsQ[#, "file://" <> folderPath]&];
+        Scan[RemoveFileFromIndex, filesToRemove]
+      ]
+    ],
+    removed
+  ];
+
+  (*
+  Handle added folders - scan and index files
+  *)
+  Scan[
+    Function[{folder},
+      Module[{folderPath, files},
+        folderPath = normalizeURI[folder["uri"]];
+        (*
+        If this is the first workspace folder, set it as root
+        *)
+        If[$WorkspaceRootPath === None,
+          $WorkspaceRootPath = folderPath
+        ];
+        (*
+        Index files in the new folder
+        *)
+        files = FileNames[{"*.wl", "*.m", "*.wls"}, folderPath, Infinity];
+        Scan[indexFile, files]
+      ]
+    ],
+    added
+  ];
+
+  {}
+]
+
+
 End[]
 
 EndPackage[]

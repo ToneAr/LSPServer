@@ -5,6 +5,7 @@ linearToMDSyntax
 Begin["`Private`"]
 
 Needs["LSPServer`"]
+Needs["LSPServer`PacletIndex`"]
 Needs["LSPServer`ReplaceLongNamePUA`"]
 Needs["LSPServer`Utils`"]
 Needs["CodeFormatter`"]
@@ -617,6 +618,193 @@ Module[{usage, documentationLink, sym},
   |>
 ]]
 
+
+(*
+Handle symbols from external loaded packages (dependencies).
+Tries to get usage message from the loaded package.
+*)
+handleExternalSymbols[symIn_] :=
+Catch[
+Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentationLink,
+  defPatterns, downVals, upVals, subVals, symbol, foundContext},
+
+  (* Get dependency contexts *)
+  deps = GetDependencyContexts[];
+  
+  (* Handle both bare symbols and explicitly contexted symbols *)
+  If[StringContainsQ[symIn, "`"],
+    (* Explicit context - extract parts and use directly *)
+    bareSymbol = Last[StringSplit[symIn, "`"]];
+    symContext = StringJoin[Riffle[Most[StringSplit[symIn, "`"]], "`"]] <> "`";
+    fullSymbol = symIn;
+    
+    (* For explicit context, verify the symbol exists *)
+    If[!Quiet[NameQ[fullSymbol]],
+      Throw[<|
+        "SymbolType" -> "INVALID",
+        "Usage" -> "INVALID",
+        "DocumentationLink" -> None,
+        "FunctionDefinitionPatterns" -> None,
+        "FunctionInformation" -> False
+      |>]
+    ],
+    
+    (* Bare symbol - try to find which dependency context it belongs to *)
+    bareSymbol = symIn;
+    
+    (* First, try to get context using proper evaluation *)
+    symContext = Quiet[
+      Check[
+        (* Use Evaluate + ToExpression to get the actual context *)
+        (* Try each dependency context to see if the symbol exists there *)
+        foundContext = None;
+        Scan[
+          Function[{dep},
+            If[foundContext === None,
+              If[Quiet[NameQ[dep <> bareSymbol]],
+                foundContext = dep
+              ]
+            ]
+          ],
+          deps
+        ];
+        (* If not found in deps, try Context with Evaluate *)
+        If[foundContext === None,
+          foundContext = Quiet[
+            Context[Evaluate[ToExpression[bareSymbol]]],
+            {Context::notfound, ToExpression::sntx}
+          ]
+        ];
+        foundContext,
+        None,
+        {Context::notfound}
+      ],
+      {Context::notfound, ToExpression::sntx}
+    ];
+    
+    If[!StringQ[symContext] || symContext === "Global`" || symContext === "System`" || symContext === None,
+      (* Symbol not found in any known context *)
+      Throw[<|
+        "SymbolType" -> "INVALID",
+        "Usage" -> "INVALID",
+        "DocumentationLink" -> None,
+        "FunctionDefinitionPatterns" -> None,
+        "FunctionInformation" -> False
+      |>]
+    ];
+    fullSymbol = symContext <> bareSymbol;
+    
+    (* For bare symbols, check if context is a dependency *)
+    If[Length[deps] > 0 && !AnyTrue[deps, StringStartsQ[symContext, #] || symContext === # &],
+      Throw[<|
+        "SymbolType" -> "INVALID",
+        "Usage" -> "INVALID",
+        "DocumentationLink" -> None,
+        "FunctionDefinitionPatterns" -> None,
+        "FunctionInformation" -> False
+      |>]
+    ];
+    
+    (* If no deps tracked but we found a non-System/Global context, still try to get info *)
+    If[Length[deps] == 0 && (symContext === "Global`" || symContext === "System`" || symContext === None),
+      Throw[<|
+        "SymbolType" -> "INVALID",
+        "Usage" -> "INVALID",
+        "DocumentationLink" -> None,
+        "FunctionDefinitionPatterns" -> None,
+        "FunctionInformation" -> False
+      |>]
+    ]
+  ];
+  
+  (*
+  Ensure the context is loaded before trying to get usage.
+  This is important because usage messages may not be properly formatted
+  until the package is actually loaded.
+  *)
+  Quiet[
+    Check[Needs[symContext], Null, {Needs::nocont, Get::noopen}],
+    {Needs::nocont, Get::noopen, General::stop}
+  ];
+  
+  (* Try to get usage message *)
+  usage = Quiet[
+    Check[
+      ToExpression[fullSymbol <> "::usage"],
+      None,
+      {MessageName::noinfo}
+    ],
+    {MessageName::noinfo, ToExpression::notstrbox}
+  ];
+  
+  If[!StringQ[usage],
+    (* No usage message - provide basic info *)
+    usage = "Symbol from " <> symContext
+  ];
+  
+  (* Extract definition patterns from DownValues, UpValues, SubValues *)
+  defPatterns = Quiet[
+    Check[
+      symbol = ToExpression[fullSymbol];
+      downVals = DownValues[symbol];
+      upVals = UpValues[symbol];
+      subVals = SubValues[symbol];
+      
+      (* Extract the LHS patterns from definitions *)
+      Join[
+        (* DownValues: f[args] := ... *)
+        Cases[downVals, HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}],
+        (* UpValues: g[f[args]] ^:= ... - show the full pattern *)
+        Cases[upVals, HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}],
+        (* SubValues: f[x][y] := ... *)
+        Cases[subVals, HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}]
+      ],
+      {},
+      {DownValues::sym, UpValues::sym, SubValues::sym}
+    ],
+    {DownValues::sym, UpValues::sym, SubValues::sym, ToExpression::sntx}
+  ];
+  
+  (* Remove duplicates and limit to reasonable number *)
+  defPatterns = DeleteDuplicates[defPatterns];
+  defPatterns = Take[defPatterns, UpTo[10]];
+  
+  (* Extract paclet name for potential documentation link *)
+  pacletName = First[StringSplit[symContext, "`"], ""];
+  
+  (* Build documentation link if possible *)
+  documentationLink = If[pacletName =!= "",
+    "[" <> bareSymbol <> " (" <> pacletName <> "): Web Documentation]" <> 
+      "(" <> "https://reference.wolfram.com/language/" <> pacletName <> "/ref/" <> bareSymbol <> ".html" <> ")",
+    None
+  ];
+  
+  <|
+    "SymbolType" -> "External",
+    "Usage" -> usage,
+    "DocumentationLink" -> documentationLink,
+    "FunctionDefinitionPatterns" -> If[Length[defPatterns] > 0, 
+      StringRiffle[defPatterns, "\n"], 
+      None
+    ],
+    "FunctionInformation" -> True
+  |>
+]]
+
+(*
+Extract a readable string representation of a pattern/definition LHS
+*)
+extractPatternString[expr_] :=
+Module[{str},
+  str = Quiet[
+    ToString[Unevaluated[expr], InputForm],
+    {ToString::shdw}
+  ];
+  (* Clean up HoldPattern wrapper if present *)
+  str = StringReplace[str, "HoldPattern[" ~~ mid__ ~~ "]" /; StringCount[mid, "["] == StringCount[mid, "]"] :> mid];
+  str
+]
+
 handleSymbols[id_, astIn_, cstIn_, symsIn_] :=
 Catch[
 Module[{lines, result, syms, functionInformationAssoc},
@@ -636,6 +824,12 @@ Module[{lines, result, syms, functionInformationAssoc},
     *)
     If[functionInformationAssoc["SymbolType"] == "INVALID",
       functionInformationAssoc = handleUserSymbols[astIn, cstIn, symsIn];
+    ];
+    (*
+    If user symbol information is not available, try to find external package symbol information
+    *)
+    If[functionInformationAssoc["SymbolType"] == "INVALID",
+      functionInformationAssoc = handleExternalSymbols[sym];
     ];
 
     functionInformationAssoc
@@ -712,20 +906,38 @@ Module[{},
 ]
 
 formatUsageCallPatterns[assoc_] := 
-Module[{res},
+Module[{res, parts},
   If[Not[TrueQ[assoc["FunctionInformation"]]],
     res = "No function information."
     ,
-    If[assoc["SymbolType"] == "System",
-      res = StringJoin[{assoc["Usage"], "\n\n_", assoc["DocumentationLink"] <> "_"}]
-      ,
-      res = StringRiffle[{
-        "**Usage**", 
-        StringJoin[linearToMDSyntax[assoc["Usage"]]], 
-        "**Function Definition Patterns**", 
-        StringJoin[linearToMDSyntax[assoc["FunctionDefinitionPatterns"]]]
-        }, 
-        "\n\n"]
+    Switch[assoc["SymbolType"],
+      "System",
+        res = StringJoin[{assoc["Usage"], "\n\n_", assoc["DocumentationLink"] <> "_"}],
+      "External",
+        (* External package symbols - show usage, definition patterns, and documentation link *)
+        parts = {"**Usage**", StringJoin[linearToMDSyntax[assoc["Usage"]]]};
+        
+        (* Add definition patterns if available *)
+        If[assoc["FunctionDefinitionPatterns"] =!= None,
+          AppendTo[parts, "**Definition Patterns**"];
+          AppendTo[parts, "```wolfram\n" <> assoc["FunctionDefinitionPatterns"] <> "\n```"]
+        ];
+        
+        (* Add documentation link if available *)
+        If[assoc["DocumentationLink"] =!= None,
+          AppendTo[parts, "_" <> assoc["DocumentationLink"] <> "_"]
+        ];
+        
+        res = StringRiffle[parts, "\n\n"],
+      _,
+        (* UserDefined symbols *)
+        res = StringRiffle[{
+          "**Usage**", 
+          StringJoin[linearToMDSyntax[assoc["Usage"]]], 
+          "**Function Definition Patterns**", 
+          StringJoin[linearToMDSyntax[assoc["FunctionDefinitionPatterns"]]]
+          }, 
+          "\n\n"]
     ];
   ];
 
@@ -989,28 +1201,23 @@ interpretBox[b_] := (
 escapeMarkdown[s_String] :=
   StringReplace[s, {
     (*
-    There is some bug in VSCode where it seems that the mere presence of backticks prevents other characters from being considered as escaped
-
-    For example, look at BeginPackage usage message in VSCode
+    Only escape characters that have special meaning in markdown and could break rendering.
+    VSCode's markdown renderer is fairly tolerant, so we only need to escape:
+    - Backticks (code spans)
+    - Asterisks (bold/italic) 
+    - Underscores (bold/italic)
+    - HTML special chars (< > &)
+    
+    We do NOT need to escape: () [] {} # + - . ! 
+    These only have special meaning in specific contexts and escaping them 
+    makes the text harder to read.
     *)
     "`" -> "\\`",
     "*" -> "\\*",
+    "_" -> "\\_",
     "<" -> "&lt;",
     ">" -> "&gt;",
-    "&" -> "&amp;",
-    "\\" -> "\\\\",
-    "_" -> "\\_",
-    "{" -> "\\{",
-    "}" -> "\\}",
-    "[" -> "\\[",
-    "]" -> "\\]",
-    "(" -> "\\(",
-    ")" -> "\\)",
-    "#" -> "\\#",
-    "+" -> "\\+",
-    "-" -> "\\-",
-    "." -> "\\.",
-    "!" -> "\\!"
+    "&" -> "&amp;"
   }]
 
 
@@ -1100,21 +1307,11 @@ replaceControl[s_String] :=
     "\.9f" -> "\\.9f"
   }]
 
-replaceLinearSyntax[s_String] :=
-  StringReplace[s, {
-    "\!" -> "\\!",
-    "\%" -> "\\%",
-    "\&" -> "\\&",
-    "\(" -> "\\(",
-    "\)" -> "\\)",
-    "\*" -> "\\*",
-    "\+" -> "\\+",
-    "\/" -> "\\/",
-    "\@" -> "\\@",
-    "\^" -> "\\^",
-    "\_" -> "\\_",
-    "\`" -> "\\`"
-  }]
+(*
+Linear syntax characters like \( \) \* etc. don't need special escaping for markdown display.
+Just pass through as-is. The characters will display literally in VSCode.
+*)
+replaceLinearSyntax[s_String] := s
 
 
 (* :!CodeAnalysis::EndBlock:: *)

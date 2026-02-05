@@ -3,6 +3,7 @@ BeginPackage["LSPServer`Diagnostics`"]
 Begin["`Private`"]
 
 Needs["LSPServer`"]
+Needs["LSPServer`PacletIndex`"]
 Needs["LSPServer`Utils`"]
 Needs["CodeInspector`"]
 Needs["CodeInspector`SuppressedRegions`"] (* for SuppressedRegions *)
@@ -37,7 +38,8 @@ Module[{params, doc, uri, res},
     "textDocument/abstractParse",
     "textDocument/runAbstractDiagnostics",
     "textDocument/runScopingData", (* implemented in SemanticTokens.wl *)
-    "textDocument/runScopingDiagnostics"
+    "textDocument/runScopingDiagnostics",
+    "textDocument/runWorkspaceDiagnostics"
   };
 
   log[1, "textDocument/runDiagnostics: exit"];
@@ -367,6 +369,177 @@ Module[{params, doc, uri, entry, cst, scopingLints, scopingData, filtered, suppr
 ]]
 
 
+(*
+Run workspace-wide diagnostics
+This checks for:
+1. Undefined symbols that might be defined elsewhere in the paclet
+2. Context loading errors (using symbols from unloaded contexts)
+*)
+handleContent[content:KeyValuePattern["method" -> "textDocument/runWorkspaceDiagnostics"]] :=
+Catch[
+Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
+  suppressedRegions, isActive, pacletSymbols, systemSymbols, localSymbols,
+  scopingData, locallyDefinedSymbols, contextErrors, contextLints},
+
+  If[$Debug2,
+    log["textDocument/runWorkspaceDiagnostics: enter"]
+  ];
+
+  params = content["params"];
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  If[isStale[$ContentQueue, uri],
+    
+    If[$Debug2,
+      log["stale"]
+    ];
+
+    Throw[{}]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  
+  If[entry === Null,
+    Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
+  ];
+
+  workspaceLints = Lookup[entry, "WorkspaceLints", Null];
+
+  If[workspaceLints =!= Null,
+    Throw[{}]
+  ];
+
+  (*
+  Skip workspace diagnostics if paclet index is not initialized
+  *)
+  If[$WorkspaceRootPath === None,
+    entry["WorkspaceLints"] = {};
+    $OpenFilesMap[uri] = entry;
+    Throw[{}]
+  ];
+
+  cst = entry["CST"];
+
+  If[FailureQ[cst],
+    Throw[{}]
+  ];
+
+  (*
+  Get all symbol references in the file
+  *)
+  symbolRefs = Cases[cst, 
+    LeafNode[Symbol, name_String, KeyValuePattern[Source -> src_]] :> <|"name" -> name, "source" -> src|>,
+    Infinity
+  ];
+
+  (*
+  Get system symbols
+  *)
+  systemSymbols = Join[
+    WolframLanguageSyntax`Generate`$builtinFunctions,
+    WolframLanguageSyntax`Generate`$constants
+  ];
+
+  (*
+  Get paclet symbols
+  *)
+  pacletSymbols = GetPacletSymbols[];
+
+  (*
+  Get locally defined symbols from scoping data
+  *)
+  scopingData = Lookup[entry, "ScopingData", {}];
+  locallyDefinedSymbols = DeleteDuplicates[#[[4]]& /@ scopingData];
+
+  (*
+  Find undefined symbols - those not in system, paclet, or local scope
+  *)
+  undefined = Select[symbolRefs, 
+    Function[{ref},
+      Module[{name},
+        name = ref["name"];
+        (*
+        Symbol is undefined if:
+        - Not a system symbol
+        - Not defined in the paclet
+        - Not locally scoped in this file
+        - Not a common pattern variable (single letters, or ending in _)
+        - Not a context path (contains `)
+        *)
+        And[
+          !MemberQ[systemSymbols, name],
+          !MemberQ[pacletSymbols, name],
+          !MemberQ[locallyDefinedSymbols, name],
+          !StringMatchQ[name, LetterCharacter],  (* Single letter variables *)
+          !StringContainsQ[name, "`"],  (* Context paths *)
+          !StringMatchQ[name, "$" ~~ LetterCharacter],  (* $ prefixed single letters *)
+          StringLength[name] > 1  (* Multi-character symbols *)
+        ]
+      ]
+    ]
+  ];
+
+  (*
+  Create lints for undefined symbols
+  *)
+  workspaceLints = Table[
+    InspectionObject[
+      "UndefinedSymbol",
+      "Symbol \"" <> ref["name"] <> "\" is not defined in the paclet or System context",
+      "Remark",
+      <|
+        Source -> ref["source"],
+        ConfidenceLevel -> 0.5,  (* Lower confidence since we might miss some definitions *)
+        "Argument" -> ref["name"]
+      |>
+    ],
+    {ref, Take[undefined, UpTo[50]]}  (* Limit to avoid overwhelming with warnings *)
+  ];
+
+  (*
+  Check for context loading errors (using symbols from unloaded contexts)
+  *)
+  contextErrors = GetContextLoadErrors[uri];
+  
+  contextLints = Table[
+    InspectionObject[
+      "UnloadedContext",
+      "Context \"" <> err["context"] <> "\" is used but not loaded. " <>
+        "Add Needs[\"" <> err["context"] <> "\"] before using " <> err["fullName"] <> ".",
+      "Warning",
+      <|
+        Source -> err["source"],
+        ConfidenceLevel -> 0.85,
+        "Argument" -> err["context"]
+      |>
+    ],
+    {err, Take[contextErrors, UpTo[20]]}
+  ];
+  
+  workspaceLints = Join[workspaceLints, contextLints];
+
+  (*
+  Filter out suppressed lints
+  *)
+  suppressedRegions = Lookup[entry, "SuppressedRegions", {}];
+  isActive = makeIsActiveFunc[suppressedRegions];
+  workspaceLints = Select[workspaceLints, isActive];
+
+  If[$Debug2,
+    log["workspaceLints: ", Length[workspaceLints], " issues (", 
+        Length[undefined], " undefined symbols, ", 
+        Length[contextErrors], " context errors)"]
+  ];
+
+  entry["WorkspaceLints"] = workspaceLints;
+
+  $OpenFilesMap[uri] = entry;
+
+  {}
+]]
+
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/clearDiagnostics"]] :=
 Catch[
 Module[{params, doc, uri, entry},
@@ -398,6 +571,8 @@ Module[{params, doc, uri, entry},
 
   entry["ScopingLints"] =.;
 
+  entry["WorkspaceLints"] =.;
+
   $OpenFilesMap[uri] = entry;
 
   log[1, "textDocument/clearDiagnostics: exit"];
@@ -408,7 +583,7 @@ Module[{params, doc, uri, entry},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/publishDiagnostics"]] :=
 Catch[
-Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints, astLints, scopingLints, diagnostics, res},
+Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints, astLints, scopingLints, workspaceLints, diagnostics, res},
 
   log[1, "textDocument/publishDiagnostics: enter"];
 
@@ -455,7 +630,12 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
   *)
   scopingLints = Lookup[entry, "ScopingLints", {}];
 
-  lints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints;
+  (*
+  Workspace-wide lints (undefined symbols, etc.)
+  *)
+  workspaceLints = Lookup[entry, "WorkspaceLints", {}];
+
+  lints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints ~Join~ workspaceLints;
 
   log[2, "lints: ", #["Tag"]& /@ lints];
 
