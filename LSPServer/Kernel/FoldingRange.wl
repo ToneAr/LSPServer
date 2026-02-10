@@ -148,7 +148,7 @@ Module[{ranges},
 Walk the CST and collect multi-line expression blocks
 *)
 walkCSTForFolding[bag_, node_] :=
-Module[{src, startLine, endLine, kind},
+Module[{src, startLine, endLine, startChar, endChar, kind, children},
   
   (*
   Only consider nodes that span multiple lines
@@ -156,7 +156,9 @@ Module[{src, startLine, endLine, kind},
   If[MatchQ[node, _[_, _, KeyValuePattern[Source -> _]]],
     src = node[[3, Key[Source]]];
     startLine = src[[1, 1]];
+    startChar = src[[1, 2]];
     endLine = src[[2, 1]];
+    endChar = src[[2, 2]];
     
     If[endLine > startLine,
       kind = getFoldingKind[node];
@@ -164,7 +166,9 @@ Module[{src, startLine, endLine, kind},
         Internal`StuffBag[bag, <|
           "kind" -> kind,
           "startLine" -> startLine - 1, (* Convert to 0-based *)
-          "endLine" -> endLine - 1
+          "startCharacter" -> startChar - 1, (* Convert to 0-based *)
+          "endLine" -> endLine - 1,
+          "endCharacter" -> endChar - 1 (* Convert to 0-based *)
         |>]
       ]
     ]
@@ -172,9 +176,27 @@ Module[{src, startLine, endLine, kind},
   
   (*
   Recurse into children
+  Different node types have different structures:
+  - ContainerNode, GroupNode, InfixNode, etc.: node[[2]] is List of children
+  - CallNode: node[[1]] is {head}, node[[2]] is GroupNode containing arguments
   *)
-  If[MatchQ[node, _[_, children_List, _]],
-    Scan[walkCSTForFolding[bag, #]&, children]
+  Which[
+    (* For CallNode, recurse into head list and body GroupNode's children directly *)
+    (* This avoids duplicate folding ranges for CallNode and its GroupSquare body *)
+    MatchQ[node, CallNode[headList_List, GroupNode[_, bodyChildren_List, _], _]],
+      (* Recurse into head expressions (for complex heads like a[b][c]) *)
+      Scan[walkCSTForFolding[bag, #]&, node[[1]]];
+      (* Recurse directly into GroupNode's children, skipping the GroupNode itself *)
+      Scan[walkCSTForFolding[bag, #]&, node[[2, 2]]],
+    
+    (* For most nodes, children are in node[[2]] as a List *)
+    Length[node] >= 2 && ListQ[node[[2]]],
+      children = node[[2]];
+      Scan[walkCSTForFolding[bag, #]&, children],
+    
+    (* Default: no recursion *)
+    True,
+      Null
   ]
 ]
 
@@ -182,25 +204,47 @@ Module[{src, startLine, endLine, kind},
 Determine the folding kind based on the node type
 *)
 
+(*
+Helper to get the symbol name from a CallNode head
+The head is stored as either a Symbol or String depending on context
+*)
+getCallNodeSymbolName[CallNode[{LeafNode[Symbol, sym_, _]}, _, _]] := 
+  If[StringQ[sym], sym, SymbolName[sym]]
+getCallNodeSymbolName[_] := None
+
+(* Sets of symbol names for categorization *)
+$BlockSymbols = {"Module", "Block", "With", "DynamicModule", "InheritedBlock"};
+$FunctionSymbols = {"Function"};
+$ConditionalSymbols = {"If", "Which", "Switch", "Piecewise", "Condition"};
+$LoopSymbols = {"Do", "For", "While", "Table", "Array", "Map", "MapThread", 
+  "MapIndexed", "Scan", "Fold", "FoldList", "Nest", "NestList", "NestWhile", 
+  "FixedPoint", "FixedPointList"};
+$PatternSymbols = {"Cases", "Select", "DeleteCases", "Replace", "ReplaceAll", 
+  "ReplaceRepeated", "MatchQ", "FreeQ"};
+$ExceptionSymbols = {"Catch", "Check", "Quiet", "AbortProtect", "CheckAbort"};
+
 (* Multi-line comments *)
 getFoldingKind[LeafNode[Token`Comment, str_, data_]] /; 
   data[Source][[2, 1]] > data[Source][[1, 1]] := $FoldingRangeKind["Comment"]
 
-(* Module/Block/With/DynamicModule scoping constructs *)
-getFoldingKind[CallNode[LeafNode[Symbol, "Module" | "Block" | "With" | "DynamicModule" | "Internal`InheritedBlock", _], _, _]] := 
-  $FoldingRangeKind["Block"]
+(* CallNode-based folding - determine kind based on head symbol *)
+getFoldingKind[node:CallNode[{LeafNode[Symbol, _, _]}, _, _]] := 
+Module[{symName},
+  symName = getCallNodeSymbolName[node];
+  Which[
+    MemberQ[$BlockSymbols, symName], $FoldingRangeKind["Block"],
+    MemberQ[$FunctionSymbols, symName], $FoldingRangeKind["Function"],
+    MemberQ[$ConditionalSymbols, symName], $FoldingRangeKind["Conditional"],
+    MemberQ[$LoopSymbols, symName], $FoldingRangeKind["Loop"],
+    MemberQ[$PatternSymbols, symName], $FoldingRangeKind["Block"],
+    MemberQ[$ExceptionSymbols, symName], $FoldingRangeKind["Block"],
+    True, $FoldingRangeKind["Region"]
+  ]
+]
 
-(* Function expressions - both pure and explicit *)
-getFoldingKind[CallNode[LeafNode[Symbol, "Function", _], _, _]] := 
-  $FoldingRangeKind["Function"]
-
-(* Conditionals: If, Which, Switch, Piecewise *)
-getFoldingKind[CallNode[LeafNode[Symbol, "If" | "Which" | "Switch" | "Piecewise" | "Condition", _], _, _]] := 
-  $FoldingRangeKind["Conditional"]
-
-(* Loops: Do, For, While, Table, Map, etc. *)
-getFoldingKind[CallNode[LeafNode[Symbol, "Do" | "For" | "While" | "Table" | "Array" | "Map" | "MapThread" | "MapIndexed" | "Scan" | "Fold" | "FoldList" | "Nest" | "NestList" | "NestWhile" | "FixedPoint" | "FixedPointList", _], _, _]] := 
-  $FoldingRangeKind["Loop"]
+(* Any other CallNode (complex heads, Part expressions, etc.) *)
+getFoldingKind[CallNode[_, _, _]] := 
+  $FoldingRangeKind["Region"]
 
 (* CompoundExpression (;) - multi-statement blocks *)
 getFoldingKind[InfixNode[CompoundExpression, _, _]] := 
@@ -218,17 +262,13 @@ getFoldingKind[GroupNode[Association, _, _]] :=
 getFoldingKind[GroupNode[GroupParen, _, _]] := 
   $FoldingRangeKind["Region"]
 
+(* GroupNode with GroupSquare - standalone bracket groups or Part expressions [[...]] *)
+getFoldingKind[GroupNode[GroupSquare, _, _]] := 
+  $FoldingRangeKind["Region"]
+
 (* SetDelayed/Set definitions - function bodies *)
 getFoldingKind[BinaryNode[SetDelayed | Set | TagSetDelayed | UpSetDelayed, _, _]] := 
   $FoldingRangeKind["Function"]
-
-(* Pattern matching constructs *)
-getFoldingKind[CallNode[LeafNode[Symbol, "Cases" | "Select" | "DeleteCases" | "Replace" | "ReplaceAll" | "ReplaceRepeated" | "MatchQ" | "FreeQ", _], _, _]] := 
-  $FoldingRangeKind["Block"]
-
-(* Exception handling *)
-getFoldingKind[CallNode[LeafNode[Symbol, "Catch" | "Check" | "Quiet" | "AbortProtect" | "CheckAbort", _], _, _]] := 
-  $FoldingRangeKind["Block"]
 
 (* Default: no folding for other nodes *)
 getFoldingKind[_] := None

@@ -5,19 +5,105 @@ LSPServer is a package that implements the [Language Server Protocol](https://mi
 [Developing Wolfram Language Code in Other Editors and IDEs with LSP from WTC 2021: Watch Video (youtube)](https://www.youtube.com/watch?v=nXVEOUMZbzQ)
 
 LSPServer implements several LSP features:
-* Code diagnostics
-* Suggestions for fixes
+* Code diagnostics with workspace-wide analysis
+* Suggestions for fixes (including quick-fix suppression actions)
 * Formatting files and selections
 * Semantic highlighting
 * Expand / shrink selection
 * Outline
 * Color swatches
 * Symbol references
-* Documentation on hover
+* Documentation on hover with full context paths
+* Smart autocompletion (system symbols, workspace symbols, association keys, context-qualified symbols)
+* Workspace symbol search (cross-file go-to-definition)
+* ESLint-style diagnostic suppression (`wl-disable` comments and `.wllintrc` config)
+* Inlay hints (context annotations)
+* Code folding for all multi-line constructs
 
 This repo is for users who are interested in adding LSP support for Wolfram Language to LSP clients.
 
 There are official Wolfram LSP clients for [Sublime Text](https://github.com/WolframResearch/Sublime-WolframLanguage) and [Visual Studio Code](https://github.com/WolframResearch/vscode-wolfram).
+
+
+## Features
+
+### Smart Autocompletion
+
+LSPServer provides intelligent autocompletion from multiple sources:
+
+- **System symbols**: All built-in Wolfram Language functions and constants
+- **Workspace symbols**: Symbols defined in your project, with highest completion priority
+- **External packages**: Symbols from packages loaded via `Needs[]` or `Get[]`
+- **Kernel contexts**: Context-qualified symbols like `Internal`Bag` or `Developer`ToPackedArray`, discovered dynamically via `Contexts[]` and `Names[]`
+- **Options**: Known options with automatic ` -> ` insertion
+- **Context paths**: All available contexts when typing after a backtick
+
+#### Association Key Completion
+
+When working with associations, LSPServer suggests keys based on the variable's known structure:
+
+```wolfram
+data = <|"name" -> "Alice", "age" -> 30, "address" -> <|"city" -> "NYC"|>|>;
+data["    (* suggests: "name", "age", "address" *)
+data["address"]["   (* suggests: "city" *)
+
+items = {<|"id" -> 1|>, <|"id" -> 2|>};
+items[[    (* suggests: 1, 2 *)
+items[[1]]["   (* suggests: "id" *)
+```
+
+Supports bracket-only triggers (`data[`), Part syntax (`data[[`), chained access, comma-separated paths, `All`/`Span` indexing, and per-element key tracking for lists of associations.
+
+### Diagnostic Suppression
+
+Suppress diagnostics using ESLint-style comments:
+
+```wolfram
+x = undefinedVar  (* wl-disable-line UndefinedSymbol *)
+
+(* wl-disable-next-line *)
+y = anotherUndefined
+
+(* wl-disable UndefinedSymbol *)
+a = foo
+b = bar
+(* wl-enable UndefinedSymbol *)
+
+(* wl-disable-file UnloadedContext *)
+```
+
+Project-wide configuration via `.wllintrc.json`:
+
+```json
+{
+  "rules": {
+    "UndefinedSymbol": "off",
+    "Experimental*": "off"
+  },
+  "ignorePatterns": ["**/Tests/**"]
+}
+```
+
+Quick-fix code actions are available on any diagnostic to insert suppression comments.
+
+See [docs/ignore-patterns.md](docs/ignore-patterns.md) for full documentation.
+
+### Enhanced Hover
+
+Hovering over a symbol shows its full context path, usage message, and definition patterns:
+
+- **System symbols**: Context, usage, and link to web documentation
+- **User-defined symbols**: Context (from workspace index), in-file usage message, and definition patterns
+- **External symbols**: Context, usage, definition patterns from `DownValues`/`UpValues`/`SubValues`, and documentation link
+
+### Workspace Intelligence
+
+LSPServer indexes your entire workspace on startup:
+
+- **Cross-file go-to-definition**: Jump to where any symbol is defined
+- **Workspace symbol search**: Find symbols across all files (Ctrl+T / Cmd+T)
+- **Dependency tracking**: Automatically detects and loads external package dependencies
+- **Context-aware diagnostics**: Warns about unloaded contexts (but not for kernel-resident contexts like `Internal``, `Developer``, etc.)
 
 
 ## Setup

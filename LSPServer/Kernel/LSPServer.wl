@@ -139,14 +139,39 @@ location = "Location" /. PacletInformation["LSPServer"]
 Load data files FIRST - these are needed by several modules at load time
 Modules like Completion.wl, Diagnostics.wl, and Hover.wl use these data variables
 *)
-WolframLanguageSyntax`Generate`$builtinFunctions = Get[FileNameJoin[{location, "Resources", "Data", "BuiltinFunctions.wl"}]]
-WolframLanguageSyntax`Generate`$options = Get[FileNameJoin[{location, "Resources", "Data", "Options.wl"}]]
-WolframLanguageSyntax`Generate`$constants = Get[FileNameJoin[{location, "Resources", "Data", "Constants.wl"}]]
-WolframLanguageSyntax`Generate`$experimentalSymbols = Get[FileNameJoin[{location, "Resources", "Data", "ExperimentalSymbols.wl"}]]
-WolframLanguageSyntax`Generate`$obsoleteSymbols = Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
-WolframLanguageSyntax`Generate`$systemCharacters = Get[FileNameJoin[{location, "Resources", "Data", "SystemCharacters.wl"}]]
-WolframLanguageSyntax`Generate`$systemLongNames = Get[FileNameJoin[{location, "Resources", "Data", "SystemLongNames.wl"}]]
-WolframLanguageSyntax`Generate`$undocumentedSymbols = Get[FileNameJoin[{location, "Resources", "Data", "UndocumentedSymbols.wl"}]]
+(* wl-disable *)
+WolframLanguageSyntax`Generate`$options :=
+	WolframLanguageSyntax`Generate`$options =
+	EntityClass["WolframLanguageSymbol", "OptionName"]["Name"]
+
+WolframLanguageSyntax`Generate`$experimentalSymbols :=
+	WolframLanguageSyntax`Generate`$experimentalSymbols =
+	EntityClass["WolframLanguageSymbol", "Experimental"]["Name"]
+
+WolframLanguageSyntax`Generate`$constants =
+	Get[FileNameJoin[{location, "Resources", "Data", "Constants.wl"}]]
+
+WolframLanguageSyntax`Generate`$builtinFunctions :=
+	WolframLanguageSyntax`Generate`$builtinFunctions =
+	Complement[
+		Names["System`*"],
+		WolframLanguageSyntax`Generate`$options,
+		WolframLanguageSyntax`Generate`$experimentalSymbols,
+		WolframLanguageSyntax`Generate`$constants
+	]
+
+WolframLanguageSyntax`Generate`$obsoleteSymbols =
+	Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
+
+WolframLanguageSyntax`Generate`$systemCharacters =
+	Get[FileNameJoin[{location, "Resources", "Data", "SystemCharacters.wl"}]]
+
+WolframLanguageSyntax`Generate`$undocumentedSymbols =
+	Get[FileNameJoin[{location, "Resources", "Data", "UndocumentedSymbols.wl"}]]
+
+WolframLanguageSyntax`Generate`$systemLongNames =
+	Get[FileNameJoin[{location, "Resources", "Data", "SystemLongNames.wl"}]]
+(* wl-enable *)
 
 (*
 Load LSPServer submodules using Get with explicit paths
@@ -166,6 +191,7 @@ Get[FileNameJoin[{location, "Kernel", "CodeAction.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Color.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Completion.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Definitions.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "IgnorePatterns.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Diagnostics.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "FoldingRange.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Formatting.wl"}]]
@@ -335,7 +361,7 @@ Module[{contents},
     log["$ContentQueue (up to 20): ", #["method"]& /@ Take[$ContentQueue, UpTo[20]]]
   ];
 
-  
+
 ]
 
 
@@ -401,7 +427,7 @@ Module[{logFile, logFileStream,
   Ensure that no Print output is printed to stdout
 
   There may have been messages printed from doing Needs["LSPServer`"], and we can't do anything about those
-  But they will be detected when doing RunServerDiagnostic[] 
+  But they will be detected when doing RunServerDiagnostic[]
   *)
   $Output = Streams["stderr"];
 
@@ -454,11 +480,11 @@ Module[{logFile, logFileStream,
     logFileStream = OpenWrite[logFile, CharacterEncoding -> "UTF-8"];
 
     If[FailureQ[logFileStream],
-      
+
       log["\n\n"];
       log["opening log file failed: ", logFileStream];
       log["\n\n"];
-      
+
       exitHard[]
     ];
 
@@ -508,7 +534,7 @@ Module[{logFile, logFileStream,
     log["\n\n"];
     log["There were messages when loading LSPServer` package: ", $startupMessagesText];
     log["\n\n"];
-    
+
     exitHard[]
   ];
 
@@ -527,7 +553,7 @@ Module[{logFile, logFileStream,
     *)
     log["Initialization failed: ", $initializedComm //InputForm];
     log["\n\n"];
-    
+
     exitHard[]
   ];
 
@@ -537,7 +563,7 @@ Module[{logFile, logFileStream,
     log["\n\n"];
     log["Read-Eval-Write-Loop failed: ", readEvalWriteCycle];
     log["\n\n"];
-    
+
     exitHard[]
   ];
 
@@ -547,7 +573,7 @@ _,
   log["\n\n"];
   log["uncaught Throw: ", #1];
   log["\n\n"];
-  
+
   exitHard[]
 
   )&
@@ -682,7 +708,7 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   ];
 
   If[!empty[contents],
-  
+
     contents = expandContents[contents];
 
     $ContentQueue = $ContentQueue ~Join~ contents;
@@ -700,7 +726,7 @@ Catch[
 Module[{contents},
 
   (*
-  (*  
+  (*
   Figuring out what to with UTF-16 surrogates...
 
   Related bugs: 382744, 397941
@@ -857,7 +883,7 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
         $ConfidenceLevelInitialization = initializationOptions["confidenceLevel"]
       ];
       *)
-      
+
       If[KeyExistsQ[initializationOptions, "implicitTokens"],
         implicitTokens = initializationOptions["implicitTokens"];
 
@@ -909,7 +935,7 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
   Try workspaceFolders first (LSP 3.6+), then fall back to rootUri/rootPath
   *)
   $WorkspaceRootPath = None;
-  
+
   If[KeyExistsQ[params, "workspaceFolders"] && ListQ[params["workspaceFolders"]] && Length[params["workspaceFolders"]] > 0,
     $WorkspaceRootPath = normalizeURI[params["workspaceFolders"][[1]]["uri"]];
     If[$Debug2,
@@ -957,7 +983,7 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
     log["$ColorProvider: ", $ColorProvider]
   ];
 
-  
+
   capabilities = params["capabilities"];
   textDocument = capabilities["textDocument"];
   codeAction = textDocument["codeAction"];
@@ -1119,9 +1145,14 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
         "foldingRangeProvider" -> True,
         (*
         Completion support
+        triggerCharacters:
+          $ - for system variables like $Version
+          ` - for context paths like Developer`
+          [ - for function arguments
+          " - for association string keys like data["
         *)
         "completionProvider" -> <|
-          "triggerCharacters" -> {"$", "`", "["},
+          "triggerCharacters" -> {"$", "`", "[", "\""},
           "resolveProvider" -> True
         |>,
         (*
@@ -1166,7 +1197,7 @@ Module[{warningMessages},
   If[$BracketMatcher,
 
     Block[{$ContextPath}, Needs["ML4Code`"]];
-  
+
     (*
     Some simple thing to warm-up
     *)
@@ -1180,7 +1211,15 @@ Module[{warningMessages},
     If[$Debug2,
       log["initializing paclet index for: ", $WorkspaceRootPath]
     ];
-    InitializePacletIndex[$WorkspaceRootPath]
+    InitializePacletIndex[$WorkspaceRootPath];
+
+    (*
+    Load project-level ignore configuration (.wllintrc)
+    *)
+    If[$Debug2,
+      log["loading project ignore config"]
+    ];
+    LoadProjectIgnoreConfig[$WorkspaceRootPath]
   ];
 
   warningMessages = ServerDiagnosticWarningMessages[];
@@ -1218,7 +1257,7 @@ Module[{id},
     If[$Debug2,
       log["$CancelMap: ", $CancelMap]
     ];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
@@ -1246,7 +1285,7 @@ Module[{},
 handleContent[content:KeyValuePattern["method" -> "$/cancelRequest"]] :=
 Catch[
 Module[{params, id},
-  
+
   If[$Debug2,
     log["$/cancelRequest: enter"]
   ];
@@ -1363,7 +1402,7 @@ Module[{params, doc, uri},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1380,7 +1419,7 @@ Module[{params, doc, uri},
 handleContent[content:KeyValuePattern["method" -> "textDocument/didOpenFencepost"]] :=
 Catch[
 Module[{params, doc, uri, text, entry},
-  
+
   If[$Debug2,
     log["textDocument/didOpenFencepost: enter"]
   ];
@@ -1421,7 +1460,7 @@ Module[{params, doc, uri, cst, text, entry, fileName, fileFormat},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1430,7 +1469,7 @@ Module[{params, doc, uri, cst, text, entry, fileName, fileFormat},
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -1447,7 +1486,7 @@ Module[{params, doc, uri, cst, text, entry, fileName, fileFormat},
     log["text: ", stringLineTake[StringTake[ToString[text, InputForm], UpTo[1000]], UpTo[20]]];
     log["...\n"]
   ];
-  
+
   If[$Debug2,
     log["before CodeConcreteParse"]
   ];
@@ -1510,7 +1549,7 @@ Module[{params, doc, uri, text, entry, cstTabs, fileName, fileFormat},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1519,7 +1558,7 @@ Module[{params, doc, uri, text, entry, cstTabs, fileName, fileFormat},
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -1592,7 +1631,7 @@ Module[{params, doc, uri, cst, text, entry, agg},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1601,7 +1640,7 @@ Module[{params, doc, uri, cst, text, entry, agg},
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -1615,7 +1654,7 @@ Module[{params, doc, uri, cst, text, entry, agg},
   ];
 
   cst = entry["CST"];
-  
+
   If[$Debug2,
     log["before Aggregate"]
   ];
@@ -1654,7 +1693,7 @@ Module[{params, doc, uri, entry, cstTabs, aggTabs},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1663,7 +1702,7 @@ Module[{params, doc, uri, entry, cstTabs, aggTabs},
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -1715,20 +1754,20 @@ Module[{params, doc, uri, entry, agg, ast},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
 
     Throw[{}]
   ];
-  
+
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
+
   ast = Lookup[entry, "AST", Null];
 
   If[ast =!= Null,
@@ -1736,7 +1775,7 @@ Module[{params, doc, uri, entry, agg, ast},
   ];
 
   agg = entry["Agg"];
-  
+
   If[$Debug2,
     log["before Abstract"]
   ];
@@ -1769,7 +1808,7 @@ Module[{params, doc, uri},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1819,7 +1858,7 @@ Module[{params, doc, uri},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1857,7 +1896,7 @@ Module[{params, doc, uri},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     If[$Debug2,
       log["stale"]
     ];
@@ -1874,7 +1913,7 @@ Module[{params, doc, uri},
 handleContent[content:KeyValuePattern["method" -> "textDocument/didChangeFencepost"]] :=
 Catch[
 Module[{params, doc, uri, text, lastChange, entry, changes},
-  
+
   If[$Debug2,
     log["textDocument/didChangeFencepost: enter"]
   ];
@@ -1882,16 +1921,16 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
-  
+
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
 
     Throw[{}]
   ];
-  
+
   changes = params["contentChanges"];
 
   (*

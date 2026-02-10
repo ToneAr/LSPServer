@@ -4,6 +4,7 @@ Begin["`Private`"]
 
 Needs["LSPServer`"]
 Needs["LSPServer`PacletIndex`"]
+Needs["LSPServer`IgnorePatterns`"]
 Needs["LSPServer`Utils`"]
 Needs["CodeInspector`"]
 Needs["CodeInspector`SuppressedRegions`"] (* for SuppressedRegions *)
@@ -36,6 +37,7 @@ Module[{params, doc, uri},
   <| "method" -> #, "params" -> params |>& /@ {
     "textDocument/concreteParse",
     "textDocument/suppressedRegions",
+    "textDocument/parseIgnoreComments",  (* Parse wl-disable comments *)
     "textDocument/runConcreteDiagnostics",
     "textDocument/aggregateParse",
     "textDocument/runAggregateDiagnostics",
@@ -97,6 +99,61 @@ Module[{params, doc, uri, entry, cst, suppressedRegions},
   ];
   
   entry["SuppressedRegions"] = suppressedRegions;
+
+  $OpenFilesMap[uri] = entry;
+
+  {}
+]]
+
+(*
+Parse wl-disable/wl-enable comments for custom ignore patterns
+*)
+handleContent[content:KeyValuePattern["method" -> "textDocument/parseIgnoreComments"]] :=
+Catch[
+Module[{params, doc, uri, entry, cst, ignoreData},
+
+  If[$Debug2,
+    log["textDocument/parseIgnoreComments: enter"]
+  ];
+
+  params = content["params"];
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  If[isStale[$ContentQueue, uri],
+    
+    If[$Debug2,
+      log["stale"]
+    ];
+
+    Throw[{}]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  
+  If[entry === Null,
+    Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
+  ];
+
+  (* Check if already parsed *)
+  If[Lookup[entry, "IgnoreData", Null] =!= Null,
+    Throw[{}]
+  ];
+  
+  cst = entry["CST"];
+
+  If[$Debug2,
+    log["before ParseIgnoreComments"]
+  ];
+
+  ignoreData = UpdateIgnoreData[uri, cst];
+
+  If[$Debug2,
+    log["after ParseIgnoreComments"];
+    log["ignoreData: ", ignoreData]
+  ];
+  
+  entry["IgnoreData"] = ignoreData;
 
   $OpenFilesMap[uri] = entry;
 
@@ -597,6 +654,11 @@ Module[{params, doc, uri, entry},
 
   entry["WorkspaceLints"] =.;
 
+  entry["IgnoreData"] =.;
+  
+  (* Also clear from the global ignore data map *)
+  ClearIgnoreData[uri];
+
   $OpenFilesMap[uri] = entry;
 
   {}
@@ -605,7 +667,8 @@ Module[{params, doc, uri, entry},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/publishDiagnostics"]] :=
 Catch[
-Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints, astLints, scopingLints, workspaceLints, diagnostics},
+Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints, astLints, 
+  scopingLints, workspaceLints, diagnostics, ignoreData, beforeIgnoreCount},
 
   If[$Debug2,
     log["textDocument/publishDiagnostics: enter"]
@@ -664,13 +727,24 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
   lints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints ~Join~ workspaceLints;
 
   If[$Debug2,
-    log["lints: ", #["Tag"]& /@ lints]
+    log["lints before filtering: ", Length[lints]]
   ];
 
 
   lintsWithConfidence = Cases[lints, InspectionObject[_, _, _, KeyValuePattern[ConfidenceLevel -> _]]];
 
   lints = Cases[lintsWithConfidence, InspectionObject[_, _, _, KeyValuePattern[ConfidenceLevel -> _?(GreaterEqualThan[$ConfidenceLevel])]]];
+
+  (*
+  Filter out lints that are ignored by wl-disable comments
+  *)
+  ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
+  beforeIgnoreCount = Length[lints];
+  lints = Select[lints, !ShouldIgnoreDiagnostic[#, ignoreData]&];
+  
+  If[$Debug2,
+    log["lints after ignore filtering: ", Length[lints], " (", beforeIgnoreCount - Length[lints], " ignored)"]
+  ];
 
   (*
 
@@ -696,7 +770,7 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
   lints = Take[lints, UpTo[CodeInspector`Summarize`$DefaultLintLimit]];
 
   If[$Debug2,
-    log["lints: ", #["Tag"]& /@ lints]
+    log["lints final: ", #["Tag"]& /@ lints]
   ];
 
   diagnostics = lintToDiagnostics /@ lints;

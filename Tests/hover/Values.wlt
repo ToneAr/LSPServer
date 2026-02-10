@@ -15,7 +15,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 1, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nNo usage message\\.\n\n**Function Definition Patterns**\n\nsubFn\\[a\\_\\]\\[b\\_\\]\n\n"
+        "value" -> "**Usage**\n\nNo usage message.\n\n**Function Definition Patterns**\n\nsubFn[a\\_][b\\_]\n\n"
         |>
       |>
     |>
@@ -40,7 +40,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 2, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nSubValue function with usage\\.\n\n**Function Definition Patterns**\n\nsubFnUsage\\[a\\_\\]\\[b\\_\\]\n\n"
+        "value" -> "**Usage**\n\nSubValue function with usage.\n\n**Function Definition Patterns**\n\nsubFnUsage[a\\_][b\\_]\n\n"
         |>
       |>
     |>
@@ -65,7 +65,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 3, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\ng is a function with UpValue\\.\n\n**Function Definition Patterns**\n\nf\\[g\\]\n\n\n\nf\\[g\\[x\\_\\]\\]\n\n"
+        "value" -> "**Usage**\n\ng is a function with UpValue.\n\n**Function Definition Patterns**\n\nf[g]\n\n\n\nf[g[x\\_]]\n\n"
         |>
       |>
     |>
@@ -115,7 +115,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 5, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\ndownValFn is a function with DownValue\\.\n\n**Function Definition Patterns**\n\ndownValFn\\[x\\_ /; x &gt; \\-2\\]\n\n\n\ndownValFn\\[x\\_ /; x &lt; 2\\]\n\n"
+        "value" -> "**Usage**\n\ndownValFn is a function with DownValue.\n\n**Function Definition Patterns**\n\ndownValFn[x\\_ /; x &gt; -2]\n\n\n\ndownValFn[x\\_ /; x &lt; 2]\n\n"
         |>
       |>
     |>

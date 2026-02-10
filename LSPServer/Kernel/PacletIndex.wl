@@ -34,6 +34,7 @@ GetFileExplicitContextRefs
 IsContextLoadedInFile
 GetContextLoadErrors
 GetFileLoadedContexts
+GetSymbolUsages
 
 $PacletIndex
 $WorkspaceRoot
@@ -1279,23 +1280,31 @@ GetFileExplicitContextRefs[uri_String] :=
 (*
 Get all contexts that are loaded/available in a file.
 This includes:
-- System` (always available)
-- Global` (always available) 
+- All kernel-known contexts (from Contexts[]) — these are always available
+  without needing Needs[]. This covers System`, Global`, Developer`, Internal`,
+  Compile`, JLink`, and many others.
 - The file's own package context (if it's a package)
 - Contexts loaded via Needs/Get/BeginPackage
 - Workspace-defined contexts
 *)
 GetFileLoadedContexts[uri_String] :=
-Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContexts},
+Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContexts, kernelContexts},
   
   fileData = Lookup[$PacletIndex["Files"], uri, <||>];
   
+  (*
+  Get all contexts known to the kernel. These are always available and do not
+  require Needs[] to use. This includes Internal`, Developer`, Compile`, etc.
+  *)
+  kernelContexts = Quiet[Contexts[], {Contexts::argx}];
+  If[!ListQ[kernelContexts], kernelContexts = {"System`", "Global`"}];
+  
   If[fileData === <||>,
-    Return[{"System`", "Global`"}]
+    Return[DeleteDuplicates[kernelContexts]]
   ];
   
-  (* Start with always-available contexts *)
-  loadedContexts = {"System`", "Global`"};
+  (* Start with all kernel-known contexts *)
+  loadedContexts = kernelContexts;
   
   (* Add the file's own package context if it exists *)
   packageContext = Lookup[fileData, "PackageContext", None];
@@ -1367,6 +1376,20 @@ Module[{explicitRefs, loadedContexts, errors},
   ];
   
   errors
+]
+
+
+(*
+Get usage messages for a symbol from the PacletIndex.
+Returns a list of usage strings, or {} if none found.
+*)
+GetSymbolUsages[symbolName_String] :=
+Module[{symData},
+  symData = Lookup[$PacletIndex["Symbols"], symbolName, Null];
+  If[symData === Null,
+    {},
+    Replace[symData["Usages"], _Missing -> {}]
+  ]
 ]
 
 
