@@ -15,7 +15,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 1, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nNo usage message\\.\n\n**Function Definition Patterns**\n\nnoFunctionUsage\\[x\\_Integer\\]\n\n"
+        "value" -> "**Usage**\n\nNo usage message.\n\n**Function Definition Patterns**\n\nnoFunctionUsage[x\\_Integer]\n\n"
         |>
       |>
     |>
@@ -36,7 +36,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 2, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nTest function with only usage\\.\n\n**Function Definition Patterns**\n\nNo function defined\\."
+        "value" -> "**Usage**\n\nTest function with only usage.\n\n**Function Definition Patterns**\n\nNo function defined."
         |>
       |>
     |>

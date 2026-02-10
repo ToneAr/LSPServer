@@ -405,11 +405,19 @@ For symbols, display their usage message
 handleUserSymbols[astIn_, cstIn_, symsIn_] := 
 Module[{tokenSymbol, functionSource, 
   functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,  
-  functionCallPatternCST, functionCallPattern, functionInformationAssoc, requiredUsage},
+  functionCallPatternCST, functionCallPattern, functionInformationAssoc, requiredUsage,
+  symbolContext},
 
   tokenSymbol = symsIn /. LeafNode[Symbol, ts_, _] :> ts; 
 
   tokenSymbol = First[tokenSymbol]; 
+
+  (*
+  Look up the full context for this symbol from the PacletIndex.
+  This gives us the context (e.g. "MyPackage`" or "MyPackage`Private`")
+  that the symbol is defined in.
+  *)
+  symbolContext = GetSymbolContext[tokenSymbol];
 
   (* 
   Get all the usage messages that are defined in the file 
@@ -526,7 +534,8 @@ Module[{tokenSymbol, functionSource,
       "Usage" -> None,
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> None,
-      "FunctionInformation" -> False
+      "FunctionInformation" -> False,
+      "Context" -> symbolContext
     |>
     ,
     If[Length[functionCallPatternCST] == 0,
@@ -548,7 +557,8 @@ Module[{tokenSymbol, functionSource,
       "Usage" -> requiredUsage,
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> functionCallPattern,
-      "FunctionInformation" -> True
+      "FunctionInformation" -> True,
+      "Context" -> symbolContext
     |>
   ];
 
@@ -565,7 +575,8 @@ Module[{usage, documentationLink, sym},
       "Usage" -> "INVALID",
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> None,
-      "FunctionInformation" -> False
+      "FunctionInformation" -> False,
+      "Context" -> None
     |>]
   ];
 
@@ -579,7 +590,8 @@ Module[{usage, documentationLink, sym},
       "Usage" -> "INVALID",
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> None,
-      "FunctionInformation" -> False
+      "FunctionInformation" -> False,
+      "Context" -> None
     |>]
   ];
 
@@ -614,7 +626,8 @@ Module[{usage, documentationLink, sym},
     "Usage" -> usage,
     "DocumentationLink" -> documentationLink,
     "FunctionDefinitionPatterns" -> None,
-    "FunctionInformation" -> True
+    "FunctionInformation" -> True,
+    "Context" -> "System`"
   |>
 ]]
 
@@ -623,6 +636,164 @@ Module[{usage, documentationLink, sym},
 Handle symbols from external loaded packages (dependencies).
 Tries to get usage message from the loaded package.
 *)
+(*
+Handle symbols defined in other workspace files (cross-file hover).
+Uses the PacletIndex to find definitions and usage messages, then reads
+the definition file to extract function call patterns.
+*)
+handleCrossFileSymbols[symIn_] :=
+Catch[
+Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
+  defText, defAST, defCST, fileEntry, defFilePath,
+  functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,
+  functionCallPatternCST, functionSource, functionCallPattern},
+  
+  (* Strip explicit context prefix if present to get the bare name *)
+  tokenSymbol = If[StringContainsQ[symIn, "`"],
+    Last[StringSplit[symIn, "`"]],
+    symIn
+  ];
+  
+  (* Look up symbol in PacletIndex *)
+  symData = Lookup[$PacletIndex, "Symbols", <||>];
+  symData = Lookup[symData, tokenSymbol, Null];
+  
+  If[symData === Null,
+    Throw[<|
+      "SymbolType" -> "INVALID",
+      "Usage" -> "INVALID",
+      "DocumentationLink" -> None,
+      "FunctionDefinitionPatterns" -> None,
+      "FunctionInformation" -> False,
+      "Context" -> None
+    |>]
+  ];
+  
+  defs = Replace[symData["Definitions"], _Missing -> {}];
+  usages = Replace[symData["Usages"], _Missing -> {}];
+  
+  If[Length[defs] === 0,
+    Throw[<|
+      "SymbolType" -> "INVALID",
+      "Usage" -> "INVALID",
+      "DocumentationLink" -> None,
+      "FunctionDefinitionPatterns" -> None,
+      "FunctionInformation" -> False,
+      "Context" -> None
+    |>]
+  ];
+  
+  (* Get basic info from the first definition *)
+  context = Replace[defs[[1]]["context"], _Missing -> None];
+  kind = Replace[defs[[1]]["kind"], _Missing -> "unknown"];
+  defUri = defs[[1]]["uri"];
+  
+  (* Get usage message if available *)
+  usage = If[Length[usages] > 0,
+    StringRiffle[usages, "\n"],
+    None
+  ];
+  
+  (*
+  Extract function definition patterns from the definition file.
+  Try the open file cache first, then read from disk.
+  *)
+  functionCallPattern = None;
+  
+  If[kind === "function" || kind === "declaration",
+    
+    (* Try to get the file - check if it's currently open first *)
+    fileEntry = Lookup[$OpenFilesMap, defUri, Null];
+    
+    If[fileEntry =!= Null,
+      (* File is open - use its cached AST and CST *)
+      defAST = fileEntry["AST"];
+      defCST = Lookup[fileEntry, "CSTTabs", Null];
+      If[defCST === Null,
+        defText = fileEntry["Text"];
+        defCST = Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]]
+      ],
+      
+      (* File is not open - read from disk *)
+      defFilePath = StringReplace[defUri, "file://" -> ""];
+      defText = Quiet[Import[defFilePath, "Text"]];
+      If[StringQ[defText],
+        defCST = Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]];
+        defAST = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[
+          Quiet[CodeConcreteParse[defText]]
+        ]]],
+        (* File not readable *)
+        defCST = Null;
+        defAST = Null
+      ]
+    ];
+    
+    If[defAST =!= Null && !FailureQ[defAST] && defCST =!= Null && !FailureQ[defCST],
+      (* Extract function call patterns - same approach as handleUserSymbols *)
+      functionCallPatternAST1 = Cases[defAST, CallNode[
+        LeafNode[Symbol, "Set" | "SetDelayed" | "UpSet" | "UpSetDelayed", _],
+        {
+          lhs:CallNode[_, _, _],
+          rhs:_
+        },
+        KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
+        ] :> lhs, 8
+      ];
+      
+      (* Also try TagSetDelayed *)
+      functionCallPatternAST2 = Cases[defAST, CallNode[
+        LeafNode[Symbol, "TagSet" | "TagSetDelayed", _],
+        {
+          LeafNode[Symbol, tokenSymbol, _], 
+          lhs:CallNode[_, _, _], 
+          rhs:_
+        },
+        KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
+        ] :> lhs, 8
+      ];
+      
+      functionCallPatternAST = Join[functionCallPatternAST1, functionCallPatternAST2];
+      
+      (* Remove usage message LHS from patterns *)
+      functionCallPatternAST = DeleteCases[functionCallPatternAST, $messageNamePattern];
+      
+      If[Length[functionCallPatternAST] > 0,
+        functionSource = #[[3, Key[Source]]]& /@ functionCallPatternAST;
+        functionCallPatternCST = FirstCase[defCST, _[_, _, KeyValuePattern[Source -> #]], $Failed, 6]& /@ functionSource;
+        functionCallPatternCST = DeleteCases[functionCallPatternCST, $Failed];
+        
+        If[Length[functionCallPatternCST] > 0,
+          functionCallPattern = CodeFormatCST /@ functionCallPatternCST;
+          functionCallPattern = DeleteDuplicates[functionCallPattern];
+          functionCallPattern = StringRiffle[functionCallPattern, "\n"]
+        ]
+      ]
+    ]
+  ];
+  
+  (* Build the result *)
+  If[!StringQ[usage] && !StringQ[functionCallPattern],
+    (* No info at all - but we know it exists, show basic info *)
+    <|
+      "SymbolType" -> "CrossFile",
+      "Usage" -> "Defined in workspace (" <> kind <> ")",
+      "DocumentationLink" -> None,
+      "FunctionDefinitionPatterns" -> None,
+      "FunctionInformation" -> True,
+      "Context" -> context
+    |>,
+    <|
+      "SymbolType" -> "CrossFile",
+      "Usage" -> If[StringQ[usage], usage, "No usage message."],
+      "DocumentationLink" -> None,
+      "FunctionDefinitionPatterns" -> functionCallPattern,
+      "FunctionInformation" -> True,
+      "Context" -> context
+    |>
+  ]
+]]
+
+
 handleExternalSymbols[symIn_] :=
 Catch[
 Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentationLink,
@@ -645,7 +816,8 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
         "Usage" -> "INVALID",
         "DocumentationLink" -> None,
         "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False
+        "FunctionInformation" -> False,
+        "Context" -> None
       |>]
     ],
     
@@ -689,7 +861,8 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
         "Usage" -> "INVALID",
         "DocumentationLink" -> None,
         "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False
+        "FunctionInformation" -> False,
+        "Context" -> None
       |>]
     ];
     fullSymbol = symContext <> bareSymbol;
@@ -701,7 +874,8 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
         "Usage" -> "INVALID",
         "DocumentationLink" -> None,
         "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False
+        "FunctionInformation" -> False,
+        "Context" -> None
       |>]
     ];
     
@@ -712,7 +886,8 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
         "Usage" -> "INVALID",
         "DocumentationLink" -> None,
         "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False
+        "FunctionInformation" -> False,
+        "Context" -> None
       |>]
     ]
   ];
@@ -787,7 +962,8 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
       StringRiffle[defPatterns, "\n"], 
       None
     ],
-    "FunctionInformation" -> True
+    "FunctionInformation" -> True,
+    "Context" -> symContext
   |>
 ]]
 
@@ -826,7 +1002,17 @@ Module[{lines, result, syms, functionInformationAssoc},
       functionInformationAssoc = handleUserSymbols[astIn, cstIn, symsIn];
     ];
     (*
-    If user symbol information is not available, try to find external package symbol information
+    If user symbol information is not available (INVALID or no function info found),
+    try cross-file hover via PacletIndex.
+    handleUserSymbols returns "UserDefined" with FunctionInformation->False when
+    no definitions or usage messages are found in the current file.
+    *)
+    If[functionInformationAssoc["SymbolType"] == "INVALID" || 
+       (functionInformationAssoc["SymbolType"] == "UserDefined" && !TrueQ[functionInformationAssoc["FunctionInformation"]]),
+      functionInformationAssoc = handleCrossFileSymbols[sym];
+    ];
+    (*
+    If cross-file information is not available, try to find external package symbol information
     *)
     If[functionInformationAssoc["SymbolType"] == "INVALID",
       functionInformationAssoc = handleExternalSymbols[sym];
@@ -906,16 +1092,48 @@ Module[{},
 ]
 
 formatUsageCallPatterns[assoc_] := 
-Module[{res, parts},
+Module[{res, parts, contextLine},
+  
+  (* Build context line if available *)
+  contextLine = If[StringQ[Lookup[assoc, "Context", None]],
+    "`" <> assoc["Context"] <> "`",
+    None
+  ];
+  
   If[Not[TrueQ[assoc["FunctionInformation"]]],
     res = "No function information."
     ,
     Switch[assoc["SymbolType"],
       "System",
-        res = StringJoin[{assoc["Usage"], "\n\n_", assoc["DocumentationLink"] <> "_"}],
+        parts = {};
+        If[StringQ[contextLine], AppendTo[parts, contextLine]];
+        AppendTo[parts, StringJoin[{assoc["Usage"]}]];
+        AppendTo[parts, "_" <> assoc["DocumentationLink"] <> "_"];
+        res = StringRiffle[parts, "\n\n"],
+      "CrossFile",
+        (* Cross-file workspace symbols - show context, usage, and definition patterns *)
+        parts = {};
+        If[StringQ[contextLine], AppendTo[parts, contextLine]];
+        
+        (* Usage messages from PacletIndex are plain text, use linearToMDSyntax *)
+        If[StringQ[assoc["Usage"]],
+          AppendTo[parts, "**Usage**"];
+          AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]]
+        ];
+        
+        (* Add function definition patterns if available *)
+        If[assoc["FunctionDefinitionPatterns"] =!= None,
+          AppendTo[parts, "**Function Definition Patterns**"];
+          AppendTo[parts, StringJoin[linearToMDSyntax[assoc["FunctionDefinitionPatterns"]]]]
+        ];
+        
+        res = StringRiffle[parts, "\n\n"],
       "External",
-        (* External package symbols - show usage, definition patterns, and documentation link *)
-        parts = {"**Usage**", StringJoin[linearToMDSyntax[assoc["Usage"]]]};
+        (* External package symbols - show context, usage, definition patterns, and documentation link *)
+        parts = {};
+        If[StringQ[contextLine], AppendTo[parts, contextLine]];
+        AppendTo[parts, "**Usage**"];
+        AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]];
         
         (* Add definition patterns if available *)
         If[assoc["FunctionDefinitionPatterns"] =!= None,
@@ -931,13 +1149,13 @@ Module[{res, parts},
         res = StringRiffle[parts, "\n\n"],
       _,
         (* UserDefined symbols *)
-        res = StringRiffle[{
-          "**Usage**", 
-          StringJoin[linearToMDSyntax[assoc["Usage"]]], 
-          "**Function Definition Patterns**", 
-          StringJoin[linearToMDSyntax[assoc["FunctionDefinitionPatterns"]]]
-          }, 
-          "\n\n"]
+        parts = {};
+        If[StringQ[contextLine], AppendTo[parts, contextLine]];
+        AppendTo[parts, "**Usage**"];
+        AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]];
+        AppendTo[parts, "**Function Definition Patterns**"];
+        AppendTo[parts, StringJoin[linearToMDSyntax[assoc["FunctionDefinitionPatterns"]]]];
+        res = StringRiffle[parts, "\n\n"]
     ];
   ];
 

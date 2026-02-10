@@ -97,6 +97,7 @@ set(STATIC_WL_PACLET_KERNEL_SOURCES
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/FoldingRange.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Formatting.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Hover.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/IgnorePatterns.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/ImplicitTokens.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/InlayHints.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Library.wl
