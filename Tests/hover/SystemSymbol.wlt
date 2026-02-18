@@ -15,7 +15,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 1, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "`System``\n\nSin[*z*] gives the sine of *z*. \n\n_[Sin: Web Documentation](https://reference.wolfram.com/language/ref/Sin.html)_"
+        "value" -> "`` System` ``\n\nSin[*z*] gives the sine of *z*. \n\n_[Sin: Web Documentation](https://reference.wolfram.com/language/ref/Sin.html)_"
         |>
       |>
     |>
@@ -36,7 +36,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 2, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "`System``\n\nCos[*z*] gives the cosine of *z*. \n\n_[Cos: Web Documentation](https://reference.wolfram.com/language/ref/Cos.html)_"
+        "value" -> "`` System` ``\n\nCos[*z*] gives the cosine of *z*. \n\n_[Cos: Web Documentation](https://reference.wolfram.com/language/ref/Cos.html)_"
         |>
       |>
     |>
@@ -55,7 +55,7 @@ VerificationTest[
     |>];
     value = result[[1]]["result"]["contents"]["value"];
     (* Verify the context line and key parts of the usage are present *)
-    StringStartsQ[value, "`System``\n\nExternalEvaluate"] &&
+    StringStartsQ[value, "`` System` ``\n\nExternalEvaluate"] &&
     StringContainsQ[value, "EXPERIMENTAL"] &&
     StringContainsQ[value, "Web Documentation"]
   ]

@@ -402,6 +402,16 @@ Module[{id, params, doc, uri, entry, ast, cst, range, hints,
 
   id = content["id"];
 
+  (*
+  If inlay hints are disabled, return empty results immediately.
+  This handles the case where hints were toggled off after initialization
+  but the client still sends requests (e.g. because the capability was
+  advertised at startup).
+  *)
+  If[!TrueQ[$InlayHints],
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
+  ];
+
   If[Lookup[$CancelMap, id, False],
     $CancelMap[id] =.;
     If[$Debug2, log["canceled"]];

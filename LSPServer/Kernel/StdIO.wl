@@ -22,7 +22,7 @@ May return Null or a Failure object
 initializeLSPComm["StdIO"] :=
 Catch[
 Module[{startupError, res},
-  
+
   startupError = GetStartupError[];
 
   If[FailureQ[startupError],
@@ -45,8 +45,9 @@ Module[{startupError, res},
   Null
 ]]
 
-
 (* =================   Read Message   ======================= *)
+
+
 
 TryQueue["StdIO"] :=
 Catch[
@@ -80,7 +81,7 @@ Module[{bytes,
   Do[
 
     frontMessageSize = GetFrontMessageSize[];
-    
+
     If[frontMessageSize == 0,
 
       UnlockQueue[];
@@ -95,7 +96,7 @@ Module[{bytes,
     bytes = PopQueue[frontMessageSize];
 
     AppendTo[bytessIn, bytes]
-    , 
+    ,
     queueSize
   ];
 
@@ -110,7 +111,7 @@ Module[{bytes,
       log["\n\n"];
       log["invalid bytes from stdin: ", bytesIn];
       log["\n\n"];
-      
+
       exitHard[]
     ];
 
@@ -214,7 +215,7 @@ Module[{str, bytes, res},
       ,
       {line, {"Content-Length: " <> ToString[Length[bytes]], ""}}
     ]; (* Do line *)
-    
+
     (*
     Write the body
     *)
@@ -231,7 +232,7 @@ Module[{str, bytes, res},
       exitHard[]
     ]
     ,
-    {content, contents} 
+    {content, contents}
   ] (* Do content *)
 ]
 
@@ -288,7 +289,7 @@ Module[{errStr, ferror, eof},
 ]
 
 
-readEvalWriteLoop["StdIO", sock_]:= 
+readEvalWriteLoop["StdIO", sock_]:=
 Module[{content, contents},
 
   (*

@@ -27,7 +27,8 @@ $SemanticTokenTypes = <|
   "type" -> 5,            (* System symbols *)
   "property" -> 6,        (* Options *)
   "comment" -> 7,         (* Undefined/unknown symbols *)
-  "string" -> 8           (* Reserved *)
+  "string" -> 8,          (* Reserved *)
+  "deprecated" -> 9       (* Experimental/obsolete symbols *)
 |>
 
 $SemanticTokenModifiers = <|
@@ -60,11 +61,31 @@ $systemOptionsSet := $systemOptionsSet = Association[Thread[
   WolframLanguageSyntax`Generate`$options -> True
 ]]
 
+$experimentalSymbolsSet := $experimentalSymbolsSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$experimentalSymbols -> True
+]]
+
+$obsoleteSymbolsSet := $obsoleteSymbolsSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$obsoleteSymbols -> True
+]]
+
+$undocumentedSymbolsSet := $undocumentedSymbolsSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$undocumentedSymbols -> True
+]]
+
+$sessionSymbolsSet := $sessionSymbolsSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$sessionSymbols -> True
+]]
+
+$badSymbolsSet := $badSymbolsSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$badSymbols -> True
+]]
+
 (*
 Check if a symbol is defined in the paclet
 *)
-isPacletSymbol[name_String] := 
-  KeyExistsQ[$PacletIndex["Symbols"], name] && 
+isPacletSymbol[name_String] :=
+  KeyExistsQ[$PacletIndex["Symbols"], name] &&
   Length[$PacletIndex["Symbols", name, "Definitions"]] > 0
 
 (*
@@ -83,42 +104,88 @@ Check if a symbol is an option
 isSystemOption[name_String] := KeyExistsQ[$systemOptionsSet, name]
 
 (*
+Check if a symbol is experimental (valid System` symbol but not yet stable)
+*)
+isExperimentalSymbol[name_String] := KeyExistsQ[$experimentalSymbolsSet, name]
+
+(*
+Check if a symbol is obsolete/deprecated
+*)
+isObsoleteSymbol[name_String] := KeyExistsQ[$obsoleteSymbolsSet, name]
+
+(*
+Check if a symbol is undocumented (exists in System` but has no public docs)
+*)
+isUndocumentedSymbol[name_String] := KeyExistsQ[$undocumentedSymbolsSet, name]
+
+(*
+Check if a symbol is a session symbol (Echo, Print, In, Out, etc.)
+*)
+isSessionSymbol[name_String] := KeyExistsQ[$sessionSymbolsSet, name]
+
+(*
+Check if a symbol is a commonly confused / "bad" symbol name
+*)
+isBadSymbol[name_String] := KeyExistsQ[$badSymbolsSet, name]
+
+(*
 Check if a symbol is from an external loaded dependency package.
 This checks the actual Context[] of the symbol at runtime.
-Works for both bare symbols (e.g., "OpenSQLConnection") and 
+Works for both bare symbols (e.g., "OpenSQLConnection") and
 explicitly contexted symbols (e.g., "DatabaseLink`OpenSQLConnection").
+
+Performance: This is called for every non-system symbol during semantic token
+classification. The dependency list and set are cached to avoid repeated lookups.
 *)
-isExternalDependencySymbol[name_String] :=
-Module[{symContext, deps, bareSymbol, explicitContext},
-  
-  (* Get dependency contexts *)
+
+(* Cached dependency set — invalidated when $PacletIndex changes.
+   We store the list length as a cheap staleness check. *)
+$depsCacheLen = -1;
+$depsSet = <||>;
+$depsList = {};
+
+refreshDepsCache[] :=
+Module[{deps},
   deps = GetDependencyContexts[];
-  
-  If[Length[deps] == 0,
+  If[Length[deps] =!= $depsCacheLen,
+    $depsCacheLen = Length[deps];
+    $depsList = deps;
+    $depsSet = Association[Thread[deps -> True]]
+  ]
+]
+
+isExternalDependencySymbol[name_String] :=
+Module[{symContext, explicitContext},
+
+  refreshDepsCache[];
+
+  If[$depsCacheLen == 0,
     Return[False]
   ];
-  
+
   (* Check if symbol has explicit context *)
   If[StringContainsQ[name, "`"],
     (* Extract the context from the explicit name *)
     explicitContext = StringJoin[Riffle[Most[StringSplit[name, "`"]], "`"]] <> "`";
-    
-    (* Check if explicit context is a dependency *)
-    Return[AnyTrue[deps, StringStartsQ[explicitContext, #] || explicitContext === # &]]
+
+    (* Fast exact match first, then substring check *)
+    Return[KeyExistsQ[$depsSet, explicitContext] || 
+           AnyTrue[$depsList, StringStartsQ[explicitContext, #] &]]
   ];
-  
+
   (* For bare symbols, try to get the symbol's context at runtime *)
   symContext = Quiet[
     Check[Context[name], None, {Context::notfound}],
     {Context::notfound}
   ];
-  
+
   If[!StringQ[symContext] || symContext === "Global`" || symContext === "System`",
     Return[False]
   ];
-  
-  (* Check if symbol's context is a dependency *)
-  AnyTrue[deps, StringStartsQ[symContext, #] || symContext === # &]
+
+  (* Fast exact match first, then substring check *)
+  KeyExistsQ[$depsSet, symContext] || 
+  AnyTrue[$depsList, StringStartsQ[symContext, #] &]
 ]
 
 (*
@@ -132,7 +199,7 @@ Module[{bareSymbol},
     Last[StringSplit[name, "`"]],
     name
   ];
-  
+
   Which[
     (* Check system symbols using bare name *)
     isSystemConstant[bareSymbol],
@@ -151,6 +218,26 @@ Module[{bareSymbol},
     (* Check if symbol is from an external dependency package *)
     isExternalDependencySymbol[name],
       {"class", {"definition", "defaultLibrary"}}
+    ,
+    (* Experimental symbols - valid System` symbols but not yet stable *)
+    isExperimentalSymbol[bareSymbol],
+      {"deprecated", {"defaultLibrary"}}
+    ,
+    (* Obsolete/deprecated symbols *)
+    isObsoleteSymbol[bareSymbol],
+      {"deprecated", {"readonly"}}
+    ,
+    (* Session symbols (Echo, Print, In, Out, etc.) - real system functions *)
+    isSessionSymbol[bareSymbol],
+      {"function", {"readonly", "defaultLibrary"}}
+    ,
+    (* Undocumented symbols - exist in System` but have no public docs *)
+    isUndocumentedSymbol[bareSymbol],
+      {"type", {"defaultLibrary"}}
+    ,
+    (* Bad/commonly confused symbol names - likely a mistake *)
+    isBadSymbol[bareSymbol],
+      {"comment", {"error"}}
     ,
     (* Check if it's a context (ends with `) *)
     StringEndsQ[name, "`"],
@@ -177,7 +264,7 @@ Module[{params, id, doc, uri},
 
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
@@ -185,7 +272,7 @@ Module[{params, id, doc, uri},
     If[$Debug2,
       log["canceled"]
     ];
-    
+
     Throw[{<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -193,7 +280,7 @@ Module[{params, id, doc, uri},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     If[$Debug2,
       log["stale"]
     ];
@@ -229,16 +316,16 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
     If[$Debug2,
       log["canceled"]
     ];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -247,7 +334,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -275,7 +362,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   localTokens =
     Function[{source, scope, modifiers},
       {#[[1, 1]], #[[1, 2]], #[[2, 2]] - #[[1, 2]],
-        
+
         $SemanticTokenTypes[
           Switch[scope,
             {___, "Module" | "Block" | "DynamicModule" | "Internal`InheritedBlock"},
@@ -291,7 +378,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
               "parameter"
           ]
         ],
-        
+
         BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers ~Join~ (
             Replace[scope,
               {
@@ -311,7 +398,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   Only if we have CST available
   *)
   globalSymbolTokens = {};
-  
+
   If[cst =!= Null && !FailureQ[cst],
     (*
     Get all symbol sources that are already covered by local scoping
@@ -323,7 +410,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
         {data, scopingData}
       ]
     ];
-    
+
     (*
     Find all symbols in the CST that aren't in local scope
     *)
@@ -331,7 +418,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
       LeafNode[Symbol, name_String, KeyValuePattern[Source -> src_]] :> {name, src},
       Infinity
     ];
-    
+
     (*
     Filter to symbols not in local scoping data and classify them
     *)
@@ -339,7 +426,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
       Module[{name, src, tokenType, modifiers, classification, startPos},
         {name, src} = sym;
         startPos = {src[[1, 1]], src[[1, 2]]};
-        
+
         (*
         Skip if this source position is already covered by local scoping
         *)
@@ -352,7 +439,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
           classification = classifyGlobalSymbol[name];
           tokenType = classification[[1]];
           modifiers = classification[[2]];
-          
+
           (*
           Create token: {line, char, length, tokenType, modifierBits}
           Convert to 0-based
@@ -371,7 +458,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
       ],
       {sym, allSymbols}
     ];
-    
+
     (*
     Remove Nothing entries
     *)
@@ -402,7 +489,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   transformed = Flatten[transformed];
 
   semanticTokens = transformed;
-  
+
   entry["SemanticTokens"] = semanticTokens;
 
   $OpenFilesMap[uri] = entry;
@@ -424,7 +511,7 @@ Module[{params, doc, uri, entry, ast, scopingData},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -433,11 +520,11 @@ Module[{params, doc, uri, entry, ast, scopingData},
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
+
   scopingData = Lookup[entry, "ScopingData", Null];
 
   If[scopingData =!= Null,
@@ -453,7 +540,7 @@ Module[{params, doc, uri, entry, ast, scopingData},
   If[$Debug2,
     log["before ScopingData"]
   ];
-  
+
   scopingData = ScopingData[ast];
 
   If[$Debug2,
