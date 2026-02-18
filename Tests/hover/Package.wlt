@@ -11,7 +11,7 @@ VerificationTest[
         "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 25, "character" -> 2|>|>
     |>];
     value = result[[1]]["result"]["contents"]["value"];
-    StringStartsQ[value, "`System``\n\nPlot["] &&
+    StringStartsQ[value, "`` System` ``\n\nPlot["] &&
     StringContainsQ[value, "Web Documentation"]
   ]
   ,
@@ -33,7 +33,7 @@ VerificationTest[
       "jsonrpc" -> "2.0", "id" -> 2, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nUsage message of testFunction.\n\n**Function Definition Patterns**\n\ntestFunction[a\\_][b\\_]\n\n"
+        "value" -> "Usage message of testFunction.\n\n**Definitions**\n\n```wolfram\ntestFunction[a_][b_]\n```"
         |>
       |>
     |>
@@ -57,7 +57,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 3, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nUsage message of testFunction.\n\n**Function Definition Patterns**\n\ntestFunction[a\\_][b\\_]\n\n"
+        "value" -> "Usage message of testFunction.\n\n**Definitions**\n\n```wolfram\ntestFunction[a_][b_]\n```"
         |>
       |>
     |>
@@ -78,7 +78,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 4, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nFirst usage message of multiUsageFunction.\n\nSecond usage message of multiUsageFunction.\n\n**Function Definition Patterns**\n\nmultiUsageFunction[x\\_]\n\n"
+        "value" -> "First usage message of multiUsageFunction.\n\nSecond usage message of multiUsageFunction.\n\n**Definitions**\n\n```wolfram\nmultiUsageFunction[x_]\n```"
         |>
       |>
     |>
@@ -99,7 +99,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 5, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nNo usage message.\n\n**Function Definition Patterns**\n\nfoo[]\n\n"
+        "value" -> "**Definitions**\n\n```wolfram\nfoo[]\n```"
         |>
       |>
     |>
@@ -120,7 +120,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 6, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nNo usage message.\n\n**Function Definition Patterns**\n\nf[g[x\\_]]\n\n"
+        "value" -> "**Definitions**\n\n```wolfram\nf[g[x_]]\n```"
         |>
       |>
     |>

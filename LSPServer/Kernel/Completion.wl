@@ -162,6 +162,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
         StringTake[linesDbg[[line]], char - 1], "OUT_OF_BOUNDS"];
       WriteString[debugStream, 
         "--- completion ---\n" <>
+        "uri=" <> ToString[uri] <> "\n" <>
         "line=" <> ToString[line] <> " char=" <> ToString[char] <> 
         " cst=" <> If[cst === Null, "Null", "ok"] <>
         " before=" <> ToString[InputForm[beforeCursorDbg]] <>
@@ -454,8 +455,7 @@ Module[{contexts, kernelContexts, matching, completions},
   This dynamically discovers all available contexts (Internal`, Developer`,
   Compile`, JLink`, etc.) instead of relying on a hardcoded list.
   *)
-  kernelContexts = Quiet[Contexts[], {Contexts::argx}];
-  If[!ListQ[kernelContexts], kernelContexts = {"System`", "Global`", "Developer`", "Internal`"}];
+  kernelContexts = GetKernelContextsCached[];
   
   contexts = DeleteDuplicates[Join[contexts, kernelContexts]];
   
@@ -508,8 +508,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
   Check if this context is known to the kernel.
   Only provide completions for contexts that actually exist.
   *)
-  contexts = Quiet[Contexts[], {Contexts::argx}];
-  If[!ListQ[contexts], Return[{}]];
+  contexts = GetKernelContextsCached[];
   
   If[!MemberQ[contexts, ctxPart],
     Return[{}]
@@ -1423,10 +1422,12 @@ getTopLevelKeys[structure_Association] :=
 (*
 Extract all association keys defined in the file
 Returns: <| "variableName" -> <| "key1" -> <| "_children" -> ... |>, ... |>, ... |>
-The structure is hierarchical to support nested associations
+The structure is hierarchical to support nested associations.
+Also tracks mutations: Part assignment (assoc["key"] = val, assoc[["key"]] = val),
+AppendTo, PrependTo, AssociateTo, and functional patterns (var = Append[var, ...], etc.)
 *)
 extractAssociationKeys[cst_, text_String] :=
-Module[{result, assignments, textKeys},
+Module[{result, assignments, textKeys, mutations},
   
   result = <||>;
   
@@ -1450,7 +1451,7 @@ Module[{result, assignments, textKeys},
   ];
   
   (*
-  Merge results
+  Merge results from direct assignments
   *)
   Do[
     If[assignment =!= None && assignment["variable"] =!= None,
@@ -1459,7 +1460,653 @@ Module[{result, assignments, textKeys},
     {assignment, assignments}
   ];
   
+  (*
+  Extract mutations that add/modify keys on existing variables:
+  - Part assignment: assoc["key"] = val, assoc[["key"]] = val
+  - AppendTo/PrependTo: AppendTo[list, <|...|>]
+  - AssociateTo: AssociateTo[assoc, "key" -> val]
+  - Functional set patterns: var = Append[var, ...], var = Join[var, ...], etc.
+  *)
+  mutations = extractMutationsFromCST[cst];
+  
+  (* Debug: log CST extraction results *)
+  Quiet[
+    Module[{ds},
+      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+      WriteString[ds, "--- extractAssociationKeys (CST path) ---\n"];
+      WriteString[ds, "directKeys=" <> ToString[Keys[result]] <> "\n"];
+      WriteString[ds, "cstMutationKeys=" <> ToString[Keys[mutations]] <> "\n"];
+      WriteString[ds, "cstMutations=" <> ToString[mutations] <> "\n"];
+      Close[ds];
+    ]
+  ];
+  
+  result = mergeStructures[result, mutations];
+  
   result
+]
+
+
+(*
+========================================
+Mutation Tracking - CST-based
+========================================
+
+Detect operations that mutate existing list/association variables and
+extract any new keys they introduce so that autocomplete stays current.
+*)
+
+(*
+Extract all mutation-introduced keys from the CST.
+Returns: <| "variableName" -> <| "key" -> <||>, ... |>, ... |>
+*)
+extractMutationsFromCST[cst_] :=
+Module[{result, partAssignments, mutatingCalls, functionalSets},
+  
+  result = <||>;
+  
+  (*
+  1. Part assignment: assoc["key"] = val  or  assoc[["key"]] = val
+     In the CST these are BinaryNode[Set, ...] where the LHS is a CallNode
+     (not a bare LeafNode[Symbol, ...]).
+  *)
+  partAssignments = Cases[cst,
+    BinaryNode[Set, children_List, _] :> 
+      extractPartAssignmentKeys[children],
+    Infinity
+  ];
+  
+  Do[
+    If[pa =!= None,
+      result = mergeIntoResult[result, pa["variable"], pa["keyPath"], pa["valueStructure"]]
+    ],
+    {pa, partAssignments}
+  ];
+  
+  (*
+  2. Mutating function calls: AppendTo, PrependTo, AssociateTo, KeyDropFrom
+     In the CST these are CallNode[{LeafNode[Symbol, funcName, _]}, GroupNode[GroupSquare, ...], ...]
+  *)
+  mutatingCalls = Cases[cst,
+    CallNode[{LeafNode[Symbol, funcName_String, _]}, 
+             GroupNode[GroupSquare, groupChildren_, _], _] /;
+      MemberQ[{"AppendTo", "PrependTo", "AssociateTo"}, funcName] :>
+      extractMutatingCallKeys[funcName, groupChildren],
+    Infinity
+  ];
+  
+  Do[
+    If[mc =!= None,
+      result = mergeIntoResult[result, mc["variable"], mc["keyPath"], mc["valueStructure"]]
+    ],
+    {mc, mutatingCalls}
+  ];
+  
+  (*
+  3. Functional set patterns: var = Append[var, ...], var = Prepend[var, ...],
+     var = Join[var, ...], var = Merge[var, ...], var = Association[var, ...]
+     In the CST these are BinaryNode[Set, ...] where the RHS is a CallNode
+     with a recognized function name and the first argument matches the LHS variable.
+  *)
+  functionalSets = Cases[cst,
+    BinaryNode[Set, children_List, _] :> 
+      extractFunctionalSetKeys[children],
+    Infinity
+  ];
+  
+  Do[
+    If[fs =!= None,
+      result = mergeIntoResult[result, fs["variable"], fs["keyPath"], fs["valueStructure"]]
+    ],
+    {fs, functionalSets}
+  ];
+  
+  result
+]
+
+
+(*
+Helper: get the significant (non-whitespace, non-operator) children from a CST children list.
+Returns only the semantically meaningful nodes.
+*)
+getSignificantChildren[children_List] :=
+  Select[children,
+    !MatchQ[#, LeafNode[Whitespace | Token`Newline | Token`Spaces | Token`Comment | 
+      Token`Equal | Token`ColonEqual | Token`OpenSquare | Token`CloseSquare |
+      Token`Comma | Token`OpenCurly | Token`CloseCurly |
+      Token`LessBar | Token`BarGreater, _, _]]&
+  ]
+
+
+(*
+Extract keys from Part assignment: assoc["key"] = val or assoc[["key"]] = val
+The children list is from BinaryNode[Set, children, _].
+
+Returns None if not a Part assignment pattern, or:
+  <| "variable" -> name, "keyPath" -> {key1, key2, ...}, "valueStructure" -> <| ... |> |>
+*)
+extractPartAssignmentKeys[children_List] :=
+Module[{sigChildren, lhs, rhs, varName, keyPath, valueStructure},
+  
+  sigChildren = getSignificantChildren[children];
+  If[Length[sigChildren] < 2, Return[None]];
+  
+  lhs = sigChildren[[1]];
+  rhs = sigChildren[[2]];
+  
+  (*
+  LHS must be a CallNode (function-call-like bracket access on a variable).
+  CST structure: CallNode[{LeafNode[Symbol, varName, _]}, GroupNode[GroupSquare, groupChildren, _], _]
+  This covers both assoc["key"] and assoc[["key"]] since both use GroupSquare in raw CST.
+  *)
+  If[!MatchQ[lhs, CallNode[_, _, _]], Return[None]];
+  
+  (*
+  Extract the variable name from the head of the CallNode.
+  May be nested for chained access: assoc["a"]["b"] = val
+  *)
+  {varName, keyPath} = extractCallChainVarAndKeys[lhs];
+  If[varName === None || Length[keyPath] == 0, Return[None]];
+  
+  (*
+  Extract structure from the RHS value if it's an association or list-of-associations.
+  Otherwise just record that these keys exist.
+  *)
+  valueStructure = extractValueStructure[rhs];
+  
+  <| "variable" -> varName, "keyPath" -> keyPath, "valueStructure" -> valueStructure |>
+]
+
+
+(*
+Recursively extract the base variable name and key path from a
+(possibly chained) CallNode representing bracket access.
+
+assoc["key1"]["key2"] in CST is:
+  CallNode[
+    {CallNode[{LeafNode[Symbol, "assoc", _]}, GroupNode[GroupSquare, [...,"key1",...], _], _]},
+    GroupNode[GroupSquare, [...,"key2",...], _], _]
+
+Returns: {varName, {key1, key2, ...}}
+*)
+extractCallChainVarAndKeys[node_] :=
+Module[{head, groupNode, keys, innerVar, innerKeys, thisKey},
+  
+  If[!MatchQ[node, CallNode[_, _, _]], Return[{None, {}}]];
+  
+  head = node[[1]]; (* List of head nodes *)
+  groupNode = node[[2]]; (* GroupNode with the bracket contents *)
+  
+  (* Extract the key(s) from this bracket group *)
+  thisKey = extractKeysFromGroup[groupNode];
+  
+  (* Check if the head is a simple variable or another CallNode (chained access) *)
+  If[MatchQ[head, {LeafNode[Symbol, varName_String, _]}],
+    (* Base case: simple variable *)
+    Return[{head[[1, 2]], thisKey}]
+  ];
+  
+  (* Check for chained access: head is {CallNode[...]} *)
+  If[MatchQ[head, {CallNode[_, _, _]}],
+    {innerVar, innerKeys} = extractCallChainVarAndKeys[head[[1]]];
+    Return[{innerVar, Join[innerKeys, thisKey]}]
+  ];
+  
+  {None, {}}
+]
+
+
+(*
+Extract keys from a GroupNode[GroupSquare, children, _] (bracket contents).
+Handles both single key and comma-separated keys.
+Returns a list of key strings/integers.
+*)
+extractKeysFromGroup[GroupNode[GroupSquare | GroupDoubleBracket, groupChildren_List, _]] :=
+Module[{sigChildren, commaChildren, keyNodes},
+  
+  (* Remove bracket tokens and whitespace *)
+  sigChildren = Select[groupChildren,
+    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | 
+      Token`LongName`LeftDoubleBracket | Token`LongName`RightDoubleBracket |
+      Whitespace | Token`Newline | Token`Spaces, _, _]]&
+  ];
+  
+  (* Check for comma-separated keys: InfixNode[Comma, ...] *)
+  commaChildren = Cases[sigChildren, InfixNode[Comma, c_, _] :> c, {1}];
+  
+  If[Length[commaChildren] > 0,
+    (* Multiple comma-separated keys *)
+    keyNodes = Select[commaChildren[[1]],
+      !MatchQ[#, LeafNode[Token`Comma | Whitespace | Token`Newline | Token`Spaces, _, _]]&
+    ];
+    extractSingleKey /@ keyNodes,
+    
+    (* Single key *)
+    Select[extractSingleKey /@ sigChildren, # =!= None &]
+  ]
+]
+
+extractKeysFromGroup[_] := {}
+
+
+(*
+Extract a single key value from a CST node.
+Returns the key as String, Integer, or symbol name, or None.
+*)
+extractSingleKey[LeafNode[String, val_String, _]] := StringTrim[val, "\""]
+extractSingleKey[LeafNode[Integer, val_String, _]] := FromDigits[val]
+extractSingleKey[LeafNode[Symbol, val_String, _]] := val
+extractSingleKey[_] := None
+
+
+(*
+Extract the hierarchical structure from a value node (RHS of assignment).
+If the value is an association, extract its keys hierarchically.
+If it's a list of associations, build a list structure.
+Otherwise return <||> (no nested structure).
+*)
+extractValueStructure[node_] :=
+Module[{assocChildren, listChildren},
+  
+  (* Check for direct association: <| ... |> *)
+  If[MatchQ[node, GroupNode[Association, _, _]],
+    Return[extractHierarchicalKeys[node[[2]]]]
+  ];
+  
+  (* Check for list: { ... } possibly containing associations *)
+  If[MatchQ[node, GroupNode[List, _, _]],
+    listChildren = node[[2]];
+    Return[extractListValueStructure[listChildren]]
+  ];
+  
+  (* Scalar or unknown value *)
+  <||>
+]
+
+
+(*
+Extract structure from list children, checking if they contain associations.
+*)
+extractListValueStructure[listChildren_List] :=
+Module[{assocNodes, commaNodes, commaAssocs, mergedKeys, elementKeys},
+  
+  assocNodes = Cases[listChildren, GroupNode[Association, ac_, _] :> ac, {1}];
+  
+  commaNodes = Cases[listChildren, InfixNode[Comma, c_, _] :> c, {1}];
+  If[Length[commaNodes] > 0,
+    commaAssocs = Cases[commaNodes[[1]], GroupNode[Association, ac_, _] :> ac, {1}];
+    assocNodes = Join[assocNodes, commaAssocs]
+  ];
+  
+  If[Length[assocNodes] > 0,
+    elementKeys = {};
+    mergedKeys = <||>;
+    Do[
+      Module[{keys},
+        keys = extractHierarchicalKeys[an];
+        AppendTo[elementKeys, keys];
+        Do[
+          If[!KeyExistsQ[mergedKeys, k],
+            mergedKeys[k] = keys[k],
+            If[KeyExistsQ[keys[k], "_children"] && KeyExistsQ[mergedKeys[k], "_children"],
+              mergedKeys[k] = <| "_children" -> 
+                Join[mergedKeys[k]["_children"], keys[k]["_children"]] |>,
+              If[KeyExistsQ[keys[k], "_children"],
+                mergedKeys[k] = keys[k]
+              ]
+            ]
+          ],
+          {k, Keys[keys]}
+        ]
+      ],
+      {an, assocNodes}
+    ];
+    <| "_isList" -> True, "_listLength" -> Length[assocNodes],
+       "_elements" -> elementKeys, "_children" -> mergedKeys |>,
+    
+    <||>
+  ]
+]
+
+
+(*
+Extract keys from mutating function calls: AppendTo, PrependTo, AssociateTo.
+groupChildren is the contents of the GroupNode[GroupSquare, ...] (the function arguments).
+
+AppendTo[var, value]        -> adds value's keys to var (if value is assoc)
+PrependTo[var, value]       -> adds value's keys to var (if value is assoc)
+AssociateTo[var, key -> val] -> adds key to var
+AssociateTo[var, {k1 -> v1, k2 -> v2}] -> adds k1, k2 to var
+
+Returns None or <| "variable" -> ..., "keyPath" -> {}, "valueStructure" -> <|...|> |>
+*)
+extractMutatingCallKeys[funcName_String, groupChildren_List] :=
+Module[{sigArgs, varName, valueNode, keyPath, valueStructure, rules},
+  
+  (* Extract significant children: remove brackets, commas, whitespace *)
+  sigArgs = Select[groupChildren,
+    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | Token`Comma | 
+      Whitespace | Token`Newline | Token`Spaces, _, _]]&
+  ];
+  
+  (* Also extract from InfixNode[Comma, ...] which wraps multi-argument calls *)
+  If[Length[sigArgs] == 1 && MatchQ[sigArgs[[1]], InfixNode[Comma, _, _]],
+    sigArgs = Select[sigArgs[[1, 2]],
+      !MatchQ[#, LeafNode[Token`Comma | Whitespace | Token`Newline | Token`Spaces, _, _]]&
+    ]
+  ];
+  
+  If[Length[sigArgs] < 2, Return[None]];
+  
+  (* First argument is the variable *)
+  If[!MatchQ[sigArgs[[1]], LeafNode[Symbol, _, _]], Return[None]];
+  varName = sigArgs[[1, 2]];
+  
+  valueNode = sigArgs[[2]];
+  
+  Switch[funcName,
+    "AppendTo" | "PrependTo",
+      (*
+      AppendTo[var, <|...|>] or AppendTo[var, scalarValue]
+      If value is an association, extract its keys.
+      The variable is treated as a list-of-associations if it already is one,
+      or gets new keys merged if it's a plain association.
+      *)
+      valueStructure = extractValueStructure[valueNode];
+      <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
+    
+    "AssociateTo",
+      (*
+      AssociateTo[var, "key" -> val]
+      AssociateTo[var, {"key1" -> val1, "key2" -> val2}]
+      AssociateTo[var, <| "key" -> val |>]
+      *)
+      valueStructure = extractAssociateToKeys[valueNode];
+      If[valueStructure === None, Return[None]];
+      <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
+    
+    _,
+      None
+  ]
+]
+
+
+(*
+Extract keys from the second argument of AssociateTo.
+Can be: "key" -> val, {"k1" -> v1, ...}, or <| "k" -> v |>
+Returns an association structure or None.
+*)
+extractAssociateToKeys[node_] :=
+Module[{rules, result},
+  
+  (* Single rule: "key" -> value *)
+  If[MatchQ[node, BinaryNode[Rule | RuleDelayed, _, _]],
+    result = <||>;
+    Module[{key, ruleChildren, valueNode, vs},
+      ruleChildren = node[[2]];
+      key = extractKeyFromRuleChildren[ruleChildren];
+      If[key =!= None,
+        (* Check if the value is a nested association *)
+        valueNode = Cases[ruleChildren, 
+          n_ /; MatchQ[n, GroupNode[Association, _, _] | GroupNode[List, _, _]], {1}];
+        If[Length[valueNode] > 0,
+          vs = extractValueStructure[valueNode[[1]]];
+          If[AssociationQ[vs] && Length[vs] > 0,
+            result[key] = <| "_children" -> vs |>,
+            result[key] = <||>
+          ],
+          result[key] = <||>
+        ]
+      ]
+    ];
+    Return[result]
+  ];
+  
+  (* Association literal: <| "key" -> val, ... |> *)
+  If[MatchQ[node, GroupNode[Association, _, _]],
+    Return[extractHierarchicalKeys[node[[2]]]]
+  ];
+  
+  (* List of rules: {"key1" -> val1, "key2" -> val2} *)
+  If[MatchQ[node, GroupNode[List, _, _]],
+    Module[{listChildren, ruleNodes, commaChildren},
+      listChildren = node[[2]];
+      
+      ruleNodes = Cases[listChildren,
+        BinaryNode[Rule | RuleDelayed, rc_, _] :> rc, {1}];
+      
+      commaChildren = Cases[listChildren, InfixNode[Comma, c_, _] :> c, {1}];
+      If[Length[commaChildren] > 0,
+        ruleNodes = Join[ruleNodes, Cases[commaChildren[[1]],
+          BinaryNode[Rule | RuleDelayed, rc_, _] :> rc, {1}]]
+      ];
+      
+      result = <||>;
+      Do[
+        Module[{key},
+          key = extractKeyFromRuleChildren[rc];
+          If[key =!= None,
+            result[key] = <||>
+          ]
+        ],
+        {rc, ruleNodes}
+      ];
+      If[Length[result] > 0, Return[result]]
+    ]
+  ];
+  
+  None
+]
+
+
+(*
+Extract keys from functional set patterns:
+  var = Append[var, value]
+  var = Prepend[var, value]
+  var = Join[var, otherList]
+  var = Merge[var, otherAssoc]
+  var = Association[var, key -> val]
+
+children is from BinaryNode[Set, children, _].
+Returns None or <| "variable" -> ..., "keyPath" -> {}, "valueStructure" -> <|...|> |>
+*)
+extractFunctionalSetKeys[children_List] :=
+Module[{sigChildren, lhs, rhs, varName, rhsHead, rhsGroupChildren,
+        rhsSigArgs, funcName, valueNode, valueStructure},
+  
+  sigChildren = getSignificantChildren[children];
+  If[Length[sigChildren] < 2, Return[None]];
+  
+  lhs = sigChildren[[1]];
+  rhs = sigChildren[[2]];
+  
+  (* LHS must be a simple variable (not a CallNode like Part assignment) *)
+  If[!MatchQ[lhs, LeafNode[Symbol, _, _]], Return[None]];
+  varName = lhs[[2]];
+  
+  (* RHS must be a CallNode: funcName[args...] *)
+  If[!MatchQ[rhs, CallNode[_, _, _]], Return[None]];
+  
+  rhsHead = rhs[[1]];
+  If[!MatchQ[rhsHead, {LeafNode[Symbol, _, _]}], Return[None]];
+  funcName = rhsHead[[1, 2]];
+  
+  If[!MemberQ[{"Append", "Prepend", "Join", "Merge", "Association"}, funcName],
+    Return[None]
+  ];
+  
+  (* Extract the arguments from the GroupNode *)
+  rhsGroupChildren = rhs[[2]];
+  If[!MatchQ[rhsGroupChildren, GroupNode[GroupSquare, _, _]], Return[None]];
+  
+  rhsSigArgs = Select[rhsGroupChildren[[2]],
+    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | Token`Comma | 
+      Whitespace | Token`Newline | Token`Spaces, _, _]]&
+  ];
+  
+  (* Unwrap InfixNode[Comma, ...] if present *)
+  If[Length[rhsSigArgs] == 1 && MatchQ[rhsSigArgs[[1]], InfixNode[Comma, _, _]],
+    rhsSigArgs = Select[rhsSigArgs[[1, 2]],
+      !MatchQ[#, LeafNode[Token`Comma | Whitespace | Token`Newline | Token`Spaces, _, _]]&
+    ]
+  ];
+  
+  If[Length[rhsSigArgs] < 2, Return[None]];
+  
+  (* First argument should be the same variable name (self-reference) *)
+  If[!MatchQ[rhsSigArgs[[1]], LeafNode[Symbol, varName, _]], Return[None]];
+  
+  Switch[funcName,
+    "Append" | "Prepend",
+      (* var = Append[var, value] *)
+      valueNode = rhsSigArgs[[2]];
+      valueStructure = extractValueStructure[valueNode];
+      <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
+    
+    "Join",
+      (* var = Join[var, otherList] - extract keys from all remaining args *)
+      valueStructure = <||>;
+      Do[
+        Module[{vs},
+          vs = extractValueStructure[rhsSigArgs[[i]]];
+          valueStructure = mergeKeyStructure[valueStructure, vs]
+        ],
+        {i, 2, Length[rhsSigArgs]}
+      ];
+      <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
+    
+    "Merge" | "Association",
+      (* var = Merge[var, other] or var = Association[var, key -> val] *)
+      valueStructure = <||>;
+      Do[
+        Module[{vs},
+          vs = extractValueStructure[rhsSigArgs[[i]]];
+          valueStructure = mergeKeyStructure[valueStructure, vs]
+        ],
+        {i, 2, Length[rhsSigArgs]}
+      ];
+      <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
+    
+    _,
+      None
+  ]
+]
+
+
+(*
+Merge a single mutation result into the accumulated result association.
+Handles nested key paths (e.g., assoc["a"]["b"] = val adds "b" under "a").
+
+Returns: the modified result association (caller must capture the return value).
+
+result: the accumulated <| var -> structure |>
+variable: the variable name
+keyPath: list of keys for nested access (e.g., {"a", "b"})
+valueStructure: the structure to merge at the target location
+*)
+mergeIntoResult[result_Association, variable_String, keyPath_List, valueStructure_Association] :=
+Module[{merged = result, existing},
+  
+  existing = Lookup[merged, variable, <||>];
+  
+  If[Length[keyPath] == 0,
+    (* Top-level merge: merge valueStructure keys into existing *)
+    merged[variable] = mergeKeyStructure[existing, valueStructure];
+    merged
+    ,
+    (* For nested paths like assoc["a"]["b"] = val,
+       build the nested structure and merge it in *)
+    merged[variable] = mergeAtKeyPath[existing, keyPath, valueStructure];
+    merged
+  ]
+]
+
+(* No-op for None valueStructure — return result unchanged *)
+mergeIntoResult[result_Association, variable_String, keyPath_List, None] := result
+
+(*
+Recursively build/merge a value at a nested key path within a key structure.
+existing: current structure at this level
+keyPath: remaining keys to navigate
+valueStructure: the structure to place at the final key
+Returns: the updated structure
+*)
+mergeAtKeyPath[existing_Association, keyPath_List, valueStructure_Association] :=
+Module[{merged = existing, key, childrenNow, updatedChildren},
+  
+  key = First[keyPath];
+  
+  If[Length[keyPath] == 1,
+    (* Final key — merge valueStructure here *)
+    If[AssociationQ[valueStructure] && Length[valueStructure] > 0,
+      (* Value has nested structure *)
+      If[KeyExistsQ[merged, key] && AssociationQ[merged[key]] && KeyExistsQ[merged[key], "_children"],
+        merged[key] = <| "_children" -> mergeKeyStructure[merged[key]["_children"], valueStructure] |>,
+        merged[key] = <| "_children" -> valueStructure |>
+      ],
+      (* Scalar value - just ensure key exists *)
+      If[!KeyExistsQ[merged, key],
+        merged[key] = <||>
+      ]
+    ];
+    merged
+    ,
+    (* Intermediate key — recurse deeper *)
+    If[!KeyExistsQ[merged, key],
+      merged[key] = <| "_children" -> <||> |>
+    ];
+    If[!AssociationQ[merged[key]] || !KeyExistsQ[merged[key], "_children"],
+      merged[key] = <| "_children" -> <||> |>
+    ];
+    childrenNow = merged[key]["_children"];
+    updatedChildren = mergeAtKeyPath[childrenNow, Rest[keyPath], valueStructure];
+    merged[key] = <| "_children" -> updatedChildren |>;
+    merged
+  ]
+]
+
+(* Fallback for empty keyPath — just merge at top level *)
+mergeAtKeyPath[existing_Association, {}, valueStructure_Association] :=
+  mergeKeyStructure[existing, valueStructure]
+
+
+(*
+Merge two key structures together, combining _children recursively.
+*)
+mergeKeyStructure[existing_Association, new_Association] :=
+Module[{merged},
+  merged = existing;
+  Do[
+    If[!KeyExistsQ[merged, k],
+      merged[k] = new[k],
+      (* Both have this key - merge _children if present *)
+      If[KeyExistsQ[new[k], "_children"] && KeyExistsQ[merged[k], "_children"],
+        merged[k] = <| "_children" -> mergeKeyStructure[merged[k]["_children"], new[k]["_children"]] |>,
+        If[KeyExistsQ[new[k], "_children"],
+          merged[k] = new[k]
+        ]
+      ]
+    ],
+    {k, Keys[new]}
+  ];
+  merged
+]
+
+
+(*
+Merge two top-level result structures (variable -> keys mappings).
+*)
+mergeStructures[base_Association, additions_Association] :=
+Module[{merged},
+  merged = base;
+  Do[
+    If[KeyExistsQ[merged, var],
+      merged[var] = mergeKeyStructure[merged[var], additions[var]],
+      merged[var] = additions[var]
+    ],
+    {var, Keys[additions]}
+  ];
+  merged
 ]
 
 
@@ -1695,9 +2342,10 @@ Module[{firstNode},
 (*
 Text-based fallback for extracting association keys when CST is unavailable.
 Uses bracket-depth-aware parsing rather than regex to correctly handle nesting.
+Also detects mutation patterns: Part assignment, AppendTo, AssociateTo, etc.
 *)
 extractAssociationKeysFromText[text_String] :=
-Module[{result, chars, pos, len, varName},
+Module[{result, chars, pos, len, varName, mutations},
   
   result = <||>;
   chars = Characters[text];
@@ -1832,6 +2480,247 @@ Module[{result, chars, pos, len, varName},
           Continue[]
         ]
       ]
+    ]
+  ];
+  
+  (*
+  Also extract mutations from text: Part assignment, AppendTo, AssociateTo, etc.
+  *)
+  mutations = extractMutationsFromText[text];
+  
+  (* Debug: log text extraction results before merge *)
+  Quiet[
+    Module[{ds},
+      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+      WriteString[ds, "--- extractAssociationKeysFromText ---\n"];
+      WriteString[ds, "directKeys=" <> ToString[Keys[result]] <> "\n"];
+      WriteString[ds, "mutationKeys=" <> ToString[Keys[mutations]] <> "\n"];
+      Close[ds];
+    ]
+  ];
+  
+  result = mergeStructures[result, mutations];
+  
+  result
+]
+
+
+(*
+========================================
+Text-based Mutation Extraction
+========================================
+
+Detects mutation patterns in raw text when CST is not available.
+Covers: Part assignment, AppendTo, PrependTo, AssociateTo, and
+functional patterns (var = Append[var, ...], etc.)
+*)
+
+(*
+Extract mutation-introduced keys from raw text.
+Returns: <| "variable" -> <| "key" -> <||>, ... |>, ... |>
+*)
+extractMutationsFromText[text_String] :=
+Module[{result, partKeys, funcKeys},
+  
+  result = <||>;
+  
+  (* Debug: log that we entered extractMutationsFromText *)
+  Quiet[
+    Module[{ds},
+      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+      WriteString[ds, "--- extractMutationsFromText entered ---\n"];
+      WriteString[ds, "textLength=" <> ToString[StringLength[text]] <> "\n"];
+      Close[ds];
+    ]
+  ];
+  
+  (*
+  1. Part assignment: var["key"] = val  or  var[["key"]] = val
+     Regex: identifier followed by [ or [[ then "string" then ] or ]] then = (not ==)
+  *)
+  partKeys = StringCases[text,
+    RegularExpression["([a-zA-Z$][a-zA-Z0-9$]*)\\s*\\[\\[?\\s*\"([^\"]*)\"\\s*\\]\\]?\\s*=(?!=)"] :>
+      {"$1", "$2"}
+  ];
+  
+  Quiet[
+    Module[{ds},
+      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+      WriteString[ds, "partKeys=" <> ToString[partKeys] <> "\n"];
+      Close[ds];
+    ]
+  ];
+  
+  Do[
+    Module[{var, key},
+      var = pk[[1]];
+      key = pk[[2]];
+      If[!KeyExistsQ[result, var],
+        result[var] = <||>
+      ];
+      result[var][key] = <||>
+    ],
+    {pk, partKeys}
+  ];
+  
+  (*
+  2. AppendTo[var, <| ... |>] and PrependTo[var, <| ... |>]
+     Extract the variable name and any association keys from the value argument.
+  *)
+  Module[{appendMatches},
+    appendMatches = StringCases[text,
+      RegularExpression["(AppendTo|PrependTo)\\s*\\[\\s*([a-zA-Z$][a-zA-Z0-9$]*)\\s*,"] :>
+        {"$2"}
+    ];
+    
+    (* For each AppendTo/PrependTo, just register the variable exists.
+       The value might be an association — try to extract keys from following text. *)
+    Do[
+      Module[{var},
+        var = am[[1]];
+        If[!KeyExistsQ[result, var],
+          result[var] = <||>
+        ]
+      ],
+      {am, appendMatches}
+    ];
+    
+    (* More precise: find AppendTo[var, <| "key" -> val |>] *)
+    Module[{appendAssocMatches},
+      appendAssocMatches = StringCases[text,
+        RegularExpression["(?:AppendTo|PrependTo)\\s*\\[\\s*([a-zA-Z$][a-zA-Z0-9$]*)\\s*,\\s*<\\|([^|]*(?:\\|[^>][^|]*)*)\\|>"] :>
+          {"$1", "$2"}
+      ];
+      Do[
+        Module[{var, body, bodyKeys},
+          var = aam[[1]];
+          body = aam[[2]];
+          (* Parse simple "key" -> patterns from the body *)
+          bodyKeys = StringCases[body,
+            RegularExpression["\"([^\"]*)\"\\s*->"] :> "$1"
+          ];
+          If[!KeyExistsQ[result, var],
+            result[var] = <||>
+          ];
+          Do[
+            result[var][bk] = <||>,
+            {bk, bodyKeys}
+          ]
+        ],
+        {aam, appendAssocMatches}
+      ]
+    ]
+  ];
+  
+  (*
+  3. AssociateTo[var, "key" -> val] and AssociateTo[var, {"key1" -> v1, ...}]
+  *)
+  Module[{assocToMatches},
+    (* Simple single rule: AssociateTo[var, "key" -> val] *)
+    assocToMatches = StringCases[text,
+      RegularExpression["AssociateTo\\s*\\[\\s*([a-zA-Z$][a-zA-Z0-9$]*)\\s*,\\s*\"([^\"]*)\"\\s*->"] :>
+        {"$1", "$2"}
+    ];
+    Do[
+      Module[{var, key},
+        var = atm[[1]];
+        key = atm[[2]];
+        If[!KeyExistsQ[result, var],
+          result[var] = <||>
+        ];
+        result[var][key] = <||>
+      ],
+      {atm, assocToMatches}
+    ];
+    
+    (* AssociateTo with list of rules: AssociateTo[var, {"key1" -> ..., "key2" -> ...}] *)
+    Module[{assocToListMatches},
+      assocToListMatches = StringCases[text,
+        RegularExpression["AssociateTo\\s*\\[\\s*([a-zA-Z$][a-zA-Z0-9$]*)\\s*,\\s*\\{([^}]*)\\}"] :>
+          {"$1", "$2"}
+      ];
+      Do[
+        Module[{var, body, bodyKeys},
+          var = atlm[[1]];
+          body = atlm[[2]];
+          bodyKeys = StringCases[body,
+            RegularExpression["\"([^\"]*)\"\\s*->"] :> "$1"
+          ];
+          If[!KeyExistsQ[result, var],
+            result[var] = <||>
+          ];
+          Do[
+            result[var][bk] = <||>,
+            {bk, bodyKeys}
+          ]
+        ],
+        {atlm, assocToListMatches}
+      ]
+    ];
+    
+    (* AssociateTo with association literal: AssociateTo[var, <| "key" -> val |>] *)
+    Module[{assocToAssocMatches},
+      assocToAssocMatches = StringCases[text,
+        RegularExpression["AssociateTo\\s*\\[\\s*([a-zA-Z$][a-zA-Z0-9$]*)\\s*,\\s*<\\|([^|]*(?:\\|[^>][^|]*)*)\\|>"] :>
+          {"$1", "$2"}
+      ];
+      Do[
+        Module[{var, body, bodyKeys},
+          var = atam[[1]];
+          body = atam[[2]];
+          bodyKeys = StringCases[body,
+            RegularExpression["\"([^\"]*)\"\\s*->"] :> "$1"
+          ];
+          If[!KeyExistsQ[result, var],
+            result[var] = <||>
+          ];
+          Do[
+            result[var][bk] = <||>,
+            {bk, bodyKeys}
+          ]
+        ],
+        {atam, assocToAssocMatches}
+      ]
+    ]
+  ];
+  
+  (*
+  4. Functional set patterns: var = Append[var, ...], var = Prepend[var, ...],
+     var = Join[var, ...], var = Merge[var, ...]
+     We detect these and try to extract association keys from the value argument.
+  *)
+  Module[{funcSetMatches},
+    (* Match: var = Func[var, <| "key" -> val |>] *)
+    funcSetMatches = StringCases[text,
+      RegularExpression["([a-zA-Z$][a-zA-Z0-9$]*)\\s*=\\s*(?:Append|Prepend)\\s*\\[\\s*\\1\\s*,\\s*<\\|([^|]*(?:\\|[^>][^|]*)*)\\|>"] :>
+        {"$1", "$2"}
+    ];
+    Do[
+      Module[{var, body, bodyKeys},
+        var = fsm[[1]];
+        body = fsm[[2]];
+        bodyKeys = StringCases[body,
+          RegularExpression["\"([^\"]*)\"\\s*->"] :> "$1"
+        ];
+        If[!KeyExistsQ[result, var],
+          result[var] = <||>
+        ];
+        Do[
+          result[var][bk] = <||>,
+          {bk, bodyKeys}
+        ]
+      ],
+      {fsm, funcSetMatches}
+    ]
+  ];
+  
+  (* Debug: log final mutation result *)
+  Quiet[
+    Module[{ds},
+      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+      WriteString[ds, "mutationsFromText=" <> ToString[result] <> "\n"];
+      WriteString[ds, "--- extractMutationsFromText done ---\n"];
+      Close[ds];
     ]
   ];
   
@@ -2042,7 +2931,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
         ]
       ]
     ]
-    ];
+  ];
   
   result
 ]
@@ -2050,7 +2939,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
 
 (*
 ========================================
-End Association Key Completion
+End Association Key Completion + Mutation Tracking
 ========================================
 *)
 

@@ -75,6 +75,15 @@ $ConfidenceLevel
 $HierarchicalDocumentSymbolSupport
 
 (*
+$InlayHints controls whether inlay hints are enabled.
+
+Can be set via initializationOptions or workspace/didChangeConfiguration.
+When False, the server does not advertise inlay hint capability
+and returns empty results for inlay hint requests.
+*)
+$InlayHints
+
+(*
 $SemanticTokens is True if the client supports semantic tokens and the user has enabled them
 
 If $SemanticTokens is False, then diagnostics are used as a fallback to indicate scoping issues such as unused variables and shadowed variables
@@ -149,9 +158,8 @@ WolframLanguageSyntax`Generate`$options :=
 	WolframLanguageSyntax`Generate`$options =
 	EntityClass["WolframLanguageSymbol", "OptionName"]["Name"]
 
-WolframLanguageSyntax`Generate`$experimentalSymbols :=
-	WolframLanguageSyntax`Generate`$experimentalSymbols =
-	EntityClass["WolframLanguageSymbol", "Experimental"]["Name"]
+WolframLanguageSyntax`Generate`$experimentalSymbols =
+	Get[FileNameJoin[{location, "Resources", "Data", "ExperimentalSymbols.wl"}]]
 
 WolframLanguageSyntax`Generate`$constants =
 	Get[FileNameJoin[{location, "Resources", "Data", "Constants.wl"}]]
@@ -167,6 +175,12 @@ WolframLanguageSyntax`Generate`$builtinFunctions :=
 
 WolframLanguageSyntax`Generate`$obsoleteSymbols =
 	Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
+
+WolframLanguageSyntax`Generate`$sessionSymbols =
+	Get[FileNameJoin[{location, "Resources", "Data", "SessionSymbols.wl"}]]
+
+WolframLanguageSyntax`Generate`$badSymbols =
+	Get[FileNameJoin[{location, "Resources", "Data", "BadSymbols.wl"}]]
 
 WolframLanguageSyntax`Generate`$systemCharacters =
 	Get[FileNameJoin[{location, "Resources", "Data", "SystemCharacters.wl"}]]
@@ -229,6 +243,8 @@ $BracketMatcher = False
 $BracketMatcherUseDesignColors = True
 
 
+$InlayHints = True
+
 $SemanticTokens = False
 
 $HierarchicalDocumentSymbolSupport = False
@@ -249,6 +265,12 @@ $ML4CodeTimeLimit = 0.4
 
 $ExecuteCommandProvider = <|
   "commands" -> {
+    (*
+    Toggle inlay hints on/off at runtime.
+    When toggled, the server sends a workspace/inlayHint/refresh request
+    to notify the client to re-request hints.
+    *)
+    "toggle_inlay_hints",
     (*
     roundtrip_responsiveness_test is an undocumented, debug command
     *)
@@ -853,8 +875,8 @@ returns: a list of associations (possibly empty), each association represents JS
 handleContent[content:KeyValuePattern["method" -> "initialize"]] :=
 Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSupport, codeActionKind, valueSet,
   codeActionProviderValue, initializationOptions, implicitTokens,
-  bracketMatcher, debugBracketMatcher, clientName, semanticTokensProviderValue, semanticTokens, contents,
-  documentSymbol, hierarchicalDocumentSymbolSupport},
+  bracketMatcher, debugBracketMatcher, clientName, semanticTokensProviderValue, inlayHintProviderValue,
+  semanticTokens, contents, documentSymbol, hierarchicalDocumentSymbolSupport},
 
   log[1, "initialize: Enter"];
 
@@ -903,6 +925,9 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
 
         $SemanticTokens = semanticTokens
       ];
+      If[KeyExistsQ[initializationOptions, "inlayHints"],
+        $InlayHints = TrueQ[initializationOptions["inlayHints"]]
+      ];
     ];
 
   log[1, "initialize: Exit"];
@@ -923,11 +948,14 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
   ];
 
 
-  log[2, "$AllowedImplicitTokens: ", $AllowedImplicitTokens];
-  log[2, "$BracketMatcher: ", $BracketMatcher];
-  log[2, "$DebugBracketMatcher: ", $DebugBracketMatcher];
-  log[2, "$ConfidenceLevel: ", $ConfidenceLevel];
-  log[2, "$SemanticTokens: ", $SemanticTokens];
+  If[$Debug2,
+    log["$AllowedImplicitTokens: ", $AllowedImplicitTokens];
+    log["$BracketMatcher: ", $BracketMatcher];
+    log["$DebugBracketMatcher: ", $DebugBracketMatcher];
+    log["$ConfidenceLevel: ", $ConfidenceLevel];
+    log["$SemanticTokens: ", $SemanticTokens];
+    log["$InlayHints: ", $InlayHints]
+  ];
 
   (*
   Extract workspace root path from params
@@ -1108,6 +1136,11 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
     semanticTokensProviderValue = Null
   ];
 
+  inlayHintProviderValue = If[TrueQ[$InlayHints],
+    <| "resolveProvider" -> False |>,
+    Null
+  ];
+
   If[KeyExistsQ[textDocument, "documentSymbol"],
     documentSymbol = textDocument["documentSymbol"];
     hierarchicalDocumentSymbolSupport = documentSymbol["hierarchicalDocumentSymbolSupport"];
@@ -1154,12 +1187,7 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
           "triggerCharacters" -> {"$", "`", "[", "\""},
           "resolveProvider" -> True
         |>,
-        (*
-        Inlay hints support (Rust-style type hints)
-        *)
-        "inlayHintProvider" -> <|
-          "resolveProvider" -> False
-        |>,
+        "inlayHintProvider" -> inlayHintProviderValue,
         (*
         Workspace symbol search support
         *)
@@ -1857,6 +1885,11 @@ Module[{params, doc, uri},
   uri = doc["uri"];
 
   $OpenFilesMap[uri] =.;
+
+  (*
+  Clean up ignore pattern data for this file to prevent memory leaks
+  *)
+  ClearIgnoreData[uri];
 
   (*
   Note: We don't remove from paclet index on close, because the file still exists

@@ -26,6 +26,23 @@ Needs["CodeParser`Utils`"]
 $HoverLineWidth = 200;
 
 
+(*
+Cached Association sets for O(1) symbol category lookup.
+The underlying lists are loaded at startup in LSPServer.wl.
+*)
+$undocumentedSet := $undocumentedSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$undocumentedSymbols -> True
+]]
+
+$experimentalSet := $experimentalSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$experimentalSymbols -> True
+]]
+
+$obsoleteSet := $obsoleteSet = Association[Thread[
+  WolframLanguageSyntax`Generate`$obsoleteSymbols -> True
+]]
+
+
 expandContent[content:KeyValuePattern["method" -> "textDocument/hover"], pos_] :=
 Catch[
 Module[{params, id, doc, uri, res},
@@ -539,15 +556,17 @@ Module[{tokenSymbol, functionSource,
     |>
     ,
     If[Length[functionCallPatternCST] == 0,
-      functionCallPattern = "No function defined."
+      functionCallPattern = None
       ,
       functionCallPattern = CodeFormatCST[#, "LineWidth" -> $HoverLineWidth]& /@ functionCallPatternCST;
       functionCallPattern = DeleteDuplicates[functionCallPattern];
+      (* Trim trailing whitespace/newlines from each formatted pattern *)
+      functionCallPattern = StringReplace[#, RegularExpression["\\s+$"] -> ""]& /@ functionCallPattern;
       functionCallPattern = StringRiffle[functionCallPattern, "\n"];
     ];
 
     If[Length[requiredUsage] == 0,
-      requiredUsage = "No usage message."
+      requiredUsage = None
       ,
       requiredUsage = StringRiffle[requiredUsage, "\n"]
     ];
@@ -606,15 +625,15 @@ Module[{usage, documentationLink, sym},
   ];
   *)
 
-  If[MemberQ[WolframLanguageSyntax`Generate`$undocumentedSymbols, sym],
+  If[KeyExistsQ[$undocumentedSet, sym],
     usage = usage <> "\n\nUNDOCUMENTED"
   ];
 
-  If[MemberQ[WolframLanguageSyntax`Generate`$experimentalSymbols, sym],
+  If[KeyExistsQ[$experimentalSet, sym],
     usage = usage <> "\n\nEXPERIMENTAL"
   ];
 
-  If[MemberQ[WolframLanguageSyntax`Generate`$obsoleteSymbols, sym],
+  If[KeyExistsQ[$obsoleteSet, sym],
     usage = usage <> "\n\nOBSOLETE"
   ];
 
@@ -718,10 +737,18 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       defFilePath = StringReplace[defUri, "file://" -> ""];
       defText = Quiet[Import[defFilePath, "Text"]];
       If[StringQ[defText],
-        defCST = Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]];
-        defAST = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[
-          Quiet[CodeConcreteParse[defText]]
-        ]]],
+        Module[{rawCST},
+          rawCST = Quiet[CodeConcreteParse[defText]];
+          (* Only re-parse with TabWidth if file actually contains tabs *)
+          defCST = If[StringContainsQ[defText, "\t"],
+            Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]],
+            rawCST
+          ];
+          defAST = If[!FailureQ[rawCST],
+            Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[rawCST]]],
+            $Failed
+          ]
+        ],
         (* File not readable *)
         defCST = Null;
         defAST = Null
@@ -765,6 +792,8 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
         If[Length[functionCallPatternCST] > 0,
           functionCallPattern = CodeFormatCST /@ functionCallPatternCST;
           functionCallPattern = DeleteDuplicates[functionCallPattern];
+          (* Trim trailing whitespace/newlines from each formatted pattern *)
+          functionCallPattern = StringReplace[#, RegularExpression["\\s+$"] -> ""]& /@ functionCallPattern;
           functionCallPattern = StringRiffle[functionCallPattern, "\n"]
         ]
       ]
@@ -1091,14 +1120,35 @@ Module[{},
   }
 ]
 
+(*
+Format the context string for display in hover markdown.
+Backticks in Wolfram contexts (e.g. "System`") collide with markdown
+inline code syntax. We use double-backtick delimiters so the inner
+backtick is rendered literally: `` System` ``
+*)
+formatContextLine[context_String] :=
+  "`` " <> context <> " ``"
+
+formatContextLine[_] := None
+
+
+(*
+Format definition patterns as a wolfram code block.
+Input is a raw string with newline-separated patterns (from CodeFormatCST).
+We wrap in fenced code so underscores, brackets, etc. render literally.
+*)
+formatDefinitionPatterns[patterns_String] :=
+  "```wolfram\n" <> patterns <> "\n```"
+
+formatDefinitionPatterns[None] := None
+formatDefinitionPatterns[_] := None
+
+
 formatUsageCallPatterns[assoc_] := 
-Module[{res, parts, contextLine},
+Module[{res, parts, contextLine, patternsBlock},
   
   (* Build context line if available *)
-  contextLine = If[StringQ[Lookup[assoc, "Context", None]],
-    "`" <> assoc["Context"] <> "`",
-    None
-  ];
+  contextLine = formatContextLine[Lookup[assoc, "Context", None]];
   
   If[Not[TrueQ[assoc["FunctionInformation"]]],
     res = "No function information."
@@ -1111,50 +1161,57 @@ Module[{res, parts, contextLine},
         AppendTo[parts, "_" <> assoc["DocumentationLink"] <> "_"];
         res = StringRiffle[parts, "\n\n"],
       "CrossFile",
-        (* Cross-file workspace symbols - show context, usage, and definition patterns *)
+        (* Cross-file workspace symbols *)
         parts = {};
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
         
-        (* Usage messages from PacletIndex are plain text, use linearToMDSyntax *)
         If[StringQ[assoc["Usage"]],
-          AppendTo[parts, "**Usage**"];
           AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]]
         ];
         
-        (* Add function definition patterns if available *)
-        If[assoc["FunctionDefinitionPatterns"] =!= None,
-          AppendTo[parts, "**Function Definition Patterns**"];
-          AppendTo[parts, StringJoin[linearToMDSyntax[assoc["FunctionDefinitionPatterns"]]]]
+        (* Definition patterns in a fenced code block *)
+        patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
+        If[StringQ[patternsBlock],
+          AppendTo[parts, "**Definitions**"];
+          AppendTo[parts, patternsBlock]
         ];
         
         res = StringRiffle[parts, "\n\n"],
       "External",
-        (* External package symbols - show context, usage, definition patterns, and documentation link *)
+        (* External package symbols *)
         parts = {};
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
-        AppendTo[parts, "**Usage**"];
         AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]];
         
-        (* Add definition patterns if available *)
-        If[assoc["FunctionDefinitionPatterns"] =!= None,
-          AppendTo[parts, "**Definition Patterns**"];
-          AppendTo[parts, "```wolfram\n" <> assoc["FunctionDefinitionPatterns"] <> "\n```"]
+        (* Definition patterns in a fenced code block *)
+        patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
+        If[StringQ[patternsBlock],
+          AppendTo[parts, "**Definitions**"];
+          AppendTo[parts, patternsBlock]
         ];
         
-        (* Add documentation link if available *)
+        (* Documentation link *)
         If[assoc["DocumentationLink"] =!= None,
           AppendTo[parts, "_" <> assoc["DocumentationLink"] <> "_"]
         ];
         
         res = StringRiffle[parts, "\n\n"],
       _,
-        (* UserDefined symbols *)
+        (* UserDefined symbols — defined in the current file *)
         parts = {};
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
-        AppendTo[parts, "**Usage**"];
-        AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]];
-        AppendTo[parts, "**Function Definition Patterns**"];
-        AppendTo[parts, StringJoin[linearToMDSyntax[assoc["FunctionDefinitionPatterns"]]]];
+        
+        If[StringQ[assoc["Usage"]],
+          AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]]
+        ];
+        
+        (* Definition patterns in a fenced code block *)
+        patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
+        If[StringQ[patternsBlock],
+          AppendTo[parts, "**Definitions**"];
+          AppendTo[parts, patternsBlock]
+        ];
+        
         res = StringRiffle[parts, "\n\n"]
     ];
   ];

@@ -34,6 +34,7 @@ GetFileExplicitContextRefs
 IsContextLoadedInFile
 GetContextLoadErrors
 GetFileLoadedContexts
+GetKernelContextsCached
 GetSymbolUsages
 
 $PacletIndex
@@ -98,6 +99,16 @@ $PacletIndex = <|
 |>
 
 $WorkspaceRoot = None
+
+(*
+Cached set of non-API symbol names for fast exclusion in extractPublicDeclarations
+*)
+$nonAPISymbols = <|
+  "Begin" -> True, "End" -> True, "BeginPackage" -> True, "EndPackage" -> True,
+  "Needs" -> True, "Get" -> True, "Set" -> True, "SetDelayed" -> True,
+  "MessageName" -> True, "String" -> True, "List" -> True, "Rule" -> True,
+  "CompoundExpression" -> True, "Null" -> True
+|>
 
 
 (*
@@ -262,80 +273,100 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
   ];
   
   (*
-  Update the index
+  Update the index using batch operations to avoid quadratic AppendTo
   *)
-  fileSymbols = {};
+  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext];
+]]
+
+
+(*
+Batch add a file's data to the PacletIndex.
+Uses grouped-by-name operations instead of per-item AppendTo to avoid O(n^2).
+*)
+addFileToIndex[uri_, definitions_, usages_, symbols_, fileDeps_, contextLoads_, explicitContextRefs_, packageContext_] :=
+Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
+  
+  fileSymbolsBag = Internal`Bag[];
   
   (*
-  Add definitions to index
+  Group definitions by symbol name for batch insert
   *)
-  Scan[
-    Function[{def},
-      Module[{name, entry},
-        name = def["name"];
-        AppendTo[fileSymbols, name];
-        
-        If[!KeyExistsQ[$PacletIndex["Symbols"], name],
-          $PacletIndex["Symbols", name] = <|
-            "Definitions" -> {},
-            "References" -> {},
-            "Usages" -> {}
-          |>
-        ];
-        
-        AppendTo[$PacletIndex["Symbols", name, "Definitions"], KeyDrop[def, "name"]];
-        
-        (*
-        Track by context
-        *)
-        If[StringQ[def["context"]],
-          If[!KeyExistsQ[$PacletIndex["Contexts"], def["context"]],
-            $PacletIndex["Contexts", def["context"]] = {}
+  defsByName = GroupBy[definitions, #["name"]&];
+  
+  KeyValueMap[
+    Function[{name, defs},
+      Internal`StuffBag[fileSymbolsBag, name];
+      
+      If[!KeyExistsQ[$PacletIndex["Symbols"], name],
+        $PacletIndex["Symbols", name] = <|
+          "Definitions" -> {},
+          "References" -> {},
+          "Usages" -> {}
+        |>
+      ];
+      
+      (* Batch append all definitions for this symbol at once *)
+      $PacletIndex["Symbols", name, "Definitions"] = Join[
+        $PacletIndex["Symbols", name, "Definitions"],
+        KeyDrop[#, "name"]& /@ defs
+      ];
+      
+      (* Track by context — use first definition's context *)
+      Module[{ctx},
+        ctx = defs[[1]]["context"];
+        If[StringQ[ctx],
+          If[!KeyExistsQ[$PacletIndex["Contexts"], ctx],
+            $PacletIndex["Contexts", ctx] = {}
           ];
-          If[!MemberQ[$PacletIndex["Contexts", def["context"]], name],
-            AppendTo[$PacletIndex["Contexts", def["context"]], name]
+          If[!MemberQ[$PacletIndex["Contexts", ctx], name],
+            $PacletIndex["Contexts", ctx] = Append[$PacletIndex["Contexts", ctx], name]
           ]
         ]
       ]
     ],
-    definitions
+    defsByName
   ];
   
   (*
-  Add usages to index
+  Group usages by symbol name for batch insert
   *)
-  Scan[
-    Function[{usage},
-      Module[{name},
-        name = usage["name"];
-        If[KeyExistsQ[$PacletIndex["Symbols"], name],
-          If[!MemberQ[$PacletIndex["Symbols", name, "Usages"], usage["usage"]],
-            AppendTo[$PacletIndex["Symbols", name, "Usages"], usage["usage"]]
-          ]
+  usagesByName = GroupBy[usages, #["name"]&];
+  
+  KeyValueMap[
+    Function[{name, usageList},
+      If[KeyExistsQ[$PacletIndex["Symbols"], name],
+        Module[{existingUsages, newUsages},
+          existingUsages = $PacletIndex["Symbols", name, "Usages"];
+          newUsages = DeleteDuplicates[Join[existingUsages, #["usage"]& /@ usageList]];
+          $PacletIndex["Symbols", name, "Usages"] = newUsages
         ]
       ]
     ],
-    usages
+    usagesByName
   ];
   
   (*
-  Add references to index
+  Group references by symbol name for batch insert
   *)
-  Scan[
-    Function[{ref},
-      Module[{name},
-        name = ref["name"];
-        If[!KeyExistsQ[$PacletIndex["Symbols"], name],
-          $PacletIndex["Symbols", name] = <|
-            "Definitions" -> {},
-            "References" -> {},
-            "Usages" -> {}
-          |>
-        ];
-        AppendTo[$PacletIndex["Symbols", name, "References"], KeyDrop[ref, "name"]]
+  refsByName = GroupBy[symbols, #["name"]&];
+  
+  KeyValueMap[
+    Function[{name, refs},
+      If[!KeyExistsQ[$PacletIndex["Symbols"], name],
+        $PacletIndex["Symbols", name] = <|
+          "Definitions" -> {},
+          "References" -> {},
+          "Usages" -> {}
+        |>
+      ];
+      
+      (* Batch append all references for this symbol at once *)
+      $PacletIndex["Symbols", name, "References"] = Join[
+        $PacletIndex["Symbols", name, "References"],
+        KeyDrop[#, "name"]& /@ refs
       ]
     ],
-    symbols
+    refsByName
   ];
   
   (*
@@ -343,13 +374,13 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
   *)
   $PacletIndex["Files", uri] = <|
     "LastIndexed" -> Now,
-    "Symbols" -> DeleteDuplicates[fileSymbols],
+    "Symbols" -> DeleteDuplicates[Internal`BagPart[fileSymbolsBag, All]],
     "Dependencies" -> fileDeps,
     "ContextLoads" -> contextLoads,
     "ExplicitContextRefs" -> explicitContextRefs,
     "PackageContext" -> packageContext
   |>;
-]]
+]
 
 
 (*
@@ -757,10 +788,8 @@ Module[{children, publicSection, publicSymbols, privateStart},
   *)
   publicSymbols = Cases[publicSection,
     LeafNode[Symbol, name_String, KeyValuePattern[Source -> src_]] /;
-      (* Exclude common non-API symbols *)
-      !MemberQ[{"Begin", "End", "BeginPackage", "EndPackage", "Needs", "Get", 
-                "Set", "SetDelayed", "MessageName", "String", "List", "Rule",
-                "CompoundExpression", "Null"}, name],
+      (* Exclude common non-API symbols - use Association for O(1) lookup *)
+      !KeyExistsQ[$nonAPISymbols, name],
     Infinity
   ];
   
@@ -925,79 +954,10 @@ Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbol
   *)
   packageContext = extractPackageContext[ast];
   
-  fileSymbols = {};
-  
-  Scan[
-    Function[{def},
-      Module[{name},
-        name = def["name"];
-        AppendTo[fileSymbols, name];
-        
-        If[!KeyExistsQ[$PacletIndex["Symbols"], name],
-          $PacletIndex["Symbols", name] = <|
-            "Definitions" -> {},
-            "References" -> {},
-            "Usages" -> {}
-          |>
-        ];
-        
-        AppendTo[$PacletIndex["Symbols", name, "Definitions"], KeyDrop[def, "name"]];
-        
-        If[StringQ[def["context"]],
-          If[!KeyExistsQ[$PacletIndex["Contexts"], def["context"]],
-            $PacletIndex["Contexts", def["context"]] = {}
-          ];
-          If[!MemberQ[$PacletIndex["Contexts", def["context"]], name],
-            AppendTo[$PacletIndex["Contexts", def["context"]], name]
-          ]
-        ]
-      ]
-    ],
-    definitions
-  ];
-  
-  Scan[
-    Function[{usage},
-      Module[{name},
-        name = usage["name"];
-        If[KeyExistsQ[$PacletIndex["Symbols"], name],
-          If[!MemberQ[$PacletIndex["Symbols", name, "Usages"], usage["usage"]],
-            AppendTo[$PacletIndex["Symbols", name, "Usages"], usage["usage"]]
-          ]
-        ]
-      ]
-    ],
-    usages
-  ];
-  
-  Scan[
-    Function[{ref},
-      Module[{name},
-        name = ref["name"];
-        If[!KeyExistsQ[$PacletIndex["Symbols"], name],
-          $PacletIndex["Symbols", name] = <|
-            "Definitions" -> {},
-            "References" -> {},
-            "Usages" -> {}
-          |>
-        ];
-        AppendTo[$PacletIndex["Symbols", name, "References"], KeyDrop[ref, "name"]]
-      ]
-    ],
-    symbols
-  ];
-  
   (*
-  Track file in index with enhanced context information
+  Update the index using batch operations to avoid quadratic AppendTo
   *)
-  $PacletIndex["Files", uri] = <|
-    "LastIndexed" -> Now,
-    "Symbols" -> DeleteDuplicates[fileSymbols],
-    "Dependencies" -> fileDeps,
-    "ContextLoads" -> contextLoads,
-    "ExplicitContextRefs" -> explicitContextRefs,
-    "PackageContext" -> packageContext
-  |>;
+  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext];
 ]]
 
 
@@ -1043,6 +1003,29 @@ Module[{fileEntry, fileSymbols},
   Remove file entry
   *)
   $PacletIndex["Files", uri] =.;
+  
+  (*
+  Recompute global Dependencies from remaining files to prevent stale entries
+  *)
+  $PacletIndex["Dependencies"] = DeleteDuplicates[
+    Flatten[Lookup[Values[$PacletIndex["Files"]], "Dependencies", {}]]
+  ];
+  
+  (*
+  Clean up Contexts: remove symbol names that no longer have any definitions
+  *)
+  Scan[
+    Function[{ctx},
+      $PacletIndex["Contexts", ctx] = Select[
+        $PacletIndex["Contexts", ctx],
+        KeyExistsQ[$PacletIndex["Symbols"], #]&
+      ];
+      If[$PacletIndex["Contexts", ctx] === {},
+        $PacletIndex["Contexts", ctx] =.
+      ]
+    ],
+    Keys[$PacletIndex["Contexts"]]
+  ];
 ]
 
 
@@ -1110,14 +1093,14 @@ Module[{},
 Get all workspace symbols for workspace/symbol search
 *)
 GetAllWorkspaceSymbols[] :=
-Module[{symbols},
-  symbols = {};
+Module[{bag},
+  bag = Internal`Bag[];
   
   KeyValueMap[
     Function[{name, data},
       Scan[
         Function[{def},
-          AppendTo[symbols, <|
+          Internal`StuffBag[bag, <|
             "name" -> name,
             "kind" -> def["kind"],
             "location" -> <|
@@ -1136,7 +1119,7 @@ Module[{symbols},
     $PacletIndex["Symbols"]
   ];
   
-  symbols
+  Internal`BagPart[bag, All]
 ]
 
 
@@ -1259,6 +1242,7 @@ GetDependencyContexts[] := $PacletIndex["Dependencies"]
 Check if a context is a known dependency (loaded via BeginPackage or Needs).
 *)
 IsDependencyContext[context_String] := MemberQ[$PacletIndex["Dependencies"], context]
+(* Note: Dependencies list is typically small (< 20 items), MemberQ is acceptable *)
 
 
 (*
@@ -1287,17 +1271,34 @@ This includes:
 - Contexts loaded via Needs/Get/BeginPackage
 - Workspace-defined contexts
 *)
+(*
+Cached kernel contexts — Contexts[] is expensive and the result changes
+only when new packages are loaded. Refresh periodically by comparing
+the count to the cached count.
+*)
+$kernelContextsCache = {};
+$kernelContextsCacheLen = 0;
+
+GetKernelContextsCached[] :=
+Module[{ctx},
+  ctx = Quiet[Contexts[], {Contexts::argx}];
+  If[!ListQ[ctx], ctx = {"System`", "Global`"}];
+  If[Length[ctx] =!= $kernelContextsCacheLen,
+    $kernelContextsCache = ctx;
+    $kernelContextsCacheLen = Length[ctx]
+  ];
+  $kernelContextsCache
+]
+
 GetFileLoadedContexts[uri_String] :=
 Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContexts, kernelContexts},
   
   fileData = Lookup[$PacletIndex["Files"], uri, <||>];
   
   (*
-  Get all contexts known to the kernel. These are always available and do not
-  require Needs[] to use. This includes Internal`, Developer`, Compile`, etc.
+  Get all contexts known to the kernel (cached).
   *)
-  kernelContexts = Quiet[Contexts[], {Contexts::argx}];
-  If[!ListQ[kernelContexts], kernelContexts = {"System`", "Global`"}];
+  kernelContexts = GetKernelContextsCached[];
   
   If[fileData === <||>,
     Return[DeleteDuplicates[kernelContexts]]
@@ -1342,40 +1343,25 @@ via Needs[], Get[], or BeginPackage[..., {deps}].
 Each error: <| "symbol" -> "name", "context" -> "Ctx`", "fullName" -> "Ctx`name", "source" -> ..., "error" -> "message" |>
 *)
 GetContextLoadErrors[uri_String] :=
-Module[{explicitRefs, loadedContexts, errors},
+Module[{explicitRefs, loadedContexts, loadedContextsSet},
   
   explicitRefs = GetFileExplicitContextRefs[uri];
   loadedContexts = GetFileLoadedContexts[uri];
   
-  errors = {};
+  (* Build Association for O(1) exact-match lookup instead of repeated MemberQ *)
+  loadedContextsSet = Association[Thread[loadedContexts -> True]];
   
-  Scan[
-    Function[{ref},
-      Module[{ctx},
-        ctx = ref["context"];
-        
-        (*
-        Report error if:
-        - Context is not in the loaded contexts list
-        - AND context is not a subcontext of a loaded context
-        
-        Note: System` and Global` are always in loadedContexts from GetFileLoadedContexts
-        All other contexts (Developer`, Internal`, Compile`, etc.) require explicit Needs[]
-        *)
-        If[!MemberQ[loadedContexts, ctx] && 
-           !AnyTrue[loadedContexts, StringStartsQ[ctx, #] &],
-          
-          (* This is an unloaded context reference *)
-          AppendTo[errors, Append[ref, 
-            "error" -> "Context \"" <> ctx <> "\" is not loaded. Add Needs[\"" <> ctx <> "\"] to load it."
-          ]]
-        ]
+  (* Functional approach: Map + Nothing avoids quadratic AppendTo *)
+  Function[{ref},
+    Module[{ctx},
+      ctx = ref["context"];
+      If[!KeyExistsQ[loadedContextsSet, ctx] && 
+         !AnyTrue[loadedContexts, StringStartsQ[ctx, #] &],
+        Append[ref, "error" -> "Context \"" <> ctx <> "\" is not loaded. Add Needs[\"" <> ctx <> "\"] to load it."],
+        Nothing
       ]
-    ],
-    explicitRefs
-  ];
-  
-  errors
+    ]
+  ] /@ explicitRefs
 ]
 
 

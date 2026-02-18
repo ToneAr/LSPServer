@@ -30,59 +30,81 @@ Module[{params, id, command, res},
   params = content["params"];
   command = params["command"];
 
-  res = Switch[command,
-          (*
-          enable_bracket_matcher_debug_mode is an undocumented debug command
-          *)
-          "enable_bracket_matcher_debug_mode",
-            $DebugBracketMatcher = True;
-            (*
-            TODO: trigger bracket matcher here
-            *)
-            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
-          ,
-          (*
-          disable_bracket_matcher_debug_mode is an undocumented debug command
-          *)
-          "disable_bracket_matcher_debug_mode",
-            $DebugBracketMatcher = False;
-            (*
-            TODO: trigger bracket matcher here
-            *)
-            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
-          ,
-          (*
-          enable_bracket_matcher_design_colors is an undocumented debug command
-          *)
-          "enable_bracket_matcher_design_colors",
-            $BracketMatcherUseDesignColors = True;
-            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
-          ,
-          (*
-          disable_bracket_matcher_design_colors is an undocumented debug command
-          *)
-          "disable_bracket_matcher_design_colors",
-            $BracketMatcherUseDesignColors = False;
-            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
-          ,
-          (*
-          enable_bracket_matcher_display_insertion_text is an undocumented debug command
-          *)
-          "enable_bracket_matcher_display_insertion_text",
-            $BracketMatcherDisplayInsertionText = True;
-            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
-          ,
-          (*
-          disable_bracket_matcher_display_insertion_text is an undocumented debug command
-          *)
-          "disable_bracket_matcher_display_insertion_text",
-            $BracketMatcherDisplayInsertionText = False;
-            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
-          ,
-          (*
-          roundtrip_responsiveness_test is an undocumented, debug command
-          *)
-          "roundtrip_responsiveness_test",
+  Switch[command,
+    (*
+    toggle_inlay_hints toggles $InlayHints on/off.
+    Returns the new state so the client can display a notification.
+    Also sends workspace/inlayHint/refresh to prompt the client to re-request hints.
+    *)
+    "toggle_inlay_hints",
+      $InlayHints = !TrueQ[$InlayHints];
+      
+      If[$Debug,
+        log["toggle_inlay_hints: $InlayHints -> ", $InlayHints]
+      ];
+      
+      (*
+      Send workspace/inlayHint/refresh to notify the client that
+      inlay hints have changed and should be re-requested.
+      The client will call textDocument/inlayHint again for visible files.
+      *)
+      {
+        <| "jsonrpc" -> "2.0", "id" -> id, "result" -> <|"inlayHints" -> $InlayHints|> |>,
+        <| "method" -> "workspace/inlayHint/refresh" |>
+      }
+    ,
+    (*
+    enable_bracket_matcher_debug_mode is an undocumented debug command
+    *)
+    "enable_bracket_matcher_debug_mode",
+      $DebugBracketMatcher = True;
+      (*
+      TODO: trigger bracket matcher here
+      *)
+      {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
+    ,
+    (*
+    disable_bracket_matcher_debug_mode is an undocumented debug command
+    *)
+    "disable_bracket_matcher_debug_mode",
+      $DebugBracketMatcher = False;
+      (*
+      TODO: trigger bracket matcher here
+      *)
+      {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
+    ,
+    (*
+    enable_bracket_matcher_design_colors is an undocumented debug command
+    *)
+    "enable_bracket_matcher_design_colors",
+      $BracketMatcherUseDesignColors = True;
+      {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
+    ,
+    (*
+    disable_bracket_matcher_design_colors is an undocumented debug command
+    *)
+    "disable_bracket_matcher_design_colors",
+      $BracketMatcherUseDesignColors = False;
+      {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
+    ,
+    (*
+    enable_bracket_matcher_display_insertion_text is an undocumented debug command
+    *)
+    "enable_bracket_matcher_display_insertion_text",
+      $BracketMatcherDisplayInsertionText = True;
+      {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
+    ,
+    (*
+    disable_bracket_matcher_display_insertion_text is an undocumented debug command
+    *)
+    "disable_bracket_matcher_display_insertion_text",
+      $BracketMatcherDisplayInsertionText = False;
+      {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
+    ,
+    (*
+    roundtrip_responsiveness_test is an undocumented, debug command
+    *)
+    "roundtrip_responsiveness_test",
 
             log[1, "roundtrip_responsiveness_test:> \n\n"];
             log[1, DateString[Now, {"Year", "-", "Month", "-", "Day", "_", "Hour24", "-", "Minute", "-", "Second", "-", "Millisecond"}]];
@@ -130,10 +152,33 @@ Module[{},
 ]
 
 handleContent[content:KeyValuePattern["method" -> "workspace/didChangeConfiguration"]] :=
-Module[{},
+Module[{params, settings},
 
   log[1, "workspace/didChangeConfiguration: enter"];
   log[1, "workspace/didChangeConfiguration: exit"];
+
+  params = content["params"];
+  settings = Lookup[params, "settings", Null];
+  
+  If[AssociationQ[settings],
+    (*
+    Handle wolfram/wolframLSP settings section
+    Clients may nest under "wolfram", "wolframLSP", or send at top level
+    *)
+    settings = Replace[settings, {
+      KeyValuePattern["wolfram" -> s_Association] :> s,
+      KeyValuePattern["wolframLSP" -> s_Association] :> s,
+      other_ :> other
+    }];
+    
+    If[KeyExistsQ[settings, "inlayHints"],
+      $InlayHints = TrueQ[settings["inlayHints"]];
+      
+      If[$Debug2,
+        log["didChangeConfiguration: $InlayHints -> ", $InlayHints]
+      ]
+    ]
+  ];
 
   {}
 ]
