@@ -8,6 +8,12 @@ if(NOT DEFINED MATHEMATICA_INSTALL_DIR)
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 			TIMEOUT 60
 		)
+		execute_process(
+			COMMAND ${_WOLFRAMSCRIPT} -code "Print[First@FileNames[\"WolframKernel\", $InstallationDirectory, Infinity]]"
+			OUTPUT_VARIABLE _WOLFRAMKERNEL_AUTO
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			TIMEOUT 60
+		)
 	endif()
 	if(NOT MATHEMATICA_INSTALL_DIR)
 		if(CMAKE_HOST_WIN32)
@@ -52,6 +58,10 @@ else()
 	set(WOLFRAMLIBRARY_INCLUDE_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/IncludeFiles/C)
 	set(MATHLINK_INCLUDE_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/Linux-x86-64/CompilerAdditions)
 	set(MATHLINK_LIB_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/Linux-x86-64/CompilerAdditions)
+endif()
+
+if(_WOLFRAMKERNEL_AUTO)
+	set(WOLFRAMKERNEL_DEFAULT ${_WOLFRAMKERNEL_AUTO})
 endif()
 
 macro(CheckWolframKernel)
