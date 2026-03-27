@@ -384,9 +384,11 @@ Module[{pacletSymbols, completions},
         "sortText" -> "0_" <> sym["name"]  (* Paclet symbols sort first *)
       |>;
       
-      (* Only add documentation if usage is available *)
-      If[sym["usage"] =!= None,
-        item["documentation"] = <| "kind" -> "markdown", "value" -> sym["usage"] |>
+      (* Only add documentation if usage is available.
+         Process through linearToMDSyntax to convert embedded linear syntax
+         (box expressions) into readable markdown text. *)
+      If[sym["usage"] =!= None && StringQ[sym["usage"]],
+        item["documentation"] = <| "kind" -> "markdown", "value" -> StringJoin[LSPServer`Hover`linearToMDSyntax[sym["usage"]]] |>
       ];
       
       item
@@ -663,10 +665,12 @@ Module[{deps, allExternalSymbols, matching, completions},
       |>;
       
       (*
-      Add full documentation if usage is available
+      Add full documentation if usage is available.
+      Process through linearToMDSyntax to convert embedded linear syntax
+      (box expressions) into readable markdown text.
       *)
       If[StringQ[usage],
-        item["documentation"] = <| "kind" -> "markdown", "value" -> usage |>
+        item["documentation"] = <| "kind" -> "markdown", "value" -> StringJoin[LSPServer`Hover`linearToMDSyntax[usage]] |>
       ];
       
       item
@@ -2974,7 +2978,9 @@ Module[{id, params, label, documentation, result},
 
 
 (*
-Get documentation for a symbol
+Get documentation for a symbol.
+Usage strings are processed through linearToMDSyntax to convert
+embedded linear syntax (box expressions) into readable markdown.
 *)
 getSymbolDocumentation[symbolName_String] :=
 Module[{usage, pacletUsages},
@@ -2985,7 +2991,7 @@ Module[{usage, pacletUsages},
   If[NameQ[symbolName] && Context[symbolName] === "System`",
     usage = Quiet[ToExpression[symbolName <> "::usage"]];
     If[StringQ[usage],
-      Return[usage]
+      Return[StringJoin[LSPServer`Hover`linearToMDSyntax[usage]]]
     ]
   ];
   
@@ -2994,8 +3000,8 @@ Module[{usage, pacletUsages},
   *)
   If[KeyExistsQ[$PacletIndex["Symbols"], symbolName],
     pacletUsages = $PacletIndex["Symbols", symbolName, "Usages"];
-    If[Length[pacletUsages] > 0,
-      Return[pacletUsages[[1]]]
+    If[Length[pacletUsages] > 0 && StringQ[pacletUsages[[1]]],
+      Return[StringJoin[LSPServer`Hover`linearToMDSyntax[pacletUsages[[1]]]]]
     ]
   ];
   
