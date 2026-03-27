@@ -150,8 +150,23 @@ set(GENERATED_WL_PACLET_KERNEL_SOURCES
 #
 # Set VERSION_NUMBER, SYSTEMID, and PACLET_VERSION
 #
-CheckWolframKernel()
-CheckPacletInfo()
+# When SYSTEMID and VERSION_NUMBER are pre-defined (e.g. cross-platform CI),
+# skip the kernel checks entirely.
+#
+if(DEFINED SYSTEMID AND DEFINED VERSION_NUMBER)
+	message(STATUS "Cross-compile mode: skipping kernel checks")
+	message(STATUS "SYSTEMID (pre-defined): ${SYSTEMID}")
+	message(STATUS "VERSION_NUMBER (pre-defined): ${VERSION_NUMBER}")
+	if(NOT DEFINED PACLET_VERSION)
+		set(PACLET_VERSION "0.0")
+	endif()
+	if(NOT DEFINED PACLET_WOLFRAMVERSION)
+		set(PACLET_WOLFRAMVERSION "14+")
+	endif()
+else()
+	CheckWolframKernel()
+	CheckPacletInfo()
+endif()
 
 #
 # Force re-configure if PacletInfo.wl.in changes, e.g. paclet version is changed and name of .paclet has changed
@@ -175,7 +190,9 @@ endif()
 
 if(APPLE)
 	include(MacOSXVersionMin)
-	CheckMacOSXVersionMin()
+	if(NOT DEFINED MACOSX_VERSION_MIN)
+		CheckMacOSXVersionMin()
+	endif()
     if(NOT MACOSX_VERSION_MIN STREQUAL CMAKE_OSX_DEPLOYMENT_TARGET)
     message(WARNING
     	"MACOSX_VERSION_MIN: ${MACOSX_VERSION_MIN}\n"
