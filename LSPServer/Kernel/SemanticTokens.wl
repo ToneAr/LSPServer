@@ -169,7 +169,7 @@ Module[{symContext, explicitContext},
     explicitContext = StringJoin[Riffle[Most[StringSplit[name, "`"]], "`"]] <> "`";
 
     (* Fast exact match first, then substring check *)
-    Return[KeyExistsQ[$depsSet, explicitContext] || 
+    Return[KeyExistsQ[$depsSet, explicitContext] ||
            AnyTrue[$depsList, StringStartsQ[explicitContext, #] &]]
   ];
 
@@ -184,7 +184,7 @@ Module[{symContext, explicitContext},
   ];
 
   (* Fast exact match first, then substring check *)
-  KeyExistsQ[$depsSet, symContext] || 
+  KeyExistsQ[$depsSet, symContext] ||
   AnyTrue[$depsList, StringStartsQ[symContext, #] &]
 ]
 
@@ -299,10 +299,136 @@ Module[{params, id, doc, uri, res},
   res
 ]]
 
+(*
+Compute the 1-based source {line, col} of the character at 1-based index `offset`
+within rawStr (which includes surrounding quote characters), given the source
+position of rawStr[[1]] (the opening quote).
+Handles multi-line strings by counting literal newline characters.
+*)
+stringOffsetToSourcePos[rawStr_String, {startLine_Integer, startCol_Integer}, offset_Integer] :=
+Module[{prefix, numNewlines, lastSegment},
+  prefix = StringTake[rawStr, offset - 1];
+  numNewlines = StringCount[prefix, "\n"];
+  If[numNewlines == 0,
+    {startLine, startCol + offset - 1}
+    ,
+    (* All preserves trailing empty string when prefix ends with \n *)
+    lastSegment = Last[StringSplit[prefix, "\n", All]];
+    {startLine + numNewlines, StringLength[lastSegment] + 1}
+  ]
+]
+
+(*
+Extract semantic tokens for WL expressions embedded via <* expr *> syntax.
+rawStr is the CST representation including surrounding double-quote characters.
+srcStart is the 1-based source position of rawStr[[1]] (the opening quote).
+Supports both single-line and multi-line strings and expressions.
+*)
+stringArgEmbeddedTokens[
+  LeafNode[String, rawStr_String, KeyValuePattern[Source -> {srcStart:{_Integer, _Integer}, _}]],
+  scopedSources_
+] :=
+Catch[
+Module[{blocks, allTokens},
+
+  blocks = StringPosition[rawStr, "<*" ~~ Shortest[___] ~~ "*>"];
+
+  If[blocks === {}, Throw[{}]];
+
+  allTokens = Join @@ Map[
+    Function[{block},
+      Module[{exprStart, exprEnd, exprStr, exprCst, nodes, exprSourceStart},
+        exprStart = block[[1]] + 2;  (* first char after "<*" *)
+        exprEnd   = block[[2]] - 2;  (* last char before "*>" *)
+
+        If[exprEnd < exprStart, Return[{}]];
+
+        exprStr = StringTake[rawStr, {exprStart, exprEnd}];
+
+        exprCst = Quiet[CodeConcreteParse[exprStr]];
+        If[FailureQ[exprCst], Return[{}]];
+
+        (* 1-based source position of exprStr[[1]] *)
+        exprSourceStart = stringOffsetToSourcePos[rawStr, srcStart, exprStart];
+
+        (* {"symbol", name, src} for symbols, {"string", Null, src} for string literals *)
+        nodes = Join[
+          Cases[exprCst,
+            LeafNode[Symbol, name_String, KeyValuePattern[Source -> s_]] :> {"symbol", name, s},
+            Infinity
+          ],
+          Cases[exprCst,
+            LeafNode[String, _, KeyValuePattern[Source -> s_]] :> {"string", Null, s},
+            Infinity
+          ]
+        ];
+
+        Map[
+          Function[{node},
+            Module[{kind, name, nodeSrc, srcLineActual, srcColActual, tokenType, modifiers},
+              {kind, name, nodeSrc} = node;
+
+              (* Map parsed {line, col} to source {line, col} (both 1-based) *)
+              srcLineActual = exprSourceStart[[1]] + nodeSrc[[1, 1]] - 1;
+              srcColActual  = If[nodeSrc[[1, 1]] == 1,
+                exprSourceStart[[2]] + nodeSrc[[1, 2]] - 1,
+                nodeSrc[[1, 2]]  (* column resets on new lines *)
+              ];
+
+              If[KeyExistsQ[scopedSources, {srcLineActual, srcColActual}],
+                Return[Nothing]
+              ];
+
+              If[kind === "symbol",
+                {tokenType, modifiers} = classifyGlobalSymbol[name]
+                ,
+                tokenType = "string"; modifiers = {}
+              ];
+
+              {
+                srcLineActual - 1,   (* 0-based line *)
+                srcColActual - 1,    (* 0-based column *)
+                nodeSrc[[2, 2]] - nodeSrc[[1, 2]],
+                $SemanticTokenTypes[tokenType],
+                If[modifiers === {},
+                  0,
+                  BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers, 0]]
+                ]
+              }
+            ]
+          ],
+          nodes
+        ]
+      ]
+    ],
+    blocks
+  ];
+
+  DeleteCases[allTokens, Nothing]
+]]
+
+stringArgEmbeddedTokens[_, _] := {}
+
+(*
+Find all string nodes in the CST that contain <* ... *> template syntax and
+extract semantic tokens for the embedded WL expressions.
+Scanning the CST directly avoids relying on the CST CallNode structure
+(which differs from the AST: head is {LeafNode[...]}, body is GroupNode).
+*)
+stringTemplateEmbeddedTokens[cst_, scopedSources_] :=
+Module[{templateStrings},
+  templateStrings = Cases[cst,
+    node:LeafNode[String, rawStr_String, _] /; StringContainsQ[rawStr, "<*"] :> node,
+    Infinity
+  ];
+  Join @@ Map[stringArgEmbeddedTokens[#, scopedSources]&, templateStrings]
+]
+
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/semanticTokens/fullFencepost"]] :=
 Catch[
 Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbols,
-  scopedSources, globalSymbolTokens, localTokens, transformed,
+  scopedSources, globalSymbolTokens, stringTemplateTokens, localTokens, transformed,
   line, char, oldLine, oldChar},
 
   log[1, "textDocument/semanticTokens/fullFencepost: enter"];
@@ -398,6 +524,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   Only if we have CST available
   *)
   globalSymbolTokens = {};
+  stringTemplateTokens = {};
 
   If[cst =!= Null && !FailureQ[cst],
     (*
@@ -463,12 +590,14 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
     Remove Nothing entries
     *)
     globalSymbolTokens = DeleteCases[globalSymbolTokens, Nothing];
+
+    stringTemplateTokens = stringTemplateEmbeddedTokens[cst, scopedSources];
   ];
 
   (*
-  Combine local and global tokens
+  Combine local, global, and StringTemplate embedded tokens
   *)
-  transformed = Join[localTokens, globalSymbolTokens];
+  transformed = Join[localTokens, globalSymbolTokens, stringTemplateTokens];
 
   (*
   Relativize the tokens (LSP requires delta encoding)
