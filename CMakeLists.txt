@@ -90,16 +90,20 @@ set(STATIC_WL_PACLET_KERNEL_SOURCES
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/BracketMismatches.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/CodeAction.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Color.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Completion.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Definitions.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Diagnostics.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/DocumentSymbol.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/FoldingRange.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Formatting.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Hover.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/IgnorePatterns.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/ImplicitTokens.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/InlayHints.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Library.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/ListenSocket.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/LSPServer.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/PacletIndex.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/References.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/SelectionRange.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/SemanticTokens.wl
@@ -146,8 +150,23 @@ set(GENERATED_WL_PACLET_KERNEL_SOURCES
 #
 # Set VERSION_NUMBER, SYSTEMID, and PACLET_VERSION
 #
-CheckWolframKernel()
-CheckPacletInfo()
+# When SYSTEMID and VERSION_NUMBER are pre-defined (e.g. cross-platform CI),
+# skip the kernel checks entirely.
+#
+if(DEFINED SYSTEMID AND DEFINED VERSION_NUMBER)
+	message(STATUS "Cross-compile mode: skipping kernel checks")
+	message(STATUS "SYSTEMID (pre-defined): ${SYSTEMID}")
+	message(STATUS "VERSION_NUMBER (pre-defined): ${VERSION_NUMBER}")
+	if(NOT DEFINED PACLET_VERSION)
+		set(PACLET_VERSION "0.0")
+	endif()
+	if(NOT DEFINED PACLET_WOLFRAMVERSION)
+		set(PACLET_WOLFRAMVERSION "14+")
+	endif()
+else()
+	CheckWolframKernel()
+	CheckPacletInfo()
+endif()
 
 #
 # Force re-configure if PacletInfo.wl.in changes, e.g. paclet version is changed and name of .paclet has changed
@@ -171,7 +190,9 @@ endif()
 
 if(APPLE)
 	include(MacOSXVersionMin)
-	CheckMacOSXVersionMin()
+	if(NOT DEFINED MACOSX_VERSION_MIN)
+		CheckMacOSXVersionMin()
+	endif()
     if(NOT MACOSX_VERSION_MIN STREQUAL CMAKE_OSX_DEPLOYMENT_TARGET)
     message(WARNING
     	"MACOSX_VERSION_MIN: ${MACOSX_VERSION_MIN}\n"

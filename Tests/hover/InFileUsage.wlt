@@ -15,7 +15,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 1, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nmySin is just a sin function\\.\n\n**Function Definition Patterns**\n\nmySin\\[x\\_\\]\n\n"
+        "value" -> "mySin is just a sin function.\n\n**Definitions**\n\n```wolfram\nmySin[x_]\n```"
         |>
       |>
     |>
@@ -37,7 +37,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 2, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nmyTan is Tan function\\.\n\n**Function Definition Patterns**\n\nmyTan\\[x\\_\\]\n\n"
+        "value" -> "myTan is Tan function.\n\n**Definitions**\n\n```wolfram\nmyTan[x_]\n```"
         |>
       |>
     |>
@@ -59,7 +59,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 3, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nCos\\[**z**\\] gives the cosine of *z*\\. \n\n**Function Definition Patterns**\n\nmyCos\\[x\\_\\]\n\n"
+        "value" -> "Cos[**z**] gives the cosine of *z*. \n\n**Definitions**\n\n```wolfram\nmyCos[x_]\n```"
         |>
       |>
     |>
@@ -81,7 +81,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 4, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nUsage with SetDelay\n\n**Function Definition Patterns**\n\naa\\[x\\_\\]\n\n"
+        "value" -> "Usage with SetDelay\n\n**Definitions**\n\n```wolfram\naa[x_]\n```"
         |>
       |>
     |>

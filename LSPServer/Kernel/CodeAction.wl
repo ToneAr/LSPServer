@@ -4,6 +4,7 @@ Begin["`Private`"]
 
 Needs["LSPServer`"]
 Needs["LSPServer`Utils`"]
+Needs["LSPServer`IgnorePatterns`"]
 Needs["CodeInspector`"]
 Needs["CodeInspector`Utils`"]
 Needs["CodeParser`"]
@@ -47,6 +48,7 @@ Module[{params, id, doc, uri},
   <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
     "textDocument/concreteParse",
     "textDocument/suppressedRegions",
+    "textDocument/parseIgnoreComments",
     "textDocument/runConcreteDiagnostics",
     "textDocument/aggregateParse",
     "textDocument/runAggregateDiagnostics",
@@ -337,6 +339,84 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
 
     ,
     {lint, lints}
+  ];
+
+  (*
+  Add "Disable rule" quick fixes for each lint that intersects the cursor.
+  These offer to insert wl-disable-line or wl-disable-next-line comments.
+  *)
+  text = Lookup[entry, "Text", ""];
+  
+  Module[{textLines, lintTag, lintData, lintSrc, lintLine0, lineText, 
+          disableLineEdit, disableNextLineEdit, disableLineText, disableNextLineText,
+          lineEndChar, lintDiagnostics, ignoreData, tagStr},
+    
+    textLines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
+    
+    (* Get ignore data to skip already-suppressed lints *)
+    ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
+    
+    Do[
+      lintTag = lint[[1]];
+      tagStr = If[StringQ[lintTag], lintTag, SymbolName[lintTag]];
+      lintData = lint[[4]];
+      lintSrc = Lookup[lintData, Source, Lookup[lintData, CodeParser`Source, {{1, 1}, {1, 1}}]];
+      
+      (* Check if this lint intersects the cursor (1-based) *)
+      If[!SourceMemberIntersectingQ[lintSrc, cursor],
+        Continue[]
+      ];
+      
+      (* Skip already-suppressed lints *)
+      If[ShouldIgnoreDiagnostic[lint, ignoreData],
+        Continue[]
+      ];
+      
+      (* 0-based line number for LSP *)
+      lintLine0 = lintSrc[[1, 1]] - 1;
+      
+      lintDiagnostics = lintToDiagnostics[lint];
+      
+      (* --- Action 1: Disable for this line --- *)
+      (* Insert " (* wl-disable-line RuleName *)" at end of the line *)
+      If[lintLine0 < Length[textLines],
+        lineText = textLines[[lintLine0 + 1]];
+        lineEndChar = StringLength[lineText];
+        disableLineText = " (* wl-disable-line " <> tagStr <> " *)";
+        
+        disableLineEdit = <| "changes" -> <| uri -> {
+          <| "range" -> <| "start" -> <| "line" -> lintLine0, "character" -> lineEndChar |>,
+                           "end" -> <| "line" -> lintLine0, "character" -> lineEndChar |> |>,
+             "newText" -> disableLineText |>
+        } |> |>;
+        
+        AppendTo[lspActions, <|
+          "title" -> "Disable \"" <> tagStr <> "\" for this line",
+          "kind" -> "quickfix",
+          "edit" -> disableLineEdit,
+          "diagnostics" -> lintDiagnostics
+        |>]
+      ];
+      
+      (* --- Action 2: Disable for next line --- *)
+      (* Insert "(* wl-disable-next-line RuleName *)\n" before the diagnostic's line *)
+      disableNextLineText = "(* wl-disable-next-line " <> tagStr <> " *)\n";
+      
+      disableNextLineEdit = <| "changes" -> <| uri -> {
+        <| "range" -> <| "start" -> <| "line" -> lintLine0, "character" -> 0 |>,
+                         "end" -> <| "line" -> lintLine0, "character" -> 0 |> |>,
+           "newText" -> disableNextLineText |>
+      } |> |>;
+      
+      AppendTo[lspActions, <|
+        "title" -> "Disable \"" <> tagStr <> "\" for next line",
+        "kind" -> "quickfix",
+        "edit" -> disableNextLineEdit,
+        "diagnostics" -> lintDiagnostics
+      |>],
+      
+      {lint, lints}
+    ]
   ];
 
   {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> lspActions |>}

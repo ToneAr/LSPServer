@@ -1,4 +1,138 @@
 
+## 2.10 - Unreleased
+
+### New Features
+
+#### Smart Association Key Autocomplete
+
+Intelligent autocompletion for association keys that understands variable types and nested structures.
+
+- **Quote trigger**: Type `data["` to see all string keys for `data`
+- **Bracket trigger**: Type `data[` or `data[[` to see keys without typing a quote
+- **Chained access**: `data["users"]["` navigates nested associations and suggests keys at the correct level
+- **Comma Part syntax**: `data["users", 1, "` navigates through multi-key Part access
+- **Key[] wrapper**: `data[Key["` works like `data["`
+- **List-of-associations**: `list[[` on `{<|...|>, <|...|>}` suggests numeric indices `{1, 2, ...}`; `list[[1]]["` suggests keys from element 1 specifically
+- **Per-element keys**: Different elements can have different keys; `list[[1]]["` and `list[[2]]["` may suggest different sets
+- **`All` and `Span`**: `list[[All]]["` and `list[[;;, "` suggest merged keys from all elements
+- **Mixed key types**: Integer keys like `<|1 -> "one", "x" -> 3|>` are included in suggestions
+- **Prefix filtering**: Typing partial keys (e.g., `"ho`) filters to matching keys (`hostname`, `hostport`)
+- **Text fallback**: Provides completions even when the CST is unavailable (e.g., during typing)
+- **Correct textEdit ranges**: Handles existing closing quotes and generates proper insertion ranges
+
+#### Multi-Source Completion Engine
+
+Completely rewritten completion system with six prioritized sources:
+
+1. **Paclet/workspace symbols** (highest priority) -- symbols defined in your project
+2. **External dependency symbols** -- symbols from packages loaded via `Needs[]`/`Get[]`
+3. **Kernel context symbols** -- symbols from any kernel-known context (e.g., `Internal`Bag`, `Developer`ToPackedArray`) using `Names[]`
+4. **System built-in symbols** -- all built-in functions and constants
+5. **Options** -- known Wolfram Language options with ` -> ` auto-insert
+6. **Context paths** -- all kernel-known contexts discovered via `Contexts[]`
+
+Trigger characters: `$` (system variables), `` ` `` (context paths), `[` (function args / association keys), `"` (association string keys). Results deduplicated and limited to 100 items. Supports lazy documentation loading via `completionItem/resolve`.
+
+#### Kernel Context Awareness
+
+Contexts like `Internal``, `Developer``, `Compile``, and all other kernel-resident contexts are now recognized as always available:
+
+- **No false warnings**: Using `Internal`Bag` or `Developer`ToPackedArray` no longer produces "context not loaded" warnings. The LSP uses `Contexts[]` to discover all kernel-known contexts dynamically.
+- **Context completions**: Typing `` Internal` `` shows all `Internal`` sub-contexts and symbols. All ~1400+ kernel contexts are available for completion.
+- **Symbol completions**: Typing `Internal`Ba` suggests `Internal`Bag`, `Internal`BagPart`, `Internal`BagLength` via `Names[]`.
+
+#### ESLint-Style Diagnostic Suppression
+
+Comprehensive system for suppressing diagnostics at multiple levels:
+
+- **Line-level**: `(* wl-disable-line RuleName *)` -- suppress on current line
+- **Next-line**: `(* wl-disable-next-line RuleName *)` -- suppress on next line
+- **Block-level**: `(* wl-disable RuleName *)` ... `(* wl-enable RuleName *)` -- suppress within a block
+- **File-level**: `(* wl-disable-file RuleName *)` -- suppress for entire file
+- **Project-level**: `.wllintrc` or `.wllintrc.json` configuration file
+
+Supports wildcards (`*` for all rules), prefix matching (`Undefined*`), and multiple rules per directive. See [docs/ignore-patterns.md](docs/ignore-patterns.md) for full documentation.
+
+#### Quick Fix Code Actions for Suppression
+
+Two new code actions available on any diagnostic (lightbulb menu):
+
+- **"Disable RuleName for this line"** -- appends `(* wl-disable-line RuleName *)` to the end of the line
+- **"Disable RuleName for next line"** -- inserts `(* wl-disable-next-line RuleName *)` above the line
+
+Already-suppressed diagnostics are automatically skipped.
+
+#### Workspace Symbol Index
+
+Full workspace-wide symbol tracking via the new PacletIndex system:
+
+- **Cross-file go-to-definition**: Jump to where a symbol is defined in any workspace file
+- **Workspace symbol search**: Search symbols across the entire project (Ctrl+T / Cmd+T)
+- **Symbol visibility tracking**: Distinguishes public vs private symbols based on package structure
+- **Definition kinds**: Tracks functions, constants, options, attributes, and public declarations
+- **Usage extraction**: Extracts `::usage` messages from workspace files for hover and completion
+- **Dependency loading**: Automatically loads external packages via `Needs[]` for completions
+- **Incremental updates**: Re-indexes individual files on save/change without full workspace scan
+
+#### Enhanced Hover with Context Display
+
+Hover information now shows the full context path for all symbol types:
+
+- **System symbols**: Shows `` `System` `` followed by usage and documentation link
+- **User-defined symbols**: Shows the context from PacletIndex (e.g., `` `MyPackage`Private` ``) followed by usage and definition patterns
+- **External package symbols**: Shows the package context (e.g., `` `Developer` ``) followed by usage, definition patterns extracted from `DownValues`/`UpValues`/`SubValues`, and documentation link
+
+#### Workspace Diagnostics
+
+New diagnostic categories integrated into the publishing pipeline:
+
+- **Undefined symbol detection**: Symbols not recognized in system, paclet, or local scope are flagged
+- **Unloaded context warnings**: Using `Developer`ToPackedArray` without `Needs["Developer`"]` produces a warning (except for kernel-resident contexts which are always available)
+- **Ignore pattern filtering**: All diagnostics pass through the `wl-disable` comment system before publishing
+
+#### Inlay Hints
+
+Context hints shown inline for symbols from non-System, non-Global contexts. Helps identify where a symbol is defined without hovering.
+
+Infrastructure also includes (currently disabled) parameter name hints for known function signatures and return type hints based on naming conventions.
+
+#### Enhanced Folding Support
+
+Improved code folding to support all multi-line constructs:
+
+- All function calls: `f[a, b, c]`
+- Lists: `{1, 2, 3}`
+- Associations: `<|k -> v|>`
+- Part expressions: `data[[i, j]]`
+- Parenthesized groups: `(a + b)`
+- Nested structures with individual folding regions
+
+Added `startCharacter` and `endCharacter` to folding ranges for better editor support.
+
+#### Workspace Folder Support
+
+- Handles `workspace/didChangeWorkspaceFolders` notifications
+- Adding or removing workspace folders triggers re-indexing of affected files
+- Registered with `changeNotifications: true`
+
+### Files Added
+- `LSPServer/Kernel/Completion.wl` -- Multi-source completion engine with association key autocomplete
+- `LSPServer/Kernel/IgnorePatterns.wl` -- ESLint-style diagnostic suppression
+- `LSPServer/Kernel/PacletIndex.wl` -- Workspace symbol index, context tracking, dependency management
+- `LSPServer/Kernel/InlayHints.wl` -- Inlay hints provider
+- `docs/ignore-patterns.md` -- Full documentation for diagnostic suppression
+
+### Files Modified
+- `LSPServer/Kernel/Hover.wl` -- Context display, external symbol hover, three-tier resolution chain
+- `LSPServer/Kernel/CodeAction.wl` -- Quick fix code actions for diagnostic suppression
+- `LSPServer/Kernel/Diagnostics.wl` -- Workspace diagnostics, ignore pattern integration
+- `LSPServer/Kernel/Workspace.wl` -- Workspace symbol search, folder change handling
+- `LSPServer/Kernel/FoldingRange.wl` -- Enhanced folding support
+- `LSPServer/Kernel/LSPServer.wl` -- Module loading, trigger characters, capability registration, initialization
+- `CMakeLists.txt` -- Added new source files to build
+- `Tests/hover/*.wlt` -- Updated test expectations for context display
+
+
 ## 1.9 - XX Dec, 2022
 
 

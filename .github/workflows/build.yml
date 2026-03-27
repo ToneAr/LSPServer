@@ -1,0 +1,136 @@
+name: Build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, build]
+  pull_request:
+    branches: [main, build]
+env:
+  WOLFRAMSCRIPT_ENTITLEMENTID: ${{ secrets.WOLFRAMSCRIPT_ENTITLEMENTID }}
+  WLPR_PACLET_SITE: https://resources.wolframcloud.com/PacletRepository/pacletsite
+  WOLFRAM_ENGINE_VERSION: "14.1.0"
+
+jobs:
+
+  # ── Extract WolframLibrary headers from the Linux container ──────────────
+  extract-headers:
+    name: Extract Wolfram headers
+    runs-on: ubuntu-latest
+    container:
+      image: wolframresearch/wolframengine:14.1.0
+      options: --user root
+    steps:
+      - name: Find and upload WolframLibrary headers
+        run: |
+          HEADER_DIR=$(find /usr/local/Wolfram -name "WolframLibrary.h" 2>/dev/null | head -1 | xargs dirname)
+          echo "Header dir: $HEADER_DIR"
+          cp -r "$HEADER_DIR" /tmp/wolfram-headers
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wolfram-headers
+          path: /tmp/wolfram-headers/
+
+  # ── Compile the C++ library on every platform ────────────────────────────
+  build-library:
+    name: Build (${{ matrix.systemid }})
+    needs: extract-headers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            systemid: Linux-x86-64
+            version_number: "1410"
+          - runner: ubuntu-24.04-arm
+            systemid: Linux-ARM64
+            version_number: "1410"
+          - runner: macos-latest
+            systemid: MacOSX-x86-64
+            version_number: "1410"
+            osx_arch: x86_64
+            osx_deployment_target: "10.15"
+          - runner: macos-latest
+            systemid: MacOSX-ARM64
+            version_number: "1410"
+            osx_arch: arm64
+            osx_deployment_target: "11.0"
+          - runner: windows-latest
+            systemid: Windows-x86-64
+            version_number: "1410"
+            msvc_arch: x64
+          - runner: windows-latest
+            systemid: Windows-ARM64
+            version_number: "1410"
+            msvc_arch: ARM64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Wolfram headers
+        uses: actions/download-artifact@v4
+        with:
+          name: wolfram-headers
+          path: wolfram-headers/
+
+      - name: Configure CMake (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWOLFRAMLIBRARY_INCLUDE_DIR="${{ github.workspace }}/wolfram-headers" \
+            -DSYSTEMID="${{ matrix.systemid }}" \
+            -DVERSION_NUMBER="${{ matrix.version_number }}" \
+            ${{ matrix.osx_arch && format('-DCMAKE_OSX_ARCHITECTURES={0} -DCMAKE_OSX_DEPLOYMENT_TARGET={1} -DMACOSX_VERSION_MIN={1}', matrix.osx_arch, matrix.osx_deployment_target) || '' }}
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -B build `
+            -A ${{ matrix.msvc_arch }} `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DWOLFRAMLIBRARY_INCLUDE_DIR="${{ github.workspace }}/wolfram-headers" `
+            -DSYSTEMID="${{ matrix.systemid }}" `
+            -DVERSION_NUMBER="${{ matrix.version_number }}"
+
+      - name: Build
+        run: cmake --build build --config Release --target lspserver-lib
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ matrix.systemid }}
+          path: build/paclet/LSPServer/LibraryResources/${{ matrix.systemid }}/
+
+  # ── Collect all compiled libraries and commit ────────────────────────────
+  package:
+    name: Commit libraries
+    needs: build-library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all library artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lib-*
+          path: artifacts/
+          merge-multiple: false
+
+      - name: Place libraries into source tree
+        run: |
+          for dir in artifacts/lib-*/; do
+            systemid=$(basename "$dir" | sed 's/^lib-//')
+            mkdir -p "LSPServer/LibraryResources/$systemid"
+            cp -r "$dir"* "LSPServer/LibraryResources/$systemid/"
+          done
+
+      - name: Commit and push
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f LSPServer/LibraryResources/
+          git diff --cached --quiet || git commit -m "[build-bot] Updated compiled libraries"
+          git push origin HEAD:refs/heads/${GITHUB_REF_NAME}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

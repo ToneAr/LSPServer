@@ -15,8 +15,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 1, 
     "result" -> <|"contents" -> <|
       "kind" -> "markdown", 
-      "value" -> "**Usage**\n\nf\\[x\\] has multiple definition\\.\n\n**Function Definition Patterns**\n\nf\\[x\\_\\]\n\n\n
-f\\[x\\_String\\]\n\n\n\nf\\[x\\_String\\] /; x\n\n\n\nf\\[x\\_Number\\]\n\n"
+      "value" -> "f[x] has multiple definition.\n\n**Definitions**\n\n```wolfram\nf[x_]\nf[x_String]\nf[x_String] /; x\nf[x_Number]\n```"
         |>
       |>
     |>
@@ -38,7 +37,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 2, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nNo usage message\\.\n\n**Function Definition Patterns**\n\np\\[q\\[x\\_\\]\\]\n\n"
+        "value" -> "**Definitions**\n\n```wolfram\np[q[x_]]\n```"
         |>
       |>
     |>
@@ -76,7 +75,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 4, 
       "result" -> <|"contents" -> 
           <|"kind" -> "markdown", 
-            "value" -> "**Usage**\n\nNo usage message\\.\n\n**Function Definition Patterns**\n\nf2\\[g\\[x\\_\\]\\]\n\n"
+            "value" -> "**Definitions**\n\n```wolfram\nf2[g[x_]]\n```"
           |>
       |>
     |>
@@ -114,7 +113,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 6, 
       "result" -> <|"contents" -> <|
         "kind" -> "markdown", 
-        "value" -> "**Usage**\n\nNo usage message\\.\n\n**Function Definition Patterns**\n\naddTwo\\[a\\_Integer, b\\_\\]\n\n"
+        "value" -> "**Definitions**\n\n```wolfram\naddTwo[a_Integer, b_]\n```"
         |>
       |>
     |>

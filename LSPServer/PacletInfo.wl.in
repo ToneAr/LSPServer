@@ -1,8 +1,9 @@
 
 Paclet[
   Name -> "LSPServer",
-  Version -> "1.9",
+  Version -> "2.9.27",
   WolframVersion -> "12.1+",
+
   Description -> "Language Server Protocol implementation for Wolfram Language.",
   Creator -> "Brenton Bostick <brenton@wolfram.com>",
   BuildDate -> "",
@@ -24,7 +25,7 @@ Paclet[
         {"FreeCharacters", "Data/FreeCharacters.wl"},
         {"FreeLongNames", "Data/FreeLongNames.wl"},
         {"ObsoleteSymbols", "Data/ObsoleteSymbols.wl"},
-        {"SystemCharacters", "Data/SystemCharacters.wl"},
+        {"SystemCharacters", "Data/SystemCharacters.wl"},p
         {"SystemLongNames", "Data/SystemLongNames.wl"},
         {"UndocumentedCharacters", "Data/UndocumentedCharacters.wl"},
         {"UndocumentedLongNames", "Data/UndocumentedLongNames.wl"},
