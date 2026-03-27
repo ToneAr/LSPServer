@@ -1,12 +1,24 @@
 
 if(NOT DEFINED MATHEMATICA_INSTALL_DIR)
-if(CMAKE_HOST_WIN32)
-	set(MATHEMATICA_INSTALL_DIR "C:/Program Files/Wolfram Research/Mathematica/13.1")
-elseif(CMAKE_HOST_APPLE)
-	set(MATHEMATICA_INSTALL_DIR /Applications/Mathematica.app/Contents)
-else()
-	set(MATHEMATICA_INSTALL_DIR /home/tonya/Wolfram/Wolfram/15.0)
-endif()
+	find_program(_WOLFRAMSCRIPT wolframscript)
+	if(_WOLFRAMSCRIPT)
+		execute_process(
+			COMMAND ${_WOLFRAMSCRIPT} -code "Print[$InstallationDirectory]"
+			OUTPUT_VARIABLE MATHEMATICA_INSTALL_DIR
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			TIMEOUT 60
+		)
+	endif()
+	if(NOT MATHEMATICA_INSTALL_DIR)
+		if(CMAKE_HOST_WIN32)
+			set(MATHEMATICA_INSTALL_DIR "C:/Program Files/Wolfram Research/Wolfram Engine/14.1")
+		elseif(CMAKE_HOST_APPLE)
+			set(MATHEMATICA_INSTALL_DIR "/Applications/Wolfram Engine.app/Contents")
+		else()
+			set(MATHEMATICA_INSTALL_DIR "/usr/local/Wolfram/WolframEngine/14.1")
+		endif()
+		message(WARNING "wolframscript not found; using fallback MATHEMATICA_INSTALL_DIR: ${MATHEMATICA_INSTALL_DIR}")
+	endif()
 endif()
 
 if(CMAKE_HOST_WIN32)
