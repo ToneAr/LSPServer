@@ -1,16 +1,24 @@
 
 if(NOT DEFINED MATHEMATICA_INSTALL_DIR)
+	# Auto-detect via wolframscript; override with -DMATHEMATICA_INSTALL_DIR=<path>
 	find_program(_WOLFRAMSCRIPT wolframscript)
+	if(NOT _WOLFRAMSCRIPT)
+		file(GLOB _ws_candidates
+			"$ENV{HOME}/Wolfram/Wolfram/*/Executables/wolframscript"
+			"$ENV{HOME}/Wolfram/WolframEngine/*/Executables/wolframscript"
+			"$ENV{HOME}/Wolfram/Mathematica/*/Executables/wolframscript"
+			"/usr/local/Wolfram/WolframEngine/*/Executables/wolframscript"
+			"/usr/local/Wolfram/Mathematica/*/Executables/wolframscript"
+		)
+		if(_ws_candidates)
+			list(SORT _ws_candidates)
+			list(GET _ws_candidates -1 _WOLFRAMSCRIPT)
+		endif()
+	endif()
 	if(_WOLFRAMSCRIPT)
 		execute_process(
 			COMMAND ${_WOLFRAMSCRIPT} -code "Print[$InstallationDirectory]"
 			OUTPUT_VARIABLE MATHEMATICA_INSTALL_DIR
-			OUTPUT_STRIP_TRAILING_WHITESPACE
-			TIMEOUT 60
-		)
-		execute_process(
-			COMMAND ${_WOLFRAMSCRIPT} -code "Print[First@FileNames[\"WolframKernel\", $InstallationDirectory, Infinity]]"
-			OUTPUT_VARIABLE _WOLFRAMKERNEL_AUTO
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 			TIMEOUT 60
 		)
@@ -58,10 +66,6 @@ else()
 	set(WOLFRAMLIBRARY_INCLUDE_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/IncludeFiles/C)
 	set(MATHLINK_INCLUDE_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/Linux-x86-64/CompilerAdditions)
 	set(MATHLINK_LIB_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/Linux-x86-64/CompilerAdditions)
-endif()
-
-if(_WOLFRAMKERNEL_AUTO)
-	set(WOLFRAMKERNEL_DEFAULT ${_WOLFRAMKERNEL_AUTO})
 endif()
 
 macro(CheckWolframKernel)
