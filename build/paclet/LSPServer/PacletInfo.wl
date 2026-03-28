@@ -6,7 +6,7 @@ Paclet[
 
   Description -> "Language Server Protocol implementation for Wolfram Language.",
   Creator -> "Brenton Bostick <brenton@wolfram.com>",
-  BuildDate -> "Sat 28 Mar 2026 12:42:03",
+  BuildDate -> "Sat 28 Mar 2026 23:52:01",
   BuildNumber -> 0,
   BuildWolframVersionNumber -> 1410,
   BuildWolframLibraryVersion -> 0,
