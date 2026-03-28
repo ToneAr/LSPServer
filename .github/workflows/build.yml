@@ -101,13 +101,19 @@ jobs:
           name: lib-${{ matrix.systemid }}
           path: build/paclet/LSPServer/LibraryResources/${{ matrix.systemid }}/
 
-  # ── Collect all compiled libraries and commit ────────────────────────────
-  package:
-    name: Commit libraries
+  # ── Build the final paclet ───────────────────────────────────────────────
+  final-build:
+    name: Build Paclet Archive
     needs: build-library
     runs-on: ubuntu-latest
+    container:
+      image: wolframresearch/wolframengine:14.1.0
+      options: --user root
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install cmake
+        run: apt-get update && apt-get install -y cmake
 
       - name: Download all library artifacts
         uses: actions/download-artifact@v4
@@ -116,21 +122,76 @@ jobs:
           path: artifacts/
           merge-multiple: false
 
-      - name: Place libraries into source tree
+      - name: Assemble paclet layout
         run: |
+          mkdir -p build/paclet/LSPServer/Kernel
+          mkdir -p build/paclet/LSPServer/Resources/Data
+
+          cp LSPServer/Kernel/*.wl build/paclet/LSPServer/Kernel/
+          cp WolframLanguageSyntax/Data/*.wl build/paclet/LSPServer/Resources/Data/
+
           for dir in artifacts/lib-*/; do
             systemid=$(basename "$dir" | sed 's/^lib-//')
-            mkdir -p "dist/LibraryResources/$systemid"
-            cp -r "$dir"* "dist/LibraryResources/$systemid/"
+            mkdir -p "build/paclet/LSPServer/LibraryResources/$systemid"
+            cp -r "$dir"* "build/paclet/LSPServer/LibraryResources/$systemid/"
           done
 
+          cmake \
+            -DBUILDNUMBER=0 \
+            -DVERSION_NUMBER=1410 \
+            -DWOLFRAMLIBRARY_VERSION=0 \
+            -DPACLETINFO_IN_SOURCE="$PWD/LSPServer/PacletInfo.wl.in" \
+            -DREPLACED_PACLETINFO="$PWD/build/paclet/LSPServer/PacletInfo.wl" \
+            -DTRANSPORT="" \
+            -DLOCAL_BUILD=OFF \
+            -P cmake/ReplacePacletInfo.cmake
+
+      - name: Generate ReplaceLongNamePUA.wl
+        run: |
+          wolframscript \
+            -entitlement "$WOLFRAMSCRIPT_ENTITLEMENTID" \
+            -script "$PWD/LSPServer/Generate/ReplaceLongNamePUA.wl" \
+            -srcDir "$PWD" \
+            -buildDir "$PWD/build" \
+            -pacletLayoutDir "$PWD/build/paclet" \
+            -paclet LSPServer
+
+      - name: Create paclet archive
+        run: |
+          wolframscript \
+            -entitlement "$WOLFRAMSCRIPT_ENTITLEMENTID" \
+            -script "$PWD/CodeTools/Generate/CreatePacletArchive.wl" \
+            -buildDir "$PWD/build" \
+            -pacletLayoutDir "$PWD/build/paclet" \
+            -paclet LSPServer
+
+      - name: Upload paclet layout artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paclet-layout
+          path: build/paclet/LSPServer/
+
+  # ── Commit the assembled paclet back to the repo ─────────────────────────
+  commit-paclet:
+    name: Commit Paclet
+    needs: final-build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download paclet layout
+        uses: actions/download-artifact@v4
+        with:
+          name: paclet-layout
+          path: build/paclet/LSPServer/
+
       - name: Commit and push
-        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f dist/LibraryResources/
-          git diff --cached --quiet || git commit -m "[build-bot] Updated compiled libraries"
+          git add -f build/paclet/LSPServer/
+          git diff --cached --quiet || git commit -m "[build-bot] Updated compiled paclet"
           git push origin HEAD:refs/heads/${GITHUB_REF_NAME}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
