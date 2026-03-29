@@ -28,6 +28,7 @@ find_program(CODEPARSER_EXE
 set(PACLET "LSPServer")
 set(PACLET_LAYOUT_DIR "paclet" CACHE FILEPATH "Path to complete, built paclet layout (relative to build directory)")
 set(WOLFRAMKERNEL ${WOLFRAMKERNEL_DEFAULT} CACHE FILEPATH "Path to WolframKernel")
+set(WOLFRAMSCRIPT_ENTITLEMENT_ID "" CACHE STRING "Wolfram Engine entitlement ID for wolframscript licensing (for use with Wolfram Engine on CI)")
 set(LOCAL_BUILD OFF CACHE BOOL "Local build")
 #
 # Time to pause when starting kernel
@@ -97,10 +98,13 @@ set(STATIC_WL_PACLET_KERNEL_SOURCES
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/FoldingRange.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Formatting.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Hover.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/IgnorePatterns.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/ImplicitTokens.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/InlayHints.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Library.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/ListenSocket.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/LSPServer.wl
+	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/PacletIndex.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/References.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/SelectionRange.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/SemanticTokens.wl
@@ -147,8 +151,23 @@ set(GENERATED_WL_PACLET_KERNEL_SOURCES
 #
 # Set VERSION_NUMBER, SYSTEMID, and PACLET_VERSION
 #
-CheckWolframKernel()
-CheckPacletInfo()
+# When SYSTEMID and VERSION_NUMBER are pre-defined (e.g. cross-platform CI),
+# skip the kernel checks entirely.
+#
+if(DEFINED SYSTEMID AND DEFINED VERSION_NUMBER)
+	message(STATUS "Cross-compile mode: skipping kernel checks")
+	message(STATUS "SYSTEMID (pre-defined): ${SYSTEMID}")
+	message(STATUS "VERSION_NUMBER (pre-defined): ${VERSION_NUMBER}")
+	if(NOT DEFINED PACLET_VERSION)
+		set(PACLET_VERSION "0.0")
+	endif()
+	if(NOT DEFINED PACLET_WOLFRAMVERSION)
+		set(PACLET_WOLFRAMVERSION "14+")
+	endif()
+else()
+	CheckWolframKernel()
+	CheckPacletInfo()
+endif()
 
 #
 # Force re-configure if PacletInfo.wl.in changes, e.g. paclet version is changed and name of .paclet has changed
@@ -172,7 +191,9 @@ endif()
 
 if(APPLE)
 	include(MacOSXVersionMin)
-	CheckMacOSXVersionMin()
+	if(NOT DEFINED MACOSX_VERSION_MIN)
+		CheckMacOSXVersionMin()
+	endif()
     if(NOT MACOSX_VERSION_MIN STREQUAL CMAKE_OSX_DEPLOYMENT_TARGET)
     message(WARNING
     	"MACOSX_VERSION_MIN: ${MACOSX_VERSION_MIN}\n"
@@ -256,7 +277,7 @@ add_custom_command(
 	OUTPUT
 		${PROJECT_BINARY_DIR}/paclet/LSPServer/Kernel/ReplaceLongNamePUA.wl
 	COMMAND
-		${CMAKE_COMMAND} -DSCRIPT=${PROJECT_SOURCE_DIR}/${PACLET}/Generate/ReplaceLongNamePUA.wl -DSRCDIR=${PROJECT_SOURCE_DIR} -DBUILDDIR=${PROJECT_BINARY_DIR} -DWOLFRAMKERNEL=${WOLFRAMKERNEL} -DKERNEL_TIMEOUT=${KERNEL_TIMEOUT} -P ${PROJECT_SOURCE_DIR}/cmake/WolframScript.cmake
+		${CMAKE_COMMAND} -DSCRIPT=${PROJECT_SOURCE_DIR}/${PACLET}/Generate/ReplaceLongNamePUA.wl -DSRCDIR=${PROJECT_SOURCE_DIR} -DBUILDDIR=${PROJECT_BINARY_DIR} -DWOLFRAMKERNEL=${WOLFRAMKERNEL} -DKERNEL_TIMEOUT=${KERNEL_TIMEOUT} -DWOLFRAMSCRIPT_ENTITLEMENT_ID=${WOLFRAMSCRIPT_ENTITLEMENT_ID} -P ${PROJECT_SOURCE_DIR}/cmake/WolframScript.cmake
 	COMMAND
 		${CMAKE_COMMAND} -DSRC=${PROJECT_BINARY_DIR}/paclet/LSPServer/Kernel/ReplaceLongNamePUA.wl -DCODEPARSER_EXE=${CODEPARSER_EXE} -DWOLFRAMKERNEL=${WOLFRAMKERNEL} -DKERNEL_TIMEOUT=${KERNEL_TIMEOUT} -P ${PROJECT_SOURCE_DIR}/cmake/InspectFile.cmake
 	DEPENDS
@@ -414,9 +435,9 @@ set(PACLET_SOURCES
 #
 
 if(LOCAL_BUILD)
-set(PACLET_OUTPUT ${PROJECT_BINARY_DIR}/paclet/${PACLET}-${LOCAL_BUILD_VERSION}.paclet)
+set(PACLET_OUTPUT ${PROJECT_BINARY_DIR}/paclet/${PACLET}--${LOCAL_BUILD_VERSION}.paclet)
 else(LOCAL_BUILD)
-set(PACLET_OUTPUT ${PROJECT_BINARY_DIR}/paclet/${PACLET}-${PACLET_VERSION}.paclet)
+set(PACLET_OUTPUT ${PROJECT_BINARY_DIR}/paclet/${PACLET}--${PACLET_VERSION}.paclet)
 endif(LOCAL_BUILD)
 
 add_custom_target(create-paclet-archive
@@ -437,7 +458,7 @@ add_custom_command(
 		#
 		# see: RE-515885
 		#
-		${CMAKE_COMMAND} -DRETRY_ON_FAILURE=ON -DSCRIPT=${PROJECT_SOURCE_DIR}/CodeTools/Generate/CreatePacletArchive.wl -DBUILDDIR=${PROJECT_BINARY_DIR} -DPACLET_LAYOUT_DIR=${PACLET_LAYOUT_DIR} -DPACLET=${PACLET} -DKERNEL_TIMEOUT=${KERNEL_TIMEOUT} -DWOLFRAMKERNEL=${WOLFRAMKERNEL} -P ${PROJECT_SOURCE_DIR}/cmake/WolframScript.cmake
+		${CMAKE_COMMAND} -DRETRY_ON_FAILURE=ON -DSCRIPT=${PROJECT_SOURCE_DIR}/CodeTools/Generate/CreatePacletArchive.wl -DBUILDDIR=${PROJECT_BINARY_DIR} -DPACLET_LAYOUT_DIR=${PACLET_LAYOUT_DIR} -DPACLET=${PACLET} -DKERNEL_TIMEOUT=${KERNEL_TIMEOUT} -DWOLFRAMKERNEL=${WOLFRAMKERNEL} -DWOLFRAMSCRIPT_ENTITLEMENT_ID=${WOLFRAMSCRIPT_ENTITLEMENT_ID} -P ${PROJECT_SOURCE_DIR}/cmake/WolframScript.cmake
 	DEPENDS
 		${PACLET_SOURCES}
 		${PROJECT_SOURCE_DIR}/CodeTools/Generate/CreatePacletArchive.wl

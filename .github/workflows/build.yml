@@ -1,0 +1,239 @@
+name: Build
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - build*
+      - v*
+env:
+  WOLFRAMSCRIPT_ENTITLEMENTID: ${{ secrets.WOLFRAMSCRIPT_ENTITLEMENTID }}
+  WOLFRAM_ENGINE_VERSION: "14.1.0"
+jobs:
+
+  # ── Extract WolframLibrary headers from the Linux container ──────────────
+  extract-headers:
+    name: Extract Wolfram headers
+    runs-on: ubuntu-latest
+    container:
+      image: wolframresearch/wolframengine:14.1.0
+      options: --user root
+    steps:
+      - name: Find and upload WolframLibrary headers
+        run: |
+          HEADER_DIR=$(find /usr/local/Wolfram -name "WolframLibrary.h" 2>/dev/null | head -1 | xargs dirname)
+          echo "Header dir: $HEADER_DIR"
+          cp -r "$HEADER_DIR" /tmp/wolfram-headers
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wolfram-headers
+          path: /tmp/wolfram-headers/
+
+  # ── Compile the C++ library on every platform ────────────────────────────
+  build-library:
+    name: Build (${{ matrix.systemid }})
+    needs: extract-headers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            systemid: Linux-x86-64
+            version_number: "1410"
+          - runner: ubuntu-24.04-arm
+            systemid: Linux-ARM64
+            version_number: "1410"
+          - runner: macos-latest
+            systemid: MacOSX-x86-64
+            version_number: "1410"
+            osx_arch: x86_64
+            osx_deployment_target: "10.15"
+          - runner: macos-latest
+            systemid: MacOSX-ARM64
+            version_number: "1410"
+            osx_arch: arm64
+            osx_deployment_target: "11.0"
+          - runner: windows-latest
+            systemid: Windows-x86-64
+            version_number: "1410"
+            msvc_arch: x64
+          - runner: windows-latest
+            systemid: Windows-ARM64
+            version_number: "1410"
+            msvc_arch: ARM64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Wolfram headers
+        uses: actions/download-artifact@v4
+        with:
+          name: wolfram-headers
+          path: wolfram-headers/
+
+      - name: Configure CMake (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWOLFRAMLIBRARY_INCLUDE_DIR="${{ github.workspace }}/wolfram-headers" \
+            -DSYSTEMID="${{ matrix.systemid }}" \
+            -DVERSION_NUMBER="${{ matrix.version_number }}" \
+            ${{ matrix.osx_arch && format('-DCMAKE_OSX_ARCHITECTURES={0} -DCMAKE_OSX_DEPLOYMENT_TARGET={1} -DMACOSX_VERSION_MIN={1}', matrix.osx_arch, matrix.osx_deployment_target) || '' }}
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -B build `
+            -A ${{ matrix.msvc_arch }} `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DWOLFRAMLIBRARY_INCLUDE_DIR="${{ github.workspace }}/wolfram-headers" `
+            -DSYSTEMID="${{ matrix.systemid }}" `
+            -DVERSION_NUMBER="${{ matrix.version_number }}"
+
+      - name: Build
+        run: cmake --build build --config Release --target lspserver-lib
+
+      - name: Upload library artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ matrix.systemid }}
+          path: build/paclet/LSPServer/LibraryResources/${{ matrix.systemid }}/
+
+  # ── Build the final paclet ───────────────────────────────────────────────
+  final-build:
+    name: Build Paclet Archive
+    needs: build-library
+    runs-on: ubuntu-latest
+    container:
+      image: wolframresearch/wolframengine:14.1.0
+      options: --user root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cmake
+        run: apt-get update && apt-get install -y cmake
+
+      - name: Download all library artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lib-*
+          path: artifacts/
+          merge-multiple: false
+
+      - name: Assemble paclet layout
+        run: |
+          mkdir -p build/paclet/LSPServer/Kernel
+          mkdir -p build/paclet/LSPServer/Resources/Data
+
+          cp LSPServer/Kernel/*.wl build/paclet/LSPServer/Kernel/
+          cp WolframLanguageSyntax/Data/*.wl build/paclet/LSPServer/Resources/Data/
+
+          for dir in artifacts/lib-*/; do
+            systemid=$(basename "$dir" | sed 's/^lib-//')
+            mkdir -p "build/paclet/LSPServer/LibraryResources/$systemid"
+            cp -r "$dir"* "build/paclet/LSPServer/LibraryResources/$systemid/"
+          done
+
+          cmake \
+            -DBUILDNUMBER=0 \
+            -DVERSION_NUMBER=1410 \
+            -DWOLFRAMLIBRARY_VERSION=0 \
+            -DPACLETINFO_IN_SOURCE="$PWD/LSPServer/PacletInfo.wl.in" \
+            -DREPLACED_PACLETINFO="$PWD/build/paclet/LSPServer/PacletInfo.wl" \
+            -DTRANSPORT="" \
+            -DLOCAL_BUILD=OFF \
+            -P cmake/ReplacePacletInfo.cmake
+
+      - name: Generate ReplaceLongNamePUA.wl
+        run: |
+          wolframscript \
+            -entitlement "$WOLFRAMSCRIPT_ENTITLEMENTID" \
+            -script "$PWD/LSPServer/Generate/ReplaceLongNamePUA.wl" \
+            -srcDir "$PWD" \
+            -buildDir "$PWD/build" \
+            -pacletLayoutDir "$PWD/build/paclet" \
+            -paclet LSPServer
+
+      - name: Create paclet archive
+        run: |
+          wolframscript \
+            -entitlement "$WOLFRAMSCRIPT_ENTITLEMENTID" \
+            -script "$PWD/CodeTools/Generate/CreatePacletArchive.wl" \
+            -buildDir "$PWD/build" \
+            -pacletLayoutDir "$PWD/build/paclet" \
+            -paclet LSPServer
+
+      - name: Upload paclet layout artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paclet-layout
+          path: build/paclet/LSPServer/
+
+      - name: Upload paclet archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paclet-archive
+          path: build/paclet/LSPServer-*.paclet
+
+  # ── Commit the assembled paclet back to the repo ─────────────────────────
+  commit-paclet:
+    name: Commit Paclet
+    needs: final-build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download paclet layout
+        uses: actions/download-artifact@v4
+        with:
+          name: paclet-layout
+          path: build/paclet/LSPServer/
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f build/paclet/LSPServer/
+          git diff --cached --quiet || git commit -m "[build-bot] ${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TARGET_BRANCH="${{ github.event.base_ref }}"
+            TARGET_BRANCH="${TARGET_BRANCH#refs/heads/}"
+          else
+            TARGET_BRANCH="${GITHUB_REF_NAME}"
+          fi
+          git push origin HEAD:refs/heads/${TARGET_BRANCH}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Publish to GitHub Releases ────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: final-build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download paclet archive
+        uses: actions/download-artifact@v4
+        with:
+          name: paclet-archive
+          path: build/paclet/
+
+      - name: Create or update GitHub Release
+        run: |
+          VERSION=$(grep 'Version ->' LSPServer/PacletInfo.wl.in | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          TAG="v$VERSION"
+          PACLET=$(ls build/paclet/LSPServer-*.paclet)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$PACLET" --clobber
+          else
+            gh release create "$TAG" "$PACLET" \
+              --title "LSPServer $VERSION" \
+              --latest
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
