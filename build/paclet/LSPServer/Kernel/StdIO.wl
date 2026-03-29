@@ -71,11 +71,9 @@ Module[{bytes,
     Throw[Null]
   ];
 
-  If[$Debug2,
-      log["\n\n"];
-      log["messages in queue: ", queueSize];
-      log["\n\n"]
-  ];
+  log[2, "\n\n"];
+  log[2, "messages in queue: ", queueSize];
+  log[2, "\n\n"];
 
   bytessIn = {};
   Do[
@@ -86,9 +84,9 @@ Module[{bytes,
 
       UnlockQueue[];
 
-      log["\n\n"];
-      log["FrontMessage size was 0; shutting down"];
-      log["\n\n"];
+      log[0, "\n\n"];
+      log[0, "FrontMessage size was 0; shutting down"];
+      log[0, "\n\n"];
 
       exitHard[];
     ];
@@ -115,11 +113,9 @@ Module[{bytes,
       exitHard[]
     ];
 
-    If[$Debug2,
-      log["C-->S " <> ToString[Length[bytesIn]] <> " bytes"];
-      log["C-->S " <> stringLineTake[FromCharacterCode[Normal[Take[bytesIn, UpTo[1000]]]], UpTo[20]]];
-      log["...\n"]
-    ];
+    log[2, "C-->S " <> ToString[Length[bytesIn]] <> " bytes"];
+    log[2, "C-->S " <> stringLineTake[FromCharacterCode[Normal[Take[bytesIn, UpTo[1000]]]], UpTo[20]]];
+    log[2, "...\n"];
 
     content = Developer`ReadRawJSONString[ByteArrayToString[bytesIn]];
 
@@ -170,17 +166,20 @@ writeLSPResult["StdIO", sock_, contents_] := writeLSPResult["StdIO", contents]
 writeLSPResult["StdIO", contents_] :=
 Module[{str, bytes, res},
 
+  (* log[1, "Message to client :> ", InputForm[contents]]; *)
+
   (*
   write out each content as a byte array
   *)
   Do[ (* content *)
 
+    
     str = Developer`WriteRawJSONString[content];
 
     If[FailureQ[str],
-      log["\n\n"];
-      log["Could not convert to JSON: ", content];
-      log["\n\n"];
+      log[0, "\n\n"];
+      log[0, "Could not convert to JSON: ", content];
+      log[0, "\n\n"];
 
       exitHard[]
     ];
@@ -189,9 +188,9 @@ Module[{str, bytes, res},
 
     If[!ByteArrayQ[bytes],
 
-      log["\n\n"];
-      log["invalid bytes: ", bytes];
-      log["\n\n"];
+      log[0, "\n\n"];
+      log[0, "invalid bytes: ", bytes];
+      log[0, "\n\n"];
 
       exitHard[]
     ];
@@ -200,10 +199,8 @@ Module[{str, bytes, res},
     Write the headers
     *)
     Do[ (* line *)
-      If[$Debug2,
-        log[""];
-        log["C<--S  ", line]
-      ];
+      log[2, ""];
+      log[2, "C<--S  ", line];
 
       res = WriteLineToStdOut[line];
       If[res =!= 0,
@@ -219,10 +216,8 @@ Module[{str, bytes, res},
     (*
     Write the body
     *)
-    If[$Debug2,
-      log["C<--S  ", stringLineTake[FromCharacterCode[Normal[Take[bytes, UpTo[1000]]]], UpTo[20]]];
-      log["...\n"]
-    ];
+    log[1, "C<--S  ", stringLineTake[FromCharacterCode[Normal[Take[bytes, UpTo[1000]]]], UpTo[20]]];
+    log[1, "...\n"];
 
     res = WriteBytesToStdOut[bytes];
     If[res =!= 0,
@@ -230,7 +225,10 @@ Module[{str, bytes, res},
       logStdIOErr[res];
 
       exitHard[]
-    ]
+    ];
+
+    log[1, ""];
+    log[1, "====================================== Message Cycle Exit ======================================= \n"];
     ,
     {content, contents}
   ] (* Do content *)
@@ -281,9 +279,9 @@ Module[{errStr, ferror, eof},
       errStr = "UNKNOWN ERROR: " <> ToString[err]
   ];
 
-  log["\n\n"];
-  log["StdIO Error: ", errStr];
-  log["\n\n"];
+  log[1, "\n\n"];
+  log[1, "StdIO Error: ", errStr];
+  log[1, "\n\n"];
 
   eof
 ]
@@ -300,7 +298,7 @@ Module[{content, contents},
   *)
 
   While[True,
-
+    
     TryQueue["StdIO"];
 
     ProcessScheduledJobs[];
@@ -313,13 +311,14 @@ Module[{content, contents},
     content = $ContentQueue[[1]];
     $ContentQueue = Rest[$ContentQueue];
 
-    If[$Debug2,
-      log["taking first from $ContentQueue: ", #["method"]&[content]];
-      log["rest of $ContentQueue (up to 20): ", Take[#["method"]& /@ $ContentQueue, UpTo[20]]];
-      log["..."]
-    ];
+    log[2, "taking first from $ContentQueue: ", #["method"]&[content]];
+    log[2, "rest of $ContentQueue (up to 20): ", Take[#["method"]& /@ $ContentQueue, UpTo[20]]];
+    log[2, "..."];
+    
 
     contents = LSPEvaluate[content];
+
+    log[1, "LSP evaluated message :> ", InputForm[StringTake[Developer`WriteRawJSONString[contents], UpTo[200]]], "\n"];
 
     (* write out evaluated results to the client *)
     writeLSPResult["StdIO", sock, contents];

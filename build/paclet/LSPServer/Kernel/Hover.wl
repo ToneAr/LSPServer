@@ -12,6 +12,19 @@ Needs["CodeFormatter`"]
 Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
 
+(* 
+
+  Line width after which new line will be inserted for Hover function definition pattern.
+   
+  The default line width is 78, which unnecessarily breaks the line in Hover function 
+  definition pattern after 78 characters. We find many function definition patterns
+  are usually more than 78 characters. So, we are setting the line width to 200.
+
+  see bug #449934
+
+*)
+$HoverLineWidth = 200;
+
 
 (*
 Cached Association sets for O(1) symbol category lookup.
@@ -32,11 +45,11 @@ $obsoleteSet := $obsoleteSet = Association[Thread[
 
 expandContent[content:KeyValuePattern["method" -> "textDocument/hover"], pos_] :=
 Catch[
-Module[{params, id, doc, uri},
+Module[{params, id, doc, uri, res},
 
-  If[$Debug2,
-    log["textDocument/hover: enter expand"]
-  ];
+  
+  log[1, "textDocument/hover: enter expand"];
+
   
   id = content["id"];
   params = content["params"];
@@ -45,10 +58,8 @@ Module[{params, id, doc, uri},
 
     $CancelMap[id] =.;
 
-    If[$Debug2,
-      log["canceled"]
-    ];
-    
+    log[2, "canceled"];
+  
     Throw[{<| "method" -> "textDocument/hoverFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -57,19 +68,22 @@ Module[{params, id, doc, uri},
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
   
-    If[$Debug2,
-      log["stale"]
-    ];
+    log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/hoverFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
-  <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
+  res = <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
       "textDocument/concreteParse",
       "textDocument/aggregateParse",
       "textDocument/abstractParse",
       "textDocument/hoverFencepost"
-  }
+  };
+
+  log[1, "textDocument/hover: exit"];
+
+  res
+
 ]]
   
 handleContent[content:KeyValuePattern["method" -> "textDocument/hoverFencepost"]] :=
@@ -77,9 +91,9 @@ Catch[
 Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char, pre, ast, cstTabs, syms, toks, nums,
   res},
 
-  If[$Debug2,
-    log["textDocument/hoverFencepost: enter"]
-  ];
+  
+  log[1, "textDocument/hoverFencepost: enter"];
+
 
   id = content["id"];
 
@@ -87,10 +101,8 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
 
     $CancelMap[id] =.;
 
-    If[$Debug2,
-      log["canceled"]
-    ];
-    
+    log[2, "canceled"];
+  
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
   
@@ -100,9 +112,7 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
     
-    If[$Debug2,
-      log["stale"]
-    ];
+    log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
@@ -119,9 +129,7 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
   char+=1;
 
 
-  If[$Debug2,
-    log["hover: before parse"]
-  ];
+  log[2, "hover: before parse"];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
   
@@ -145,10 +153,8 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
     $OpenFilesMap[uri] = entry
   ];
 
-  If[$Debug2,
-    log["hover: after parse"]
-  ];
- 
+  log[2, "hover: after parse"];
+
   If[StringContainsQ[text, "\t"],
     (*
     Adjust the hover position to accommodate tab stops
@@ -161,17 +167,13 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
   ];
 
 
-  If[$Debug2,
-    log["hover: before finding position"]
-  ];
+  log[2, "hover: before finding position"];
 
   toks = Cases[cstTabs,
   LeafNode[_, _,
     KeyValuePattern[Source -> src_ /; SourceMemberQ[src, {line, char}]]], Infinity];
 
-  If[$Debug2,
-    log["hover: after finding position"]
-  ];
+  log[2, "hover: after finding position"];
 
   strs = Cases[toks, LeafNode[String, _, _], Infinity];
 
@@ -194,9 +196,9 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
         {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}
     ];
 
-  If[$Debug2,
-    log["hover: exiting"]
-  ];
+  
+  log[1, "hover hoverFencepost: exit"];
+  
 
   res
 ]]
@@ -475,10 +477,8 @@ Module[{tokenSymbol, functionSource,
     6
   ]; 
 
-  If[$Debug2,
-    log["requiredUsage from handleUserSymbols: "]; 
-    log[requiredUsage];
-  ];
+  log[2, "requiredUsage from handleUserSymbols: "]; 
+  log[2, requiredUsage];
 
 
   (* 
@@ -558,7 +558,7 @@ Module[{tokenSymbol, functionSource,
     If[Length[functionCallPatternCST] == 0,
       functionCallPattern = None
       ,
-      functionCallPattern = CodeFormatCST /@ functionCallPatternCST;
+      functionCallPattern = CodeFormatCST[#, "LineWidth" -> $HoverLineWidth]& /@ functionCallPatternCST;
       functionCallPattern = DeleteDuplicates[functionCallPattern];
       (* Trim trailing whitespace/newlines from each formatted pattern *)
       functionCallPattern = StringReplace[#, RegularExpression["\\s+$"] -> ""]& /@ functionCallPattern;
@@ -1311,13 +1311,7 @@ interpretBox::failed = "unhandled: Linear syntax could not be parsed by ToExpres
 interpretBox[RowBox[children_]] :=
   interpretBox /@ children
 
-(*
-HACK: BeginPackage::usage has typos
 
-TR symbol instead of "TR"
-*)
-(* interpretBox[StyleBox[a_, TR]] :=
-  interpretBox[a] *)
 
 interpretBox[StyleBox[a_, "TI", ___Rule]] :=
   {"*", interpretBox[a], "*"}
@@ -1335,6 +1329,14 @@ interpretBox[StyleBox[___]] := (
   Message[interpretBox::unhandled, "StyleBox with weird args"];
   "\[UnknownGlyph]"
 )
+
+(* 
+    This a workaround for bug #412513, which is a typo in the usage message in the BeginPackage function.
+    When bug #412513 is fix, we can remove this workaround.
+*)
+interpretBox[StyleBox[a_, s_Symbol /; SymbolName[s] == "TR"]] :=
+  interpretBox[ToString @ a]
+
 
 interpretBox[SubscriptBox[a_, b_]] :=
   interpretBox /@ {a, "_", b}
@@ -1434,14 +1436,6 @@ interpretBox[s_Symbol] := (
   "\[UnknownGlyph]" *)
   ToString[s]
 )
-
-(*
-HACK: BeginPackage::usage has typos
-*)
-(* interpretBox[i_Integer] := (
-  Message[interpretBox::unhandled, Integer];
-  "\[UnknownGlyph]"
-) *)
 
 (*
 HACK: Riffle::usage has a Cell expression

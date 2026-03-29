@@ -59,7 +59,7 @@ Module[{params, id, doc, uri},
 
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
@@ -67,7 +67,7 @@ Module[{params, id, doc, uri},
     If[$Debug2,
       log["canceled"]
     ];
-    
+
     Throw[{<| "method" -> "textDocument/completionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -75,7 +75,7 @@ Module[{params, id, doc, uri},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     If[$Debug2,
       log["stale"]
     ];
@@ -109,7 +109,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
     If[$Debug2,
       log["canceled"]
     ];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
@@ -118,7 +118,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -135,6 +135,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   *)
   line += 1;
   char += 1;
+
 
   entry = Lookup[$OpenFilesMap, uri, Null];
   

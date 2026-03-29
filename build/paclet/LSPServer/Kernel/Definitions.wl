@@ -167,11 +167,9 @@ Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles,
 
 expandContent[content:KeyValuePattern["method" -> "textDocument/definition"], pos_] :=
 Catch[
-Module[{params, id, doc, uri},
+Module[{params, id, doc, uri, res},
 
-  If[$Debug2,
-    log["textDocument/definition: enter expand"]
-  ];
+  log[1, "textDocument/definition: enter expand"];
   
   id = content["id"];
   params = content["params"];
@@ -180,9 +178,7 @@ Module[{params, id, doc, uri},
 
     $CancelMap[id] =.;
 
-    If[$Debug2,
-      log["canceled"]
-    ];
+    log[2, "canceled"];
     
     Throw[{<| "method" -> "textDocument/definitionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
@@ -192,19 +188,21 @@ Module[{params, id, doc, uri},
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
   
-    If[$Debug2,
-      log["stale"]
-    ];
+    log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/definitionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
-  <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
+  res = <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
     "textDocument/concreteParse",
     "textDocument/aggregateParse",
     "textDocument/abstractParse",
     "textDocument/definitionFencepost"
-  }
+  };
+
+  log[1, "textDocument/definition: exit"];
+
+  res
 ]]
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/definitionFencepost"]] :=
@@ -212,9 +210,7 @@ Catch[
 Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, namePat, srcs, entry,
   symbolName, pacletDefinitions, localLocations, pacletLocations},
 
-  If[$Debug2,
-    log["textDocument/definitionFencepost: enter"]
-  ];
+  log[1, "textDocument/definitionFencepost: enter"];
 
   id = content["id"];
 
@@ -222,10 +218,8 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
 
     $CancelMap[id] =.;
 
-    If[$Debug2,
-      log["canceled"]
-    ];
-    
+    log[2, "canceled"];
+  
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
   
@@ -235,9 +229,7 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
     
-    If[$Debug2,
-      log["stale"]
-    ];
+    log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
@@ -306,22 +298,22 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
   This includes definitions from other files in the workspace
   *)
   pacletLocations = {};
-  
+
   If[StringQ[$WorkspaceRootPath],
     (*
     Get the bare symbol name (without context)
     *)
     symbolName = StringReplace[symbolName, __ ~~ "`" -> ""];
-    
+
     (*
     Search paclet index for definitions
     *)
     pacletDefinitions = GetSymbolDefinitions[symbolName];
-    
+
     If[$Debug2,
       log["paclet definitions for ", symbolName, ": ", Length[pacletDefinitions]]
     ];
-    
+
     (*
     Convert paclet index definitions to LSP locations
     Exclude definitions from the current file (already in localLocations)
@@ -351,9 +343,9 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
       If[$Debug2,
         log["searching external paclets for: ", symbolName]
       ];
-      
+
       externalLocations = findExternalSymbolDefinition[symbolName];
-      
+
       If[Length[externalLocations] > 0,
         If[$Debug2,
           log["found ", Length[externalLocations], " external definitions"]
@@ -371,6 +363,8 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
   If[$Debug2,
     log["definition locations: ", Length[locations]]
   ];
+
+  log[1, "textDocument/definitionFencepost: exit"];
 
   {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> locations |>}
 ]]

@@ -1,12 +1,12 @@
 
 Paclet[
   Name -> "LSPServer",
-  Version -> "2.9.28",
+  Version -> "2.9.29",
   WolframVersion -> "12.1+",
 
   Description -> "Language Server Protocol implementation for Wolfram Language.",
   Creator -> "Brenton Bostick <brenton@wolfram.com>",
-  BuildDate -> "Sat 28 Mar 2026 23:52:01",
+  BuildDate -> "Sun 29 Mar 2026 22:23:06",
   BuildNumber -> 0,
   BuildWolframVersionNumber -> 1410,
   BuildWolframLibraryVersion -> 0,
@@ -34,5 +34,7 @@ Paclet[
         {"UnsupportedLongNames", "Data/UnsupportedLongNames.wl"}
       }
     }
-  }
+  },
+  PlatformQualifier -> "",
+  SystemID -> {""}
 ]
