@@ -2,9 +2,9 @@ name: Build
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, build]
-  pull_request:
-    branches: [main, master, build]
+    tags:
+      - build*
+      - v*
 env:
   WOLFRAMSCRIPT_ENTITLEMENTID: ${{ secrets.WOLFRAMSCRIPT_ENTITLEMENTID }}
   WOLFRAM_ENGINE_VERSION: "14.1.0"

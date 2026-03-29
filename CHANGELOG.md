@@ -1,5 +1,5 @@
 
-## 2.10 - Unreleased
+## 2.9.28 - 29 Mar 2026
 
 ### New Features
 
@@ -115,12 +115,23 @@ Added `startCharacter` and `endCharacter` to folding ranges for better editor su
 - Adding or removing workspace folders triggers re-indexing of affected files
 - Registered with `changeNotifications: true`
 
+### Build & CI
+
+GitHub Actions workflow for automated cross-platform builds and releases:
+
+- **Automated builds**: CI workflow triggers on push to `master` and `build` branches and on pull requests
+- **Cross-platform**: Builds native libraries for Linux x86-64, Linux ARM64, macOS x86-64, macOS ARM64, Windows x86-64, and Windows ARM64
+- **Release process**: Automatically creates GitHub releases with the built `.paclet` archive as a downloadable artifact when pushing a version tag
+- **WolframScript detection**: Enhanced CMake logic to locate `wolframscript` and `WolframKernel` across default install paths on all platforms
+- **Paclet assembly**: Build pipeline assembles the final paclet archive including entitlement signing in a `dist/` output directory
+
 ### Files Added
 - `LSPServer/Kernel/Completion.wl` -- Multi-source completion engine with association key autocomplete
 - `LSPServer/Kernel/IgnorePatterns.wl` -- ESLint-style diagnostic suppression
 - `LSPServer/Kernel/PacletIndex.wl` -- Workspace symbol index, context tracking, dependency management
 - `LSPServer/Kernel/InlayHints.wl` -- Inlay hints provider
 - `docs/ignore-patterns.md` -- Full documentation for diagnostic suppression
+- `.github/workflows/build.yml` -- GitHub Actions CI/CD workflow
 
 ### Files Modified
 - `LSPServer/Kernel/Hover.wl` -- Context display, external symbol hover, three-tier resolution chain
@@ -129,12 +140,9 @@ Added `startCharacter` and `endCharacter` to folding ranges for better editor su
 - `LSPServer/Kernel/Workspace.wl` -- Workspace symbol search, folder change handling
 - `LSPServer/Kernel/FoldingRange.wl` -- Enhanced folding support
 - `LSPServer/Kernel/LSPServer.wl` -- Module loading, trigger characters, capability registration, initialization
-- `CMakeLists.txt` -- Added new source files to build
+- `CMakeLists.txt` -- Added new source files to build and cross-platform CI support
+- `cmake/WolframKernel.cmake` -- Enhanced WolframScript and WolframKernel detection
 - `Tests/hover/*.wlt` -- Updated test expectations for context display
-
-
-## 1.9 - XX Dec, 2022
-
 
 ## 1.8 - 10 Oct, 2022
 
