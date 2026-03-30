@@ -93,7 +93,7 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/completionFencep
 Catch[
 Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   completions, systemCompletions, pacletCompletions, optionCompletions,
-  contextCompletions, externalCompletions, kernelCtxCompletions,
+  contextCompletions, externalCompletions, kernelCtxCompletions, aliasedCompletions,
   keyCompletions, cst, result, keyContext},
 
   If[$Debug2,
@@ -138,7 +138,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
 
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -150,7 +150,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   Check if we're in an association key context (e.g., assoc[" or assoc[Key[")
   *)
   keyContext = getAssociationKeyContext[text, line, char];
-  
+
   (*
   Debug: log to file for diagnostics
   *)
@@ -160,10 +160,10 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
       linesDbg = StringSplit[text, {"\r\n", "\n", "\r"}, All];
       beforeCursorDbg = If[line <= Length[linesDbg] && char - 1 <= StringLength[linesDbg[[line]]],
         StringTake[linesDbg[[line]], char - 1], "OUT_OF_BOUNDS"];
-      WriteString[debugStream, 
+      WriteString[debugStream,
         "--- completion ---\n" <>
         "uri=" <> ToString[uri] <> "\n" <>
-        "line=" <> ToString[line] <> " char=" <> ToString[char] <> 
+        "line=" <> ToString[line] <> " char=" <> ToString[char] <>
         " cst=" <> If[cst === Null, "Null", "ok"] <>
         " before=" <> ToString[InputForm[beforeCursorDbg]] <>
         " ctx=" <> ToString[keyContext] <> "\n"
@@ -183,10 +183,10 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
       lspChar0 = char - 1;
       linesForEdit = StringSplit[text, {"\r\n", "\n", "\r"}, All];
       fullLine = If[line <= Length[linesForEdit], linesForEdit[[line]], ""];
-      
+
       keyCompletions = getAssociationKeyCompletions[cst, text, keyContext, lspLine0, lspChar0, fullLine];
     ];
-    
+
     (*
     Debug: log completions
     *)
@@ -194,7 +194,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
       Module[{debugStream, keys},
         debugStream = OpenAppend["/tmp/lsp-assoc-debug.log"];
         keys = extractAssociationKeys[cst, text];
-        WriteString[debugStream, 
+        WriteString[debugStream,
           "keyPath=" <> ToString[keyContext["keyPath"]] <> "\n" <>
           "extractedKeys=" <> ToString[keys] <> "\n" <>
           "completionCount=" <> ToString[Length[keyCompletions]] <> "\n" <>
@@ -203,12 +203,12 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
         Close[debugStream];
       ]
     ];
-    
+
     result = <|
       "isIncomplete" -> False,
       "items" -> keyCompletions
     |>;
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> result |>}]
   ];
 
@@ -237,24 +237,57 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   contextCompletions = getContextCompletions[prefix];
   externalCompletions = getExternalSymbolCompletions[prefix];
   kernelCtxCompletions = getKernelContextSymbolCompletions[prefix];
+  aliasedCompletions = getAliasedSymbolCompletions[prefix];
 
   (*
   Combine and deduplicate
-  Priority order: paclet symbols, external package symbols, kernel context symbols,
-  system symbols, options, contexts
+  Priority order: paclet symbols, aliased context symbols, external package symbols,
+  kernel context symbols, system symbols, options, contexts
   *)
-  completions = Join[pacletCompletions, externalCompletions, kernelCtxCompletions, systemCompletions, optionCompletions, contextCompletions];
+  completions = Join[pacletCompletions, aliasedCompletions, externalCompletions, kernelCtxCompletions, systemCompletions, optionCompletions, contextCompletions];
   completions = DeleteDuplicatesBy[completions, #["label"]&];
+
+  (*
+  For any completion whose label contains a backtick (context-qualified names and context
+  strings), add an explicit textEdit that replaces the full typed prefix with the label.
+  Without this, VSCode treats ` as a word separator and only replaces the text after the
+  last backtick — causing e.g. "Alias`" + insert "Alias`Symbol" = "Alias`Alias`Symbol`".
+  Items that already carry a textEdit (e.g. association key completions) are left alone.
+  *)
+  If[StringContainsQ[prefix, "`"],
+    Module[{lspLine0, lspPrefixStartChar0, lspPrefixEndChar0},
+      lspLine0         = line - 1;
+      lspPrefixEndChar0   = char - 1;
+      lspPrefixStartChar0 = char - 1 - StringLength[prefix];
+      completions = Map[
+        Function[{item},
+          If[StringContainsQ[item["label"], "`"] && !KeyExistsQ[item, "textEdit"],
+            Append[item, "textEdit" -> <|
+              "range" -> <|
+                "start" -> <| "line" -> lspLine0, "character" -> lspPrefixStartChar0 |>,
+                "end"   -> <| "line" -> lspLine0, "character" -> lspPrefixEndChar0   |>
+              |>,
+              "newText" -> item["label"]
+            |>],
+            item
+          ]
+        ],
+        completions
+      ]
+    ]
+  ];
 
   (*
   Limit the number of results
   *)
-  completions = Take[completions, UpTo[100]];
+	With[{ isIncomplete = Length[completions] > 100 },
+	completions = Take[completions, UpTo[100]];
 
-  result = <|
-    "isIncomplete" -> Length[completions] >= 100,
-    "items" -> completions
-  |>;
+	result = <|
+		"isIncomplete" -> isIncomplete,
+		"items" -> completions
+	|>
+  ];
 
   {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> result |>}
 ]]
@@ -265,29 +298,29 @@ Get the identifier prefix at the cursor position
 *)
 getCompletionPrefix[text_String, line_Integer, char_Integer] :=
 Module[{lines, currentLine, beforeCursor, prefix},
-  
+
   lines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
-  
+
   If[line > Length[lines],
     Return[""]
   ];
-  
+
   currentLine = lines[[line]];
-  
+
   If[char > StringLength[currentLine] + 1,
     Return[""]
   ];
-  
+
   beforeCursor = StringTake[currentLine, char - 1];
-  
+
   (*
   Extract the identifier being typed
   Wolfram identifiers can contain letters, digits, $ and `
   *)
-  prefix = StringCases[beforeCursor, 
+  prefix = StringCases[beforeCursor,
     RegularExpression["[a-zA-Z$`][a-zA-Z0-9$`]*$"] :> "$0"
   ];
-  
+
   If[prefix === {},
     "",
     Last[prefix]
@@ -313,7 +346,7 @@ Get completions from system symbols
 *)
 getSystemSymbolCompletions[prefix_String] :=
 Module[{matching, completions},
-  
+
   (*
   Filter by prefix - use cached combined list
   *)
@@ -321,7 +354,7 @@ Module[{matching, completions},
     $allSystemSymbols,
     StringStartsQ[#, prefix, IgnoreCase -> True]&
   ];
-  
+
   (*
   Sort by relevance (exact prefix match first, then shorter names)
   *)
@@ -329,18 +362,18 @@ Module[{matching, completions},
     !StringStartsQ[#, prefix]&,  (* Exact case match first *)
     StringLength[#]&              (* Shorter names first *)
   }];
-  
+
   (*
   Create completion items - use cached constant set for O(1) lookup
   *)
   completions = Table[
     Module[{kind, isConstant},
       isConstant = KeyExistsQ[$constantsSet, sym];
-      kind = If[isConstant, 
-        $CompletionItemKind["Constant"], 
+      kind = If[isConstant,
+        $CompletionItemKind["Constant"],
         $CompletionItemKind["Function"]
       ];
-      
+
       <|
         "label" -> sym,
         "kind" -> kind,
@@ -350,7 +383,7 @@ Module[{matching, completions},
     ],
     {sym, Take[matching, UpTo[50]]}
   ];
-  
+
   completions
 ]
 
@@ -360,9 +393,9 @@ Get completions from paclet symbols
 *)
 getPacletSymbolCompletions[prefix_String] :=
 Module[{pacletSymbols, completions},
-  
+
   pacletSymbols = GetSymbolsForCompletion[prefix];
-  
+
   completions = Table[
     Module[{kind, detail, item},
       kind = Switch[sym["kind"],
@@ -372,31 +405,31 @@ Module[{pacletSymbols, completions},
         "attribute", $CompletionItemKind["Property"],
         _, $CompletionItemKind["Variable"]
       ];
-      
+
       detail = If[sym["usage"] =!= None,
         StringTake[sym["usage"], UpTo[100]],
         "Paclet Symbol"
       ];
-      
+
       item = <|
         "label" -> sym["name"],
         "kind" -> kind,
         "detail" -> detail,
         "sortText" -> "0_" <> sym["name"]  (* Paclet symbols sort first *)
       |>;
-      
+
       (* Only add documentation if usage is available.
          Process through linearToMDSyntax to convert embedded linear syntax
          (box expressions) into readable markdown text. *)
       If[sym["usage"] =!= None && StringQ[sym["usage"]],
         item["documentation"] = <| "kind" -> "markdown", "value" -> StringJoin[LSPServer`Hover`linearToMDSyntax[sym["usage"]]] |>
       ];
-      
+
       item
     ],
     {sym, Take[pacletSymbols, UpTo[50]]}
   ];
-  
+
   completions
 ]
 
@@ -406,19 +439,19 @@ Get option completions when inside a function call
 *)
 getOptionCompletions[text_String, line_Integer, char_Integer, prefix_String] :=
 Module[{options, matching, completions},
-  
+
   (*
   Get all known options from the loaded data
   *)
   options = WolframLanguageSyntax`Generate`$options;
-  
+
   (*
   Filter by prefix
   *)
   matching = Select[options, StringStartsQ[#, prefix, IgnoreCase -> True]&];
-  
+
   matching = SortBy[matching, StringLength];
-  
+
   completions = Table[
     <|
       "label" -> opt,
@@ -429,7 +462,7 @@ Module[{options, matching, completions},
     |>,
     {opt, Take[matching, UpTo[20]]}
   ];
-  
+
   completions
 ]
 
@@ -439,33 +472,36 @@ Get context completions (for `name patterns)
 *)
 getContextCompletions[prefix_String] :=
 Module[{contexts, kernelContexts, matching, completions},
-  
+
   (*
   If prefix contains `, it might be a context-qualified symbol
   *)
   If[!StringContainsQ[prefix, "`"],
     Return[{}]
   ];
-  
+
   (*
   Get contexts from the paclet index (workspace-defined)
   *)
   contexts = Keys[$PacletIndex["Contexts"]];
-  
+
   (*
   Get all kernel-known contexts using Contexts[].
   This dynamically discovers all available contexts (Internal`, Developer`,
   Compile`, JLink`, etc.) instead of relying on a hardcoded list.
   *)
   kernelContexts = GetKernelContextsCached[];
-  
-  contexts = DeleteDuplicates[Join[contexts, kernelContexts]];
-  
+
+  (*
+  Include alias contexts defined via Needs["Full`" -> "Alias`"]
+  *)
+  contexts = DeleteDuplicates[Join[contexts, kernelContexts, Keys[GetContextAliases[]]]];
+
   (*
   Filter by prefix
   *)
   matching = Select[contexts, StringStartsQ[#, prefix, IgnoreCase -> True]&];
-  
+
   completions = Table[
     <|
       "label" -> ctx,
@@ -475,7 +511,7 @@ Module[{contexts, kernelContexts, matching, completions},
     |>,
     {ctx, Take[matching, UpTo[20]]}
   ];
-  
+
   completions
 ]
 
@@ -490,12 +526,12 @@ is a partial symbol name (or empty, to list all symbols in the context).
 *)
 getKernelContextSymbolCompletions[prefix_String] :=
 Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
-  
+
   (* Only activate for context-qualified prefixes *)
   If[!StringContainsQ[prefix, "`"],
     Return[{}]
   ];
-  
+
   (*
   Split prefix into context part and symbol prefix.
   E.g. "Internal`Bag" -> context="Internal`", symbolPrefix="Bag"
@@ -505,17 +541,17 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
     Riffle[Most[StringSplit[prefix, "`", All]], "`"]
   ] <> "`";
   symbolPrefix = Last[StringSplit[prefix, "`", All]];
-  
+
   (*
   Check if this context is known to the kernel.
   Only provide completions for contexts that actually exist.
   *)
   contexts = GetKernelContextsCached[];
-  
+
   If[!MemberQ[contexts, ctxPart],
     Return[{}]
   ];
-  
+
   (*
   Use Names[] to get all symbols in this context matching the prefix.
   Names[] does not trigger loading or warnings — it only inspects existing symbols.
@@ -525,7 +561,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
     {Names::notfound}
   ];
   If[!ListQ[allNames], allNames = {}];
-  
+
   (*
   Sort by relevance: exact case prefix match first, then shorter names first
   *)
@@ -533,7 +569,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
     !StringStartsQ[#, prefix]&,
     StringLength[#]&
   }];
-  
+
   (*
   Create completion items.
   The label is the fully-qualified name (e.g. "Internal`Bag").
@@ -541,7 +577,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
   completions = Table[
     Module[{bareSymbol, usage, detail},
       bareSymbol = Last[StringSplit[fullName, "`"]];
-      
+
       (*
       Try to get usage message without triggering evaluation
       *)
@@ -553,7 +589,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
         ],
         {MessageName::noinfo, ToExpression::notstrbox}
       ];
-      
+
       detail = If[StringQ[usage],
         StringTake[
           StringReplace[usage, {"\n" -> " ", "\r" -> " ", RegularExpression["\\s+"] -> " "}],
@@ -561,7 +597,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
         ],
         ctxPart
       ];
-      
+
       <|
         "label" -> fullName,
         "kind" -> $CompletionItemKind["Function"],
@@ -573,7 +609,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
     ],
     {fullName, Take[matching, UpTo[50]]}
   ];
-  
+
   completions
 ]
 
@@ -583,16 +619,16 @@ Get completions from external loaded packages (dependencies)
 *)
 getExternalSymbolCompletions[prefix_String] :=
 Module[{deps, allExternalSymbols, matching, completions},
-  
+
   (*
   Get dependency contexts that have been loaded
   *)
   deps = GetDependencyContexts[];
-  
+
   If[Length[deps] == 0,
     Return[{}]
   ];
-  
+
   (*
   Get symbols from each dependency context
   *)
@@ -605,11 +641,11 @@ Module[{deps, allExternalSymbols, matching, completions},
       {ctx, deps}
     ]
   ];
-  
+
   (*
   Extract just the symbol names (without context prefix) for matching
   *)
-  matching = Select[allExternalSymbols, 
+  matching = Select[allExternalSymbols,
     Function[{fullName},
       Module[{bareSymbol},
         bareSymbol = Last[StringSplit[fullName, "`"]];
@@ -617,7 +653,7 @@ Module[{deps, allExternalSymbols, matching, completions},
       ]
     ]
   ];
-  
+
   (*
   Sort by relevance
   *)
@@ -625,7 +661,7 @@ Module[{deps, allExternalSymbols, matching, completions},
     !StringStartsQ[Last[StringSplit[#, "`"]], prefix]&,  (* Exact case match first *)
     StringLength[#]&  (* Shorter names first *)
   }];
-  
+
   (*
   Create completion items
   *)
@@ -633,7 +669,7 @@ Module[{deps, allExternalSymbols, matching, completions},
     Module[{bareSymbol, symContext, usage, detail, item},
       bareSymbol = Last[StringSplit[fullName, "`"]];
       symContext = StringJoin[Riffle[Most[StringSplit[fullName, "`"]], "`"]] <> "`";
-      
+
       (*
       Try to get usage message
       *)
@@ -645,7 +681,7 @@ Module[{deps, allExternalSymbols, matching, completions},
         ],
         {MessageName::noinfo, ToExpression::notstrbox}
       ];
-      
+
       (*
       Clean up usage for display - remove newlines and truncate
       *)
@@ -656,7 +692,7 @@ Module[{deps, allExternalSymbols, matching, completions},
         ],
         symContext
       ];
-      
+
       item = <|
         "label" -> bareSymbol,
         "kind" -> $CompletionItemKind["Function"],
@@ -664,7 +700,7 @@ Module[{deps, allExternalSymbols, matching, completions},
         "sortText" -> "1_" <> bareSymbol,  (* Sort after paclet symbols but with system symbols *)
         "labelDetails" -> <| "description" -> symContext |>
       |>;
-      
+
       (*
       Add full documentation if usage is available.
       Process through linearToMDSyntax to convert embedded linear syntax
@@ -673,12 +709,95 @@ Module[{deps, allExternalSymbols, matching, completions},
       If[StringQ[usage],
         item["documentation"] = <| "kind" -> "markdown", "value" -> StringJoin[LSPServer`Hover`linearToMDSyntax[usage]] |>
       ];
-      
+
       item
     ],
     {fullName, Take[matching, UpTo[30]]}
   ];
-  
+
+  completions
+]
+
+
+(*
+Get completions for context-qualified symbols using aliases set up with
+Needs["FullContext`" -> "Alias`"].
+
+When a user types "Alias`Sym", this resolves "Alias`" to its full context,
+looks up symbols in that context, and returns completions labelled with the
+alias prefix so the user's code stays consistent.
+*)
+getAliasedSymbolCompletions[prefix_String] :=
+Module[{aliases, ctxPart, symbolPrefix, fullContext, allNames, matching, completions},
+
+  If[!StringContainsQ[prefix, "`"],
+    Return[{}]
+  ];
+
+  aliases = GetContextAliases[];
+  If[aliases === <||>,
+    Return[{}]
+  ];
+
+  (*
+  Split prefix into the context part and the partial symbol name.
+  E.g. "Alias`Foo" -> ctxPart = "Alias`", symbolPrefix = "Foo"
+       "Alias`"    -> ctxPart = "Alias`", symbolPrefix = ""
+  *)
+  ctxPart = StringJoin[Riffle[Most[StringSplit[prefix, "`", All]], "`"]] <> "`";
+  symbolPrefix = Last[StringSplit[prefix, "`", All]];
+
+  If[!KeyExistsQ[aliases, ctxPart],
+    Return[{}]
+  ];
+
+  fullContext = aliases[ctxPart];
+
+  (*
+  Look up symbols in the full context that match the symbol prefix.
+  *)
+  allNames = Quiet[Names[fullContext <> symbolPrefix <> "*"], {Names::notfound}];
+  If[!ListQ[allNames], allNames = {}];
+
+  matching = SortBy[allNames, {
+    !StringStartsQ[Last[StringSplit[#, "`"]], symbolPrefix]&,
+    StringLength[#]&
+  }];
+
+  completions = Table[
+    Module[{bareSymbol, aliasedLabel, usage, detail},
+      bareSymbol = Last[StringSplit[fullName, "`"]];
+      aliasedLabel = ctxPart <> bareSymbol;
+
+      usage = Quiet[
+        Check[
+          ToExpression[fullName <> "::usage"],
+          None,
+          {MessageName::noinfo}
+        ],
+        {MessageName::noinfo, ToExpression::notstrbox}
+      ];
+
+      detail = If[StringQ[usage],
+        StringTake[
+          StringReplace[usage, {"\n" -> " ", "\r" -> " ", RegularExpression["\\s+"] -> " "}],
+          UpTo[80]
+        ],
+        ctxPart <> " \[RightArrow] " <> fullContext
+      ];
+
+      <|
+        "label" -> aliasedLabel,
+        "kind" -> $CompletionItemKind["Function"],
+        "detail" -> detail,
+        "sortText" -> "1_" <> bareSymbol,
+        "filterText" -> aliasedLabel,
+        "labelDetails" -> <| "description" -> ctxPart |>
+      |>
+    ],
+    {fullName, Take[matching, UpTo[50]]}
+  ];
+
   completions
 ]
 
@@ -690,19 +809,19 @@ Association Key Completion
 *)
 
 (*
-Parse multi-key Part access: assoc["a", "b", " 
+Parse multi-key Part access: assoc["a", "b", "
 Scans backwards from commaPos (position of the comma) to extract the
 preceding string keys and the variable name.
 Returns None or <| "variable" -> ..., "keyPath" -> {...} |>
 *)
 parseCommaKeyPath[beforeCursor_String, commaPos_Integer] :=
-Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey, 
+Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
         varEnd, varStart, varName},
-  
+
   chars = Characters[beforeCursor];
   keysReversed = {};
   scanPos = commaPos - 1;  (* move before the comma *)
-  
+
   (*
   Scan backwards, collecting "key", integer, All, Span groups separated by commas
   until we hit the opening [ or [[
@@ -713,11 +832,11 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
       scanPos--
     ];
     If[scanPos < 1, Return[None]];
-    
+
     If[chars[[scanPos]] === "\"",
       (* String key: scan backwards through "key" *)
       scanPos--;  (* past closing " *)
-      
+
       (* Read the key backwards to the opening quote *)
       endKey = scanPos;
       While[scanPos > 0 && chars[[scanPos]] =!= "\"",
@@ -728,7 +847,7 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
       keyStr = StringJoin[chars[[startKey + 1 ;; endKey]]];
       AppendTo[keysReversed, keyStr];
       scanPos--,  (* past opening " *)
-      
+
       (* Not a quote. Could be integer, All, Span (;;), or the opening bracket *)
       If[chars[[scanPos]] === "[",
         (* Opening bracket — done scanning keys *)
@@ -738,14 +857,14 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
         ];
         Break[]
       ];
-      
+
       (* Try to read a non-string expression (integer, All, 1;;3, etc.) backwards *)
       Module[{exprEnd, exprStart, exprStr},
         exprEnd = scanPos;
         exprStart = exprEnd;
         (* Scan backwards collecting digits, letters, ;, -, $, spaces *)
-        While[exprStart > 0 && 
-          (LetterQ[chars[[exprStart]]] || DigitQ[chars[[exprStart]]] || 
+        While[exprStart > 0 &&
+          (LetterQ[chars[[exprStart]]] || DigitQ[chars[[exprStart]]] ||
            MemberQ[{";", "-", "$", " "}, chars[[exprStart]]]),
           exprStart--
         ];
@@ -758,19 +877,19 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
         scanPos = exprStart - 1
       ]
     ];
-    
+
     (* Skip whitespace *)
     While[scanPos > 0 && MemberQ[{" ", "\t"}, chars[[scanPos]]],
       scanPos--
     ];
     If[scanPos < 1, Return[None]];
-    
+
     (* Expect either , (another key before this) or [ (opening bracket) *)
     If[chars[[scanPos]] === ",",
       scanPos--;  (* skip comma, continue to next key *)
       Continue[]
     ];
-    
+
     If[chars[[scanPos]] === "[",
       scanPos--;  (* skip the [ *)
       (* Also skip a second [ if present (Part syntax) *)
@@ -779,18 +898,18 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
       ];
       Break[]
     ];
-    
+
     (* Unexpected character *)
     Return[None]
   ];
-  
+
   (* What remains should be the variable name *)
   (* Skip whitespace *)
   While[scanPos > 0 && MemberQ[{" ", "\t"}, chars[[scanPos]]],
     scanPos--
   ];
   If[scanPos < 1, Return[None]];
-  
+
   varEnd = scanPos;
   varStart = varEnd;
   While[varStart > 0 && (LetterQ[chars[[varStart]]] || DigitQ[chars[[varStart]]] || chars[[varStart]] === "$"),
@@ -798,10 +917,10 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
   ];
   varStart++;
   If[varStart > varEnd, Return[None]];
-  
+
   varName = StringJoin[chars[[varStart ;; varEnd]]];
   If[varName === "" || varName === "Key", Return[None]];
-  
+
   <|
     "variable" -> varName,
     "keyPath" -> Reverse[keysReversed]
@@ -830,28 +949,28 @@ Returns None if not in key context, or an association with:
 getAssociationKeyContext[text_String, line_Integer, char_Integer] :=
 Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
         segments, bracketDepth, segment, currentSegment, variable, keyPath,
-        ch, prefixStart = -1, barePrefix = "", barePrefixStart = -1, 
+        ch, prefixStart = -1, barePrefix = "", barePrefixStart = -1,
         bracketPos = -1, isBracketOnly = False, isPart = False},
-  
+
   lines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
-  
+
   If[line > Length[lines],
     Return[None]
   ];
-  
+
   currentLine = lines[[line]];
-  
+
   If[char > StringLength[currentLine] + 1,
     Return[None]
   ];
-  
+
   beforeCursor = StringTake[currentLine, char - 1];
-  
+
   If[StringLength[beforeCursor] < 2, Return[None]];
-  
+
   chars = Characters[beforeCursor];
   pos = Length[chars];
-  
+
   (*
   Step 0: Try bracket-only detection first.
   If the last character (after trimming whitespace and any non-quote prefix) is [ or [[,
@@ -884,27 +1003,27 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
     isBracketOnly = True;
     Goto["BracketOnlyPath"]
   ];
-  
+
   Label["QuotePath"];
-  
+
   (*
   Step 1: Check if we're currently inside an open string (no closing quote).
   Scan backwards from end to find the last " that opens a string.
   *)
   prefix = "";
   prefixStart = -1;
-  
+
   (* Scan backwards past any non-quote chars to find the opening quote *)
   While[pos > 0 && chars[[pos]] =!= "\"",
     pos--
   ];
-  
+
   If[pos == 0, Return[None]];  (* No quote found *)
-  
+
   (* pos is now at a " character. Everything after it is the prefix *)
   prefix = StringTake[beforeCursor, {pos + 1, -1}];
   prefixStart = pos;  (* 1-based position of the char after the quote *)
-  
+
   (*
   Step 2: Check what's before the opening quote.
   Valid patterns:
@@ -916,15 +1035,15 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
   Module[{preQuote, trimmed, lastChar, commaKeys},
     preQuote = StringTake[beforeCursor, pos - 1];
     trimmed = StringReplace[preQuote, RegularExpression["\\s+$"] -> ""];
-    
+
     If[StringLength[trimmed] == 0, Return[None]];
-    
+
     lastChar = StringTake[trimmed, -1];
-    
+
     If[lastChar =!= "[" && lastChar =!= ",",
       Return[None]
     ];
-    
+
     (*
     If the last char is a comma, this is multi-key Part syntax:
     assoc["a", "b", "  -> keyPath = {a, b}
@@ -944,24 +1063,24 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
       |>]
     ]
   ];
-  
+
   Label["BracketOnlyPath"];
-  
+
   (*
   Step 3: Parse the chained bracket access chain backwards.
-  
+
   Two entry points:
   A) From quote path: pos is at the opening ", scan from pos-1 (the [) leftward.
      isStringKey = True, prefix/prefixStart already set from quote.
   B) From bracket-only path: bracketPos is at [, no quote involved.
      isStringKey = False, prefix = barePrefix, prefixStart = barePrefixStart.
-  
+
   Strategy: scan left from the [, collecting completed bracket groups to build
   the keyPath, until we hit the base variable name.
   *)
   Module[{scanPos, keyPathReversed, depth, keyStr, scanChars, startKey, endKey,
           varEnd, varStart, varName},
-    
+
     If[isBracketOnly,
       (* Bracket-only path: bracketPos is at [, barePrefix/barePrefixStart are set *)
       prefix = barePrefix;
@@ -969,7 +1088,7 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
       scanPos = bracketPos;
       scanChars = chars;
       keyPathReversed = {};
-      
+
       (* Must be at [ *)
       If[scanPos < 1 || scanChars[[scanPos]] =!= "[",
         Return[None]
@@ -980,12 +1099,12 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
         scanPos--;
         isPart = True
       ],
-      
+
       (* Quote path: pos is at the opening quote, scan from pos-1 *)
       scanPos = StringLength[StringReplace[StringTake[beforeCursor, pos - 1], RegularExpression["\\s+$"] -> ""]];
       scanChars = chars;
       keyPathReversed = {};
-      
+
       (* scanPos should now be at '[' *)
       (* Skip Key[ if present: ...Key[" *)
       If[scanPos >= 4 && StringTake[beforeCursor, {scanPos - 3, scanPos}] === "Key[",
@@ -1011,21 +1130,21 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
         ]
       ]
     ];
-    
+
     (* Skip whitespace *)
     While[scanPos > 0 && StringMatchQ[scanChars[[scanPos]], WhitespaceCharacter],
       scanPos--
     ];
-    
+
     (* Now repeatedly try to match ]["key"] or ]]["key"]] or [[integer]] going leftward *)
     While[scanPos > 0 && scanChars[[scanPos]] === "]",
       (* We found a ], try to match a completed bracket group *)
-      
+
       (* Check for ]] (Part syntax) *)
       If[scanPos >= 2 && scanChars[[scanPos - 1]] === "]",
         (* ]] -- look for matching [[ *)
         endKey = scanPos - 2;
-        
+
         If[endKey >= 1 && scanChars[[endKey]] === "\"",
           (* String key in Part: [["key"]] *)
           endKey--;  (* past the closing " *)
@@ -1041,7 +1160,7 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
           ];
           AppendTo[keyPathReversed, keyStr];
           scanPos = startKey - 3,
-          
+
           (* Non-string Part: [[1]], [[All]], [[1;;3]], [[;;5]] etc. *)
           Module[{exprEnd, exprStart, exprStr},
             exprEnd = endKey;
@@ -1052,14 +1171,14 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
             ];
             If[exprStart < 2, Break[]];
             (* exprStart is at the second [, so the expression is from exprStart+1 to exprEnd *)
-            exprStr = StringReplace[StringTake[beforeCursor, {exprStart + 1, exprEnd}], 
+            exprStr = StringReplace[StringTake[beforeCursor, {exprStart + 1, exprEnd}],
               RegularExpression["^\\s+|\\s+$"] -> ""];
             If[exprStr === "", Break[]];
             AppendTo[keyPathReversed, exprStr];
             scanPos = exprStart - 2
           ]
         ],
-        
+
         (* Single ] -- look for matching [ *)
         endKey = scanPos - 1;
         (* Find the closing quote *)
@@ -1118,13 +1237,13 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
           scanPos = startKey - 2
         ]
       ];
-      
+
       (* Skip whitespace *)
       While[scanPos > 0 && StringMatchQ[scanChars[[scanPos]], WhitespaceCharacter],
         scanPos--
       ];
     ];
-    
+
     (* What's left should be the variable name *)
     If[scanPos < 1, Return[None]];
     varEnd = scanPos;
@@ -1134,15 +1253,15 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
     ];
     varStart++;
     If[varStart > varEnd, Return[None]];
-    
+
     varName = StringTake[beforeCursor, {varStart, varEnd}];
     If[varName === "Key" || varName === "", Return[None]];
-    
+
     keyPath = Reverse[keyPathReversed];
-    
+
     <|
-      "variable" -> varName, 
-      "prefix" -> prefix, 
+      "variable" -> varName,
+      "prefix" -> prefix,
       "isStringKey" -> !isBracketOnly,
       "isPart" -> isPart,
       "keyPath" -> keyPath,
@@ -1167,39 +1286,39 @@ Arguments:
   lspChar0 - 0-based character offset of cursor (LSP format)
   fullLine - full text of the current line
 *)
-getAssociationKeyCompletions[cst_, text_String, keyContext_Association, 
+getAssociationKeyCompletions[cst_, text_String, keyContext_Association,
                               lspLine0_Integer, lspChar0_Integer, fullLine_String] :=
-Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel, 
+Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
         matchingKeys, completions, pathDescription, editStartChar, editEndChar,
         afterCursor, hasClosingQuote, isStringKey, isPart},
-  
+
   variable = keyContext["variable"];
   prefix = keyContext["prefix"];
   keyPath = Lookup[keyContext, "keyPath", {}];
   isStringKey = Lookup[keyContext, "isStringKey", True];
   isPart = Lookup[keyContext, "isPart", False];
-  
+
   (*
   Extract hierarchical association keys defined in the file
   *)
   allKeys = extractAssociationKeys[cst, text];
-  
+
   (*
   Get the hierarchical structure for the specific variable
   *)
   variableStructure = Lookup[allKeys, variable, <||>];
-  
+
   (*
   Navigate to the correct level based on keyPath
   *)
   keysAtLevel = navigateToLevel[variableStructure, keyPath, isPart];
-  
+
   (*
   Only show completions for variables that have known association/list definitions.
   If the variable is not found in the extracted keys, return nothing — do not
   fall back to showing keys from other variables.
   *)
-  
+
   (*
   Filter by prefix.
   For bracket-only (isStringKey=False), prefix might match the beginning of the key
@@ -1207,7 +1326,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
   *)
   matchingKeys = If[prefix === "",
     keysAtLevel,
-    Select[keysAtLevel, 
+    Select[keysAtLevel,
       Function[{key},
         Module[{keyStr},
           keyStr = If[StringQ[key], key, ToString[key]];
@@ -1216,7 +1335,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
       ]
     ]
   ];
-  
+
   (*
   When user typed a quote (isStringKey=True), filter out non-string keys
   (e.g. numeric indices) since the user is explicitly entering a string key.
@@ -1224,7 +1343,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
   If[isStringKey,
     matchingKeys = Select[matchingKeys, StringQ]
   ];
-  
+
   (*
   Sort by relevance
   *)
@@ -1232,7 +1351,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
     If[prefix =!= "", !StringStartsQ[ToString[#], prefix], False]&,
     StringLength[ToString[#]]&
   }];
-  
+
   (*
   Build path description for labelDetails
   *)
@@ -1244,27 +1363,27 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
       ]], keyPath], "]["]] <> "]",
     variable
   ];
-  
+
   (*
   Determine the textEdit range.
-  
+
   Two modes:
   A) isStringKey=True: cursor is after an opening " inside brackets.
      editStartChar = right after the opening "
      newText = key + closing "  (the opening " is already in the document)
-     
+
   B) isStringKey=False: cursor is right after [ or [[ (bracket-only trigger).
      editStartChar = right after [ (where prefix starts, or cursor if no prefix)
      newText = "key" (with both quotes) for string keys, or raw value for non-string keys
   *)
   editStartChar = lspChar0 - StringLength[prefix];
-  
+
   (* Check if there's a closing quote right at or after the cursor *)
   afterCursor = If[lspChar0 < StringLength[fullLine],
     StringTake[fullLine, {lspChar0 + 1, -1}],  (* chars after cursor *)
     ""
   ];
-  
+
   If[isStringKey,
     (* Quote-based path: check for existing closing quote *)
     hasClosingQuote = StringLength[afterCursor] > 0 && StringTake[afterCursor, 1] === "\"";
@@ -1275,7 +1394,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
     (* Bracket-only path: check for existing closing "]" or "\"]" etc. *)
     editEndChar = lspChar0  (* just replace the prefix/cursor position *)
   ];
-  
+
   (*
   Create completion items with textEdit
   *)
@@ -1283,7 +1402,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
     Module[{keyStr, newText, item, textEdit, isKeyString, displayLabel, filterStr},
       keyStr = ToString[key];
       isKeyString = StringQ[key];
-      
+
       (*
       Build the newText based on the mode:
       - isStringKey=True (quote already typed): key + closing "
@@ -1298,10 +1417,10 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
           newText = keyStr
         ]
       ];
-      
+
       displayLabel = If[isKeyString, "\"" <> keyStr <> "\"", keyStr];
       filterStr = keyStr;
-      
+
       textEdit = <|
         "range" -> <|
           "start" -> <| "line" -> lspLine0, "character" -> editStartChar |>,
@@ -1309,7 +1428,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
         |>,
         "newText" -> newText
       |>;
-      
+
       item = <|
         "label" -> displayLabel,
         "kind" -> $CompletionItemKind["Property"],
@@ -1319,12 +1438,12 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
         "filterText" -> filterStr,
         "labelDetails" -> <|"description" -> "from " <> pathDescription|>
       |>;
-      
+
       item
     ],
     {key, Take[matchingKeys, UpTo[50]]}
   ];
-  
+
   completions
 ]
 
@@ -1338,7 +1457,7 @@ Returns: list of keys at that level
 navigateToLevel[structure_Association, keyPath_List, includeIndices_:True] :=
 Module[{current, key},
   current = structure;
-  
+
   Do[
     (*
     If current level is a list-of-associations (_isList -> True),
@@ -1350,14 +1469,14 @@ Module[{current, key},
       Module[{children, elements, idx},
         children = Lookup[current, "_children", <||>];
         elements = Lookup[current, "_elements", {}];
-        If[IntegerQ[key] || key === "All" || key === All || 
+        If[IntegerQ[key] || key === "All" || key === All ||
            StringQ[key] && StringMatchQ[key, DigitCharacter..] ||
            (* Span-like patterns: "1;;3", ";;", "2;;", ";;5" *)
            StringQ[key] && StringContainsQ[key, ";;"],
           (* Index into list *)
           (* For specific integer index, use per-element keys if available *)
-          idx = If[IntegerQ[key], key, 
-                  If[StringQ[key] && StringMatchQ[key, DigitCharacter..], 
+          idx = If[IntegerQ[key], key,
+                  If[StringQ[key] && StringMatchQ[key, DigitCharacter..],
                     ToExpression[key], 0]];
           If[idx >= 1 && idx <= Length[elements],
             (* Navigate to specific element's keys *)
@@ -1388,7 +1507,7 @@ Module[{current, key},
     ],
     {key, keyPath}
   ];
-  
+
   (*
   If we end up at a list level, return numeric indices 1..N plus the merged assoc keys.
   Otherwise return the keys at this level (exclude meta-keys).
@@ -1432,9 +1551,9 @@ AppendTo, PrependTo, AssociateTo, and functional patterns (var = Append[var, ...
 *)
 extractAssociationKeys[cst_, text_String] :=
 Module[{result, assignments, textKeys, mutations},
-  
+
   result = <||>;
-  
+
   (*
   If CST is not available, fall back to text-based extraction
   This handles the case where parsing hasn't completed yet
@@ -1443,17 +1562,17 @@ Module[{result, assignments, textKeys, mutations},
     textKeys = extractAssociationKeysFromText[text];
     Return[textKeys]
   ];
-  
+
   (*
   Find all variable assignments where the value is an association
   Pattern: varName = <| ... |>
   *)
   assignments = Cases[cst,
-    BinaryNode[Set | SetDelayed, children_, data_] :> 
+    BinaryNode[Set | SetDelayed, children_, data_] :>
       extractAssignmentKeysHierarchical[children],
     Infinity
   ];
-  
+
   (*
   Merge results from direct assignments
   *)
@@ -1463,7 +1582,7 @@ Module[{result, assignments, textKeys, mutations},
     ],
     {assignment, assignments}
   ];
-  
+
   (*
   Extract mutations that add/modify keys on existing variables:
   - Part assignment: assoc["key"] = val, assoc[["key"]] = val
@@ -1472,7 +1591,7 @@ Module[{result, assignments, textKeys, mutations},
   - Functional set patterns: var = Append[var, ...], var = Join[var, ...], etc.
   *)
   mutations = extractMutationsFromCST[cst];
-  
+
   (* Debug: log CST extraction results *)
   Quiet[
     Module[{ds},
@@ -1484,9 +1603,9 @@ Module[{result, assignments, textKeys, mutations},
       Close[ds];
     ]
   ];
-  
+
   result = mergeStructures[result, mutations];
-  
+
   result
 ]
 
@@ -1506,46 +1625,46 @@ Returns: <| "variableName" -> <| "key" -> <||>, ... |>, ... |>
 *)
 extractMutationsFromCST[cst_] :=
 Module[{result, partAssignments, mutatingCalls, functionalSets},
-  
+
   result = <||>;
-  
+
   (*
   1. Part assignment: assoc["key"] = val  or  assoc[["key"]] = val
      In the CST these are BinaryNode[Set, ...] where the LHS is a CallNode
      (not a bare LeafNode[Symbol, ...]).
   *)
   partAssignments = Cases[cst,
-    BinaryNode[Set, children_List, _] :> 
+    BinaryNode[Set, children_List, _] :>
       extractPartAssignmentKeys[children],
     Infinity
   ];
-  
+
   Do[
     If[pa =!= None,
       result = mergeIntoResult[result, pa["variable"], pa["keyPath"], pa["valueStructure"]]
     ],
     {pa, partAssignments}
   ];
-  
+
   (*
   2. Mutating function calls: AppendTo, PrependTo, AssociateTo, KeyDropFrom
      In the CST these are CallNode[{LeafNode[Symbol, funcName, _]}, GroupNode[GroupSquare, ...], ...]
   *)
   mutatingCalls = Cases[cst,
-    CallNode[{LeafNode[Symbol, funcName_String, _]}, 
+    CallNode[{LeafNode[Symbol, funcName_String, _]},
              GroupNode[GroupSquare, groupChildren_, _], _] /;
       MemberQ[{"AppendTo", "PrependTo", "AssociateTo"}, funcName] :>
       extractMutatingCallKeys[funcName, groupChildren],
     Infinity
   ];
-  
+
   Do[
     If[mc =!= None,
       result = mergeIntoResult[result, mc["variable"], mc["keyPath"], mc["valueStructure"]]
     ],
     {mc, mutatingCalls}
   ];
-  
+
   (*
   3. Functional set patterns: var = Append[var, ...], var = Prepend[var, ...],
      var = Join[var, ...], var = Merge[var, ...], var = Association[var, ...]
@@ -1553,18 +1672,18 @@ Module[{result, partAssignments, mutatingCalls, functionalSets},
      with a recognized function name and the first argument matches the LHS variable.
   *)
   functionalSets = Cases[cst,
-    BinaryNode[Set, children_List, _] :> 
+    BinaryNode[Set, children_List, _] :>
       extractFunctionalSetKeys[children],
     Infinity
   ];
-  
+
   Do[
     If[fs =!= None,
       result = mergeIntoResult[result, fs["variable"], fs["keyPath"], fs["valueStructure"]]
     ],
     {fs, functionalSets}
   ];
-  
+
   result
 ]
 
@@ -1575,7 +1694,7 @@ Returns only the semantically meaningful nodes.
 *)
 getSignificantChildren[children_List] :=
   Select[children,
-    !MatchQ[#, LeafNode[Whitespace | Token`Newline | Token`Spaces | Token`Comment | 
+    !MatchQ[#, LeafNode[Whitespace | Token`Newline | Token`Spaces | Token`Comment |
       Token`Equal | Token`ColonEqual | Token`OpenSquare | Token`CloseSquare |
       Token`Comma | Token`OpenCurly | Token`CloseCurly |
       Token`LessBar | Token`BarGreater, _, _]]&
@@ -1591,33 +1710,33 @@ Returns None if not a Part assignment pattern, or:
 *)
 extractPartAssignmentKeys[children_List] :=
 Module[{sigChildren, lhs, rhs, varName, keyPath, valueStructure},
-  
+
   sigChildren = getSignificantChildren[children];
   If[Length[sigChildren] < 2, Return[None]];
-  
+
   lhs = sigChildren[[1]];
   rhs = sigChildren[[2]];
-  
+
   (*
   LHS must be a CallNode (function-call-like bracket access on a variable).
   CST structure: CallNode[{LeafNode[Symbol, varName, _]}, GroupNode[GroupSquare, groupChildren, _], _]
   This covers both assoc["key"] and assoc[["key"]] since both use GroupSquare in raw CST.
   *)
   If[!MatchQ[lhs, CallNode[_, _, _]], Return[None]];
-  
+
   (*
   Extract the variable name from the head of the CallNode.
   May be nested for chained access: assoc["a"]["b"] = val
   *)
   {varName, keyPath} = extractCallChainVarAndKeys[lhs];
   If[varName === None || Length[keyPath] == 0, Return[None]];
-  
+
   (*
   Extract structure from the RHS value if it's an association or list-of-associations.
   Otherwise just record that these keys exist.
   *)
   valueStructure = extractValueStructure[rhs];
-  
+
   <| "variable" -> varName, "keyPath" -> keyPath, "valueStructure" -> valueStructure |>
 ]
 
@@ -1635,27 +1754,27 @@ Returns: {varName, {key1, key2, ...}}
 *)
 extractCallChainVarAndKeys[node_] :=
 Module[{head, groupNode, keys, innerVar, innerKeys, thisKey},
-  
+
   If[!MatchQ[node, CallNode[_, _, _]], Return[{None, {}}]];
-  
+
   head = node[[1]]; (* List of head nodes *)
   groupNode = node[[2]]; (* GroupNode with the bracket contents *)
-  
+
   (* Extract the key(s) from this bracket group *)
   thisKey = extractKeysFromGroup[groupNode];
-  
+
   (* Check if the head is a simple variable or another CallNode (chained access) *)
   If[MatchQ[head, {LeafNode[Symbol, varName_String, _]}],
     (* Base case: simple variable *)
     Return[{head[[1, 2]], thisKey}]
   ];
-  
+
   (* Check for chained access: head is {CallNode[...]} *)
   If[MatchQ[head, {CallNode[_, _, _]}],
     {innerVar, innerKeys} = extractCallChainVarAndKeys[head[[1]]];
     Return[{innerVar, Join[innerKeys, thisKey]}]
   ];
-  
+
   {None, {}}
 ]
 
@@ -1667,24 +1786,24 @@ Returns a list of key strings/integers.
 *)
 extractKeysFromGroup[GroupNode[GroupSquare | GroupDoubleBracket, groupChildren_List, _]] :=
 Module[{sigChildren, commaChildren, keyNodes},
-  
+
   (* Remove bracket tokens and whitespace *)
   sigChildren = Select[groupChildren,
-    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | 
+    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare |
       Token`LongName`LeftDoubleBracket | Token`LongName`RightDoubleBracket |
       Whitespace | Token`Newline | Token`Spaces, _, _]]&
   ];
-  
+
   (* Check for comma-separated keys: InfixNode[Comma, ...] *)
   commaChildren = Cases[sigChildren, InfixNode[Comma, c_, _] :> c, {1}];
-  
+
   If[Length[commaChildren] > 0,
     (* Multiple comma-separated keys *)
     keyNodes = Select[commaChildren[[1]],
       !MatchQ[#, LeafNode[Token`Comma | Whitespace | Token`Newline | Token`Spaces, _, _]]&
     ];
     extractSingleKey /@ keyNodes,
-    
+
     (* Single key *)
     Select[extractSingleKey /@ sigChildren, # =!= None &]
   ]
@@ -1711,18 +1830,18 @@ Otherwise return <||> (no nested structure).
 *)
 extractValueStructure[node_] :=
 Module[{assocChildren, listChildren},
-  
+
   (* Check for direct association: <| ... |> *)
   If[MatchQ[node, GroupNode[Association, _, _]],
     Return[extractHierarchicalKeys[node[[2]]]]
   ];
-  
+
   (* Check for list: { ... } possibly containing associations *)
   If[MatchQ[node, GroupNode[List, _, _]],
     listChildren = node[[2]];
     Return[extractListValueStructure[listChildren]]
   ];
-  
+
   (* Scalar or unknown value *)
   <||>
 ]
@@ -1733,15 +1852,15 @@ Extract structure from list children, checking if they contain associations.
 *)
 extractListValueStructure[listChildren_List] :=
 Module[{assocNodes, commaNodes, commaAssocs, mergedKeys, elementKeys},
-  
+
   assocNodes = Cases[listChildren, GroupNode[Association, ac_, _] :> ac, {1}];
-  
+
   commaNodes = Cases[listChildren, InfixNode[Comma, c_, _] :> c, {1}];
   If[Length[commaNodes] > 0,
     commaAssocs = Cases[commaNodes[[1]], GroupNode[Association, ac_, _] :> ac, {1}];
     assocNodes = Join[assocNodes, commaAssocs]
   ];
-  
+
   If[Length[assocNodes] > 0,
     elementKeys = {};
     mergedKeys = <||>;
@@ -1753,7 +1872,7 @@ Module[{assocNodes, commaNodes, commaAssocs, mergedKeys, elementKeys},
           If[!KeyExistsQ[mergedKeys, k],
             mergedKeys[k] = keys[k],
             If[KeyExistsQ[keys[k], "_children"] && KeyExistsQ[mergedKeys[k], "_children"],
-              mergedKeys[k] = <| "_children" -> 
+              mergedKeys[k] = <| "_children" ->
                 Join[mergedKeys[k]["_children"], keys[k]["_children"]] |>,
               If[KeyExistsQ[keys[k], "_children"],
                 mergedKeys[k] = keys[k]
@@ -1767,7 +1886,7 @@ Module[{assocNodes, commaNodes, commaAssocs, mergedKeys, elementKeys},
     ];
     <| "_isList" -> True, "_listLength" -> Length[assocNodes],
        "_elements" -> elementKeys, "_children" -> mergedKeys |>,
-    
+
     <||>
   ]
 ]
@@ -1786,28 +1905,28 @@ Returns None or <| "variable" -> ..., "keyPath" -> {}, "valueStructure" -> <|...
 *)
 extractMutatingCallKeys[funcName_String, groupChildren_List] :=
 Module[{sigArgs, varName, valueNode, keyPath, valueStructure, rules},
-  
+
   (* Extract significant children: remove brackets, commas, whitespace *)
   sigArgs = Select[groupChildren,
-    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | Token`Comma | 
+    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | Token`Comma |
       Whitespace | Token`Newline | Token`Spaces, _, _]]&
   ];
-  
+
   (* Also extract from InfixNode[Comma, ...] which wraps multi-argument calls *)
   If[Length[sigArgs] == 1 && MatchQ[sigArgs[[1]], InfixNode[Comma, _, _]],
     sigArgs = Select[sigArgs[[1, 2]],
       !MatchQ[#, LeafNode[Token`Comma | Whitespace | Token`Newline | Token`Spaces, _, _]]&
     ]
   ];
-  
+
   If[Length[sigArgs] < 2, Return[None]];
-  
+
   (* First argument is the variable *)
   If[!MatchQ[sigArgs[[1]], LeafNode[Symbol, _, _]], Return[None]];
   varName = sigArgs[[1, 2]];
-  
+
   valueNode = sigArgs[[2]];
-  
+
   Switch[funcName,
     "AppendTo" | "PrependTo",
       (*
@@ -1818,7 +1937,7 @@ Module[{sigArgs, varName, valueNode, keyPath, valueStructure, rules},
       *)
       valueStructure = extractValueStructure[valueNode];
       <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
-    
+
     "AssociateTo",
       (*
       AssociateTo[var, "key" -> val]
@@ -1828,7 +1947,7 @@ Module[{sigArgs, varName, valueNode, keyPath, valueStructure, rules},
       valueStructure = extractAssociateToKeys[valueNode];
       If[valueStructure === None, Return[None]];
       <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
-    
+
     _,
       None
   ]
@@ -1842,7 +1961,7 @@ Returns an association structure or None.
 *)
 extractAssociateToKeys[node_] :=
 Module[{rules, result},
-  
+
   (* Single rule: "key" -> value *)
   If[MatchQ[node, BinaryNode[Rule | RuleDelayed, _, _]],
     result = <||>;
@@ -1851,7 +1970,7 @@ Module[{rules, result},
       key = extractKeyFromRuleChildren[ruleChildren];
       If[key =!= None,
         (* Check if the value is a nested association *)
-        valueNode = Cases[ruleChildren, 
+        valueNode = Cases[ruleChildren,
           n_ /; MatchQ[n, GroupNode[Association, _, _] | GroupNode[List, _, _]], {1}];
         If[Length[valueNode] > 0,
           vs = extractValueStructure[valueNode[[1]]];
@@ -1865,26 +1984,26 @@ Module[{rules, result},
     ];
     Return[result]
   ];
-  
+
   (* Association literal: <| "key" -> val, ... |> *)
   If[MatchQ[node, GroupNode[Association, _, _]],
     Return[extractHierarchicalKeys[node[[2]]]]
   ];
-  
+
   (* List of rules: {"key1" -> val1, "key2" -> val2} *)
   If[MatchQ[node, GroupNode[List, _, _]],
     Module[{listChildren, ruleNodes, commaChildren},
       listChildren = node[[2]];
-      
+
       ruleNodes = Cases[listChildren,
         BinaryNode[Rule | RuleDelayed, rc_, _] :> rc, {1}];
-      
+
       commaChildren = Cases[listChildren, InfixNode[Comma, c_, _] :> c, {1}];
       If[Length[commaChildren] > 0,
         ruleNodes = Join[ruleNodes, Cases[commaChildren[[1]],
           BinaryNode[Rule | RuleDelayed, rc_, _] :> rc, {1}]]
       ];
-      
+
       result = <||>;
       Do[
         Module[{key},
@@ -1898,7 +2017,7 @@ Module[{rules, result},
       If[Length[result] > 0, Return[result]]
     ]
   ];
-  
+
   None
 ]
 
@@ -1917,56 +2036,56 @@ Returns None or <| "variable" -> ..., "keyPath" -> {}, "valueStructure" -> <|...
 extractFunctionalSetKeys[children_List] :=
 Module[{sigChildren, lhs, rhs, varName, rhsHead, rhsGroupChildren,
         rhsSigArgs, funcName, valueNode, valueStructure},
-  
+
   sigChildren = getSignificantChildren[children];
   If[Length[sigChildren] < 2, Return[None]];
-  
+
   lhs = sigChildren[[1]];
   rhs = sigChildren[[2]];
-  
+
   (* LHS must be a simple variable (not a CallNode like Part assignment) *)
   If[!MatchQ[lhs, LeafNode[Symbol, _, _]], Return[None]];
   varName = lhs[[2]];
-  
+
   (* RHS must be a CallNode: funcName[args...] *)
   If[!MatchQ[rhs, CallNode[_, _, _]], Return[None]];
-  
+
   rhsHead = rhs[[1]];
   If[!MatchQ[rhsHead, {LeafNode[Symbol, _, _]}], Return[None]];
   funcName = rhsHead[[1, 2]];
-  
+
   If[!MemberQ[{"Append", "Prepend", "Join", "Merge", "Association"}, funcName],
     Return[None]
   ];
-  
+
   (* Extract the arguments from the GroupNode *)
   rhsGroupChildren = rhs[[2]];
   If[!MatchQ[rhsGroupChildren, GroupNode[GroupSquare, _, _]], Return[None]];
-  
+
   rhsSigArgs = Select[rhsGroupChildren[[2]],
-    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | Token`Comma | 
+    !MatchQ[#, LeafNode[Token`OpenSquare | Token`CloseSquare | Token`Comma |
       Whitespace | Token`Newline | Token`Spaces, _, _]]&
   ];
-  
+
   (* Unwrap InfixNode[Comma, ...] if present *)
   If[Length[rhsSigArgs] == 1 && MatchQ[rhsSigArgs[[1]], InfixNode[Comma, _, _]],
     rhsSigArgs = Select[rhsSigArgs[[1, 2]],
       !MatchQ[#, LeafNode[Token`Comma | Whitespace | Token`Newline | Token`Spaces, _, _]]&
     ]
   ];
-  
+
   If[Length[rhsSigArgs] < 2, Return[None]];
-  
+
   (* First argument should be the same variable name (self-reference) *)
   If[!MatchQ[rhsSigArgs[[1]], LeafNode[Symbol, varName, _]], Return[None]];
-  
+
   Switch[funcName,
     "Append" | "Prepend",
       (* var = Append[var, value] *)
       valueNode = rhsSigArgs[[2]];
       valueStructure = extractValueStructure[valueNode];
       <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
-    
+
     "Join",
       (* var = Join[var, otherList] - extract keys from all remaining args *)
       valueStructure = <||>;
@@ -1978,7 +2097,7 @@ Module[{sigChildren, lhs, rhs, varName, rhsHead, rhsGroupChildren,
         {i, 2, Length[rhsSigArgs]}
       ];
       <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
-    
+
     "Merge" | "Association",
       (* var = Merge[var, other] or var = Association[var, key -> val] *)
       valueStructure = <||>;
@@ -1990,7 +2109,7 @@ Module[{sigChildren, lhs, rhs, varName, rhsHead, rhsGroupChildren,
         {i, 2, Length[rhsSigArgs]}
       ];
       <| "variable" -> varName, "keyPath" -> {}, "valueStructure" -> valueStructure |>,
-    
+
     _,
       None
   ]
@@ -2010,9 +2129,9 @@ valueStructure: the structure to merge at the target location
 *)
 mergeIntoResult[result_Association, variable_String, keyPath_List, valueStructure_Association] :=
 Module[{merged = result, existing},
-  
+
   existing = Lookup[merged, variable, <||>];
-  
+
   If[Length[keyPath] == 0,
     (* Top-level merge: merge valueStructure keys into existing *)
     merged[variable] = mergeKeyStructure[existing, valueStructure];
@@ -2037,9 +2156,9 @@ Returns: the updated structure
 *)
 mergeAtKeyPath[existing_Association, keyPath_List, valueStructure_Association] :=
 Module[{merged = existing, key, childrenNow, updatedChildren},
-  
+
   key = First[keyPath];
-  
+
   If[Length[keyPath] == 1,
     (* Final key — merge valueStructure here *)
     If[AssociationQ[valueStructure] && Length[valueStructure] > 0,
@@ -2120,52 +2239,52 @@ Returns: <| "variable" -> name, "structure" -> <| key -> <| "_children" -> ... |
 *)
 extractAssignmentKeysHierarchical[children_List] :=
 Module[{varName, assocNode, listNode, structure},
-  
+
   (*
   Find the variable name (first Symbol in children)
   *)
   varName = Cases[children, LeafNode[Symbol, name_, _] :> name, {1}];
-  
+
   If[Length[varName] == 0,
     Return[None]
   ];
-  
+
   varName = First[varName];
-  
+
   (*
   Find association node in children - look at direct children only
   *)
   assocNode = Cases[children, GroupNode[Association, assocChildren_, _] :> assocChildren, {1}];
-  
+
   If[Length[assocNode] > 0,
     structure = extractHierarchicalKeys[First[assocNode]];
     Return[<|"variable" -> varName, "structure" -> structure|>]
   ];
-  
+
   (*
   Check for list-of-associations: {<|...|>, <|...|>, ...}
   The CST has GroupNode[List, listChildren, _] containing GroupNode[Association, ...]
   *)
   listNode = Cases[children, GroupNode[List, listChildren_, _] :> listChildren, {1}];
-  
+
   If[Length[listNode] > 0,
     Module[{listChildren, assocNodes, mergedKeys},
       listChildren = First[listNode];
-      
+
       (* Find all associations directly in the list, or inside InfixNode[Comma, ...] *)
-      assocNodes = Cases[listChildren, 
+      assocNodes = Cases[listChildren,
         GroupNode[Association, ac_, _] :> ac, {1}];
-      
+
       (* Also look inside Comma nodes *)
       Module[{commaNodes, commaAssocs},
         commaNodes = Cases[listChildren, InfixNode[Comma, c_, _] :> c, {1}];
         If[Length[commaNodes] > 0,
-          commaAssocs = Cases[commaNodes[[1]], 
+          commaAssocs = Cases[commaNodes[[1]],
             GroupNode[Association, ac_, _] :> ac, {1}];
           assocNodes = Join[assocNodes, commaAssocs]
         ]
       ];
-      
+
       If[Length[assocNodes] > 0,
         (* Extract per-element keys and build merged keys *)
         Module[{elementKeys},
@@ -2180,7 +2299,7 @@ Module[{varName, assocNode, listNode, structure},
                   mergedKeys[k] = keys[k],
                   (* Merge _children if both have them *)
                   If[KeyExistsQ[keys[k], "_children"] && KeyExistsQ[mergedKeys[k], "_children"],
-                    mergedKeys[k] = <| "_children" -> 
+                    mergedKeys[k] = <| "_children" ->
                       Join[mergedKeys[k]["_children"], keys[k]["_children"]] |>,
                     If[KeyExistsQ[keys[k], "_children"],
                       mergedKeys[k] = keys[k]
@@ -2192,7 +2311,7 @@ Module[{varName, assocNode, listNode, structure},
             ],
             {an, assocNodes}
           ];
-          structure = <| "_isList" -> True, "_listLength" -> Length[assocNodes], 
+          structure = <| "_isList" -> True, "_listLength" -> Length[assocNodes],
                          "_elements" -> elementKeys,
                          "_children" -> mergedKeys |>;
           Return[<|"variable" -> varName, "structure" -> structure|>]
@@ -2200,7 +2319,7 @@ Module[{varName, assocNode, listNode, structure},
       ]
     ]
   ];
-  
+
   None
 ]
 
@@ -2211,22 +2330,22 @@ Returns: <| "key1" -> <| "_children" -> <| nested... |> |>, "key2" -> <||>, ... 
 *)
 extractHierarchicalKeys[children_List] :=
 Module[{result, rules, commaChildren},
-  
+
   result = <||>;
-  
+
   (*
   Find all Rule nodes at this level
   Rules can be either:
   1. Direct children (single key-value pair): <| "key" -> value |>
   2. Inside InfixNode[Comma, ...] (multiple pairs): <| "k1" -> v1, "k2" -> v2 |>
   *)
-  
+
   (* First, try to find rules directly *)
   rules = Cases[children,
     BinaryNode[Rule | RuleDelayed, ruleChildren_, _] :> ruleChildren,
     {1}
   ];
-  
+
   (* Also look for rules inside InfixNode[Comma, ...] for multi-key associations *)
   commaChildren = Cases[children, InfixNode[Comma, c_, _] :> c, {1}];
   If[Length[commaChildren] > 0,
@@ -2235,21 +2354,21 @@ Module[{result, rules, commaChildren},
       {1}
     ]]
   ];
-  
+
   Do[
     Module[{key, valueNode, childStructure, listNode},
       (* Extract the key *)
       key = extractKeyFromRuleChildren[rule];
-      
+
       If[key =!= None,
         (* Check if the value is a nested association - only look at direct children *)
         valueNode = Cases[rule, GroupNode[Association, assocChildren_, _] :> assocChildren, {1}];
-        
+
         If[Length[valueNode] > 0,
           (* Recursively extract nested keys *)
           childStructure = extractHierarchicalKeys[First[valueNode]];
           result[key] = <| "_children" -> childStructure |>,
-          
+
           (* Check if value is a list containing associations: {<|...|>, ...} *)
           listNode = Cases[rule, GroupNode[List, listChildren_, _] :> listChildren, {1}];
           If[Length[listNode] > 0,
@@ -2260,7 +2379,7 @@ Module[{result, rules, commaChildren},
               Module[{commaNodes2, commaAssocs2},
                 commaNodes2 = Cases[lc, InfixNode[Comma, c_, _] :> c, {1}];
                 If[Length[commaNodes2] > 0,
-                  commaAssocs2 = Cases[commaNodes2[[1]], 
+                  commaAssocs2 = Cases[commaNodes2[[1]],
                     GroupNode[Association, ac_, _] :> ac, {1}];
                   assocNodes = Join[assocNodes, commaAssocs2]
                 ]
@@ -2278,7 +2397,7 @@ Module[{result, rules, commaChildren},
                         If[!KeyExistsQ[mergedKeys, k],
                           mergedKeys[k] = akeys[k],
                           If[KeyExistsQ[akeys[k], "_children"] && KeyExistsQ[mergedKeys[k], "_children"],
-                            mergedKeys[k] = <| "_children" -> 
+                            mergedKeys[k] = <| "_children" ->
                               Join[mergedKeys[k]["_children"], akeys[k]["_children"]] |>,
                             If[KeyExistsQ[akeys[k], "_children"],
                               mergedKeys[k] = akeys[k]
@@ -2306,7 +2425,7 @@ Module[{result, rules, commaChildren},
     ],
     {rule, rules}
   ];
-  
+
   result
 ]
 
@@ -2316,20 +2435,20 @@ Extract the key from a Rule's children
 *)
 extractKeyFromRuleChildren[ruleChildren_List] :=
 Module[{firstNode},
-  
+
   (*
   The key is always the FIRST child of the Rule node (before the ->).
   We must pick the first non-whitespace, non-operator LeafNode.
   Using First avoids accidentally matching the value side of the rule.
   *)
   firstNode = FirstCase[ruleChildren,
-    LeafNode[type_, val_, _] /; !MemberQ[{Token`MinusGreater, Token`Comma, 
+    LeafNode[type_, val_, _] /; !MemberQ[{Token`MinusGreater, Token`Comma,
       Token`Equal, Whitespace, Token`Newline}, type] :> {type, val},
     None
   ];
-  
+
   If[firstNode === None, Return[None]];
-  
+
   Which[
     firstNode[[1]] === String,
       StringTrim[firstNode[[2]], "\""],
@@ -2350,12 +2469,12 @@ Also detects mutation patterns: Part assignment, AppendTo, AssociateTo, etc.
 *)
 extractAssociationKeysFromText[text_String] :=
 Module[{result, chars, pos, len, varName, mutations},
-  
+
   result = <||>;
   chars = Characters[text];
   len = Length[chars];
   pos = 1;
-  
+
   (*
   Scan for patterns: varName = <| ... |>
   Use bracket-depth tracking to find the matching |>
@@ -2367,50 +2486,50 @@ Module[{result, chars, pos, len, varName, mutations},
         pos++
       ];
       If[pos > len, Break[]];
-      
+
       varStart = pos;
       While[pos <= len && (LetterQ[chars[[pos]]] || DigitQ[chars[[pos]]] || chars[[pos]] === "$"),
         pos++
       ];
       varEnd = pos - 1;
       varName = StringJoin[chars[[varStart ;; varEnd]]];
-      
+
       (* Skip whitespace *)
       While[pos <= len && MemberQ[{" ", "\t", "\n", "\r"}, chars[[pos]]],
         pos++
       ];
-      
+
       (* Check for = *)
       If[pos > len || chars[[pos]] =!= "=",
         Continue[]
       ];
       pos++;
-      
+
       (* Check it's not == *)
       If[pos <= len && chars[[pos]] === "=",
         Continue[]
       ];
-      
+
       (* Skip whitespace *)
       While[pos <= len && MemberQ[{" ", "\t", "\n", "\r"}, chars[[pos]]],
         pos++
       ];
-      
+
       (* Check for <| (direct association) or { (list that may contain associations) *)
       If[pos + 1 <= len && chars[[pos]] === "<" && chars[[pos + 1]] === "|",
         (* Direct association: varName = <| ... |> *)
         pos += 2;
         assocStart = pos;
-        
+
         (* Find matching |> using bracket depth *)
         assocEnd = findMatchingAssocClose[text, pos];
         If[assocEnd == -1,
           Continue[]
         ];
-        
+
         result[varName] = parseAssociationBody[text, assocStart, assocEnd - 1];
         pos = assocEnd + 2,
-        
+
         (* Check for list: varName = { ... } *)
         If[pos <= len && chars[[pos]] === "{",
           pos++;
@@ -2435,7 +2554,7 @@ Module[{result, chars, pos, len, varName, mutations},
               pos++
             ];
             If[listEnd == -1, Continue[]];
-            
+
             (* Now scan inside the list for <| ... |> associations *)
             mergedKeys = <||>;
             Module[{scanPos, numAssocsText = 0, elementKeysText = {}},
@@ -2451,7 +2570,7 @@ Module[{result, chars, pos, len, varName, mutations},
                 assocBodyEnd = findMatchingAssocClose[text, scanPos];
                 If[assocBodyEnd == -1, Break[]];
                 numAssocsText++;
-                
+
                 (* Parse and merge keys *)
                 Module[{bodyKeys},
                   bodyKeys = parseAssociationBody[text, assocBodyStart, assocBodyEnd - 1];
@@ -2460,7 +2579,7 @@ Module[{result, chars, pos, len, varName, mutations},
                     If[!KeyExistsQ[mergedKeys, k],
                       mergedKeys[k] = bodyKeys[k],
                       If[KeyExistsQ[bodyKeys[k], "_children"] && KeyExistsQ[mergedKeys[k], "_children"],
-                        mergedKeys[k] = <| "_children" -> 
+                        mergedKeys[k] = <| "_children" ->
                           Join[mergedKeys[k]["_children"], bodyKeys[k]["_children"]] |>,
                         If[KeyExistsQ[bodyKeys[k], "_children"],
                           mergedKeys[k] = bodyKeys[k]
@@ -2472,7 +2591,7 @@ Module[{result, chars, pos, len, varName, mutations},
                 ];
                 scanPos = assocBodyEnd + 2
               ];
-              
+
               If[Length[mergedKeys] > 0,
                 result[varName] = <| "_isList" -> True, "_listLength" -> numAssocsText,
                                      "_elements" -> elementKeysText,
@@ -2486,12 +2605,12 @@ Module[{result, chars, pos, len, varName, mutations},
       ]
     ]
   ];
-  
+
   (*
   Also extract mutations from text: Part assignment, AppendTo, AssociateTo, etc.
   *)
   mutations = extractMutationsFromText[text];
-  
+
   (* Debug: log text extraction results before merge *)
   Quiet[
     Module[{ds},
@@ -2502,9 +2621,9 @@ Module[{result, chars, pos, len, varName, mutations},
       Close[ds];
     ]
   ];
-  
+
   result = mergeStructures[result, mutations];
-  
+
   result
 ]
 
@@ -2525,9 +2644,9 @@ Returns: <| "variable" -> <| "key" -> <||>, ... |>, ... |>
 *)
 extractMutationsFromText[text_String] :=
 Module[{result, partKeys, funcKeys},
-  
+
   result = <||>;
-  
+
   (* Debug: log that we entered extractMutationsFromText *)
   Quiet[
     Module[{ds},
@@ -2537,7 +2656,7 @@ Module[{result, partKeys, funcKeys},
       Close[ds];
     ]
   ];
-  
+
   (*
   1. Part assignment: var["key"] = val  or  var[["key"]] = val
      Regex: identifier followed by [ or [[ then "string" then ] or ]] then = (not ==)
@@ -2546,7 +2665,7 @@ Module[{result, partKeys, funcKeys},
     RegularExpression["([a-zA-Z$][a-zA-Z0-9$]*)\\s*\\[\\[?\\s*\"([^\"]*)\"\\s*\\]\\]?\\s*=(?!=)"] :>
       {"$1", "$2"}
   ];
-  
+
   Quiet[
     Module[{ds},
       ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
@@ -2554,7 +2673,7 @@ Module[{result, partKeys, funcKeys},
       Close[ds];
     ]
   ];
-  
+
   Do[
     Module[{var, key},
       var = pk[[1]];
@@ -2566,7 +2685,7 @@ Module[{result, partKeys, funcKeys},
     ],
     {pk, partKeys}
   ];
-  
+
   (*
   2. AppendTo[var, <| ... |>] and PrependTo[var, <| ... |>]
      Extract the variable name and any association keys from the value argument.
@@ -2576,7 +2695,7 @@ Module[{result, partKeys, funcKeys},
       RegularExpression["(AppendTo|PrependTo)\\s*\\[\\s*([a-zA-Z$][a-zA-Z0-9$]*)\\s*,"] :>
         {"$2"}
     ];
-    
+
     (* For each AppendTo/PrependTo, just register the variable exists.
        The value might be an association — try to extract keys from following text. *)
     Do[
@@ -2588,7 +2707,7 @@ Module[{result, partKeys, funcKeys},
       ],
       {am, appendMatches}
     ];
-    
+
     (* More precise: find AppendTo[var, <| "key" -> val |>] *)
     Module[{appendAssocMatches},
       appendAssocMatches = StringCases[text,
@@ -2615,7 +2734,7 @@ Module[{result, partKeys, funcKeys},
       ]
     ]
   ];
-  
+
   (*
   3. AssociateTo[var, "key" -> val] and AssociateTo[var, {"key1" -> v1, ...}]
   *)
@@ -2636,7 +2755,7 @@ Module[{result, partKeys, funcKeys},
       ],
       {atm, assocToMatches}
     ];
-    
+
     (* AssociateTo with list of rules: AssociateTo[var, {"key1" -> ..., "key2" -> ...}] *)
     Module[{assocToListMatches},
       assocToListMatches = StringCases[text,
@@ -2661,7 +2780,7 @@ Module[{result, partKeys, funcKeys},
         {atlm, assocToListMatches}
       ]
     ];
-    
+
     (* AssociateTo with association literal: AssociateTo[var, <| "key" -> val |>] *)
     Module[{assocToAssocMatches},
       assocToAssocMatches = StringCases[text,
@@ -2687,7 +2806,7 @@ Module[{result, partKeys, funcKeys},
       ]
     ]
   ];
-  
+
   (*
   4. Functional set patterns: var = Append[var, ...], var = Prepend[var, ...],
      var = Join[var, ...], var = Merge[var, ...]
@@ -2717,7 +2836,7 @@ Module[{result, partKeys, funcKeys},
       {fsm, funcSetMatches}
     ]
   ];
-  
+
   (* Debug: log final mutation result *)
   Quiet[
     Module[{ds},
@@ -2727,7 +2846,7 @@ Module[{result, partKeys, funcKeys},
       Close[ds];
     ]
   ];
-  
+
   result
 ]
 
@@ -2744,10 +2863,10 @@ Module[{chars, pos, len, depth, inStr, ch, nextCh},
   pos = startPos;
   depth = 1;
   inStr = False;
-  
+
   While[pos <= len && depth > 0,
     ch = chars[[pos]];
-    
+
     If[inStr,
       (* Inside a string literal - just look for the closing quote *)
       If[ch === "\"", inStr = False],
@@ -2768,7 +2887,7 @@ Module[{chars, pos, len, depth, inStr, ch, nextCh},
     ];
     pos++
   ];
-  
+
   -1
 ]
 
@@ -2780,18 +2899,18 @@ Uses Characters list for efficiency and to avoid escape issues.
 *)
 parseAssociationBody[text_String, startPos_Integer, endPos_Integer] :=
 Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
-  
+
   result = <||>;
   chars = Characters[text];
   pos = startPos;
-  
+
   While[pos <= endPos,
     (* Skip whitespace and commas *)
     While[pos <= endPos && MemberQ[{" ", "\t", "\n", "\r", ","}, chars[[pos]]],
       pos++
     ];
     If[pos > endPos, Break[]];
-    
+
     (* Try to read a key: "string", integer, or symbol *)
     If[chars[[pos]] === "\"",
       (* String key *)
@@ -2803,7 +2922,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
       ];
       If[pos > endPos, Break[]];
       pos++,  (* past closing " *)
-      
+
       (* Non-string key: integer or symbol *)
       If[DigitQ[chars[[pos]]] || LetterQ[chars[[pos]]] || chars[[pos]] === "$",
         key = "";
@@ -2818,23 +2937,23 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
         Continue[]
       ]
     ];
-    
+
     (* Skip whitespace *)
     While[pos <= endPos && MemberQ[{" ", "\t", "\n", "\r"}, chars[[pos]]],
       pos++
     ];
-    
+
     (* Expect -> *)
     If[pos + 1 > endPos || chars[[pos]] =!= "-" || chars[[pos + 1]] =!= ">",
       Continue[]
     ];
     pos += 2;
-    
+
     (* Skip whitespace *)
     While[pos <= endPos && MemberQ[{" ", "\t", "\n", "\r"}, chars[[pos]]],
       pos++
     ];
-    
+
     (* Read the value *)
     If[pos + 1 <= endPos && chars[[pos]] === "<" && chars[[pos + 1]] === "|",
       (* Nested association *)
@@ -2847,7 +2966,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
         result[key] = <| "_children" -> parseAssociationBody[text, valueStart, valueEnd - 1] |>;
         pos = valueEnd + 2
       ],
-      
+
       (* Check for list value: { ... } which may contain associations *)
       If[pos <= endPos && chars[[pos]] === "{",
         Module[{listStart, listEnd2, listDepth2, listInStr2, listCh2,
@@ -2892,7 +3011,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
                     If[!KeyExistsQ[mergedKeys2, k],
                       mergedKeys2[k] = bodyKeys2[k],
                       If[KeyExistsQ[bodyKeys2[k], "_children"] && KeyExistsQ[mergedKeys2[k], "_children"],
-                        mergedKeys2[k] = <| "_children" -> 
+                        mergedKeys2[k] = <| "_children" ->
                           Join[mergedKeys2[k]["_children"], bodyKeys2[k]["_children"]] |>,
                         If[KeyExistsQ[bodyKeys2[k], "_children"],
                           mergedKeys2[k] = bodyKeys2[k]
@@ -2914,7 +3033,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
             result[key] = <||>
           ]
         ],
-        
+
         (* Scalar value - skip to next comma or end, respecting nesting *)
         result[key] = <||>;
         depth = 0;
@@ -2936,7 +3055,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
       ]
     ]
   ];
-  
+
   result
 ]
 
@@ -2969,7 +3088,7 @@ Module[{id, params, label, documentation, result},
   documentation = getSymbolDocumentation[label];
 
   result = params;
-  
+
   If[documentation =!= None,
     result["documentation"] = <| "kind" -> "markdown", "value" -> documentation |>
   ];
@@ -2985,7 +3104,7 @@ embedded linear syntax (box expressions) into readable markdown.
 *)
 getSymbolDocumentation[symbolName_String] :=
 Module[{usage, pacletUsages},
-  
+
   (*
   First try system symbol usage
   *)
@@ -2995,7 +3114,7 @@ Module[{usage, pacletUsages},
       Return[StringJoin[LSPServer`Hover`linearToMDSyntax[usage]]]
     ]
   ];
-  
+
   (*
   Then try paclet index
   *)
@@ -3005,7 +3124,7 @@ Module[{usage, pacletUsages},
       Return[StringJoin[LSPServer`Hover`linearToMDSyntax[pacletUsages[[1]]]]]
     ]
   ];
-  
+
   None
 ]
 

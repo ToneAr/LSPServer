@@ -16,6 +16,12 @@ Begin["`Private`"]
 
     End[]
 
+Needs["DatabaseLink`" -> "DBL`"];
+Needs["GeneralUtilities`" -> "GU`"];
+DatabaseLink`
+DatabaseLink`SQLSelect[];
+DBL`JDBCDriverNames[];
+GU`
 
 Plo
 
@@ -28,17 +34,17 @@ Module[{modvar1, modvar2, modvar3},
     modvar2 = 3;
     modvar3 = 4;
     mo
-    
+
     Module[{w01=0, w02=0}, w];
-    
-   
+
+
     Block[{modBlock1, modBlock2, modBlock3, xo},
         modBlock1 = abcFoo;
         modBlock2 = 3;
         modBlock3 = 4;
         mod
         With[{w11=0, w12=0}, w];
-        
+
     ]
 ]
 

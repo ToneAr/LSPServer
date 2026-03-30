@@ -10,13 +10,13 @@ LSPServer implements several LSP features:
 * Code diagnostics with workspace-wide analysis
 * Suggestions for fixes (including quick-fix suppression actions)
 * Formatting files and selections
-* Semantic highlighting
+* Semantic highlighting (including scoped variables in common math iterator forms)
 * Expand / shrink selection
 * Outline
 * Color swatches
 * Symbol references
-* Documentation on hover with full context paths
-* Smart autocompletion (system symbols, workspace symbols, association keys, context-qualified symbols)
+* Documentation on hover with full context paths and alias-context mappings
+* Smart autocompletion (system symbols, workspace symbols, association keys, context-qualified symbols, and alias-qualified package symbols)
 * Workspace symbol search (cross-file go-to-definition)
 * ESLint-style diagnostic suppression (`wl-disable` comments and `.wllintrc` config)
 * Inlay hints (context annotations)
@@ -35,10 +35,10 @@ LSPServer provides intelligent autocompletion from multiple sources:
 
 - **System symbols**: All built-in Wolfram Language functions and constants
 - **Workspace symbols**: Symbols defined in your project, with highest completion priority
-- **External packages**: Symbols from packages loaded via `Needs[]` or `Get[]`
+- **External packages**: Symbols from packages loaded via `Needs[]` or `Get[]`, including alias-qualified package symbols
 - **Kernel contexts**: Context-qualified symbols like `Internal`Bag` or `Developer`ToPackedArray`, discovered dynamically via `Contexts[]` and `Names[]`
 - **Options**: Known options with automatic ` -> ` insertion
-- **Context paths**: All available contexts when typing after a backtick
+- **Context paths**: All available contexts when typing after a backtick, including alias contexts introduced by ``Needs["Package`" -> "Alias`"]``
 
 #### Association Key Completion
 
@@ -64,6 +64,8 @@ items[[1, ""         (* Suggests: "id" *)]]
 ```
 
 Supports bracket-only triggers (`data[`), Part syntax (`data[[`), chained access, comma-separated paths, `All`/`Span` indexing, and per-element key tracking for lists of associations.
+
+Package aliases also participate in completion. If you load a package with ``Needs["DatabaseLink`" -> "DBL`"]``, typing ``DBL` `` or an alias-qualified symbol resolves against the target package context.
 
 ### Diagnostic Suppression
 
@@ -108,7 +110,12 @@ Hovering over a symbol shows its full context path, usage message, and definitio
 
 - **System symbols**: Context, usage, and link to web documentation
 - **User-defined symbols**: Context (from workspace index), in-file usage message, and definition patterns
-- **External symbols**: Context, usage, definition patterns from `DownValues`/`UpValues`/`SubValues`, and documentation link
+- **External symbols**: Resolved context, usage, definition patterns from `DownValues`/`UpValues`/`SubValues`, and documentation link
+- **Alias-qualified symbols**: When a package is loaded through an alias context, hover shows both the alias you typed and the resolved target context
+
+### Semantic Highlighting
+
+Semantic highlighting recognizes scoped and iterator variables in common mathematical forms such as `Integrate`, `NIntegrate`, `D`, `Solve`, `NSolve`, `Reduce`, `FindInstance`, `FindRoot`, `DSolve`, `NDSolve`, `Series`, `Residue`, and `Limit`.
 
 ### Workspace Intelligence
 

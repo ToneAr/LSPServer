@@ -1,5 +1,27 @@
 # Building
 
+## Distribution
+For cross-platform distribution, github action workers are used to build the
+binaries and put together the paclet, creating a github release and committing
+build files back to the repo.
+
+This is triggered if a commit tag follows the pattern:
+```regex
+(build* | v*)
+```
+
+For example, tag a commit:
+```sh
+git tag v1.0.0
+```
+
+Push tag:
+```sh
+git push origin v1.0.0
+```
+
+## Individual
+
 LSPServer uses a Wolfram Language kernel to generate code at build time and a C++ compiler to compile a native library.
 
 LSPServer uses C++11 features and requires a compiler that can support at least C++11.

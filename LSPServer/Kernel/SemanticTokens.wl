@@ -138,7 +138,7 @@ Performance: This is called for every non-system symbol during semantic token
 classification. The dependency list and set are cached to avoid repeated lookups.
 *)
 
-(* Cached dependency set — invalidated when $PacletIndex changes.
+(* Cached dependency set - invalidated when $PacletIndex changes.
    We store the list length as a cheap staleness check. *)
 $depsCacheLen = -1;
 $depsSet = <||>;
@@ -169,8 +169,22 @@ Module[{symContext, explicitContext},
     explicitContext = StringJoin[Riffle[Most[StringSplit[name, "`"]], "`"]] <> "`";
 
     (* Fast exact match first, then substring check *)
-    Return[KeyExistsQ[$depsSet, explicitContext] ||
-           AnyTrue[$depsList, StringStartsQ[explicitContext, #] &]]
+    If[KeyExistsQ[$depsSet, explicitContext] ||
+       AnyTrue[$depsList, StringStartsQ[explicitContext, #] &],
+      Return[True]
+    ];
+
+    (* Resolve alias context (e.g. Alias` -> Full`) and re-check *)
+    With[{aliasMap = GetContextAliases[]},
+      If[KeyExistsQ[aliasMap, explicitContext],
+        With[{fullCtx = aliasMap[explicitContext]},
+          Return[KeyExistsQ[$depsSet, fullCtx] ||
+                 AnyTrue[$depsList, StringStartsQ[fullCtx, #] &]]
+        ]
+      ]
+    ];
+
+    Return[False]
   ];
 
   (* For bare symbols, try to get the symbol's context at runtime *)
@@ -629,6 +643,91 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
 ]]
 
 
+(*
+Extract scoping data for math functions whose variables are not handled
+by CodeParser`Scoping`ScopingData (e.g. Integrate, D, Solve, Limit, ...).
+
+Returns {source, scope, modifiers} triples in the same format as ScopingData[],
+using scope {"MathIterator"} which falls through to the "parameter" token type.
+*)
+extractMathScopingData[ast_] :=
+Module[{bag},
+  bag = Internal`Bag[];
+
+  (* Mark ALL occurrences of varName within callNode as MathIterator scoped.
+     This mirrors how ScopingData handles Module[{x}, f[x]] -- both the
+     declaration site and every usage within the scope get the same token type. *)
+  markVar[varName_String, callNode_] :=
+    Scan[
+      Internal`StuffBag[bag, {#[[3, Key[Source]]], {"MathIterator"}, {}}]&,
+      Cases[callNode, LeafNode[Symbol, varName, _], Infinity]
+    ];
+
+  (* D derivative spec: x or {x, n} -- return list of var names *)
+  dSpecVarNames[LeafNode[Symbol, vn_, _]] := {vn};
+  dSpecVarNames[CallNode[LeafNode[Symbol, "List", _], {LeafNode[Symbol, vn_, _], _}, _]] := {vn};
+  dSpecVarNames[_] := {};
+
+  (* Integrate[f, {x, a, b}], NIntegrate, Series, Residue *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "Integrate" | "NIntegrate" | "Series" | "Residue", _],
+      {_, CallNode[LeafNode[Symbol, "List", _], {LeafNode[Symbol, vn_, _], ___}, _], ___}, _] :>
+      markVar[vn, call],
+    Infinity];
+
+  (* D[f, spec1, spec2, ...] -- all specs contribute variables *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "D", _], {_, specs__}, _] :>
+      Scan[Scan[markVar[#, call]&, dSpecVarNames[#]]&, {specs}],
+    Infinity];
+
+  (* Solve[eqns, x], NSolve, Reduce, FindInstance -- bare symbol *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "Solve" | "NSolve" | "Reduce" | "FindInstance", _],
+      {_, LeafNode[Symbol, vn_, _], ___}, _] :>
+      markVar[vn, call],
+    Infinity];
+
+  (* Solve[eqns, {x, y, ...}] -- list of vars *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "Solve" | "NSolve" | "Reduce" | "FindInstance", _],
+      {_, CallNode[LeafNode[Symbol, "List", _], vars_, _], ___}, _] :>
+      Scan[If[MatchQ[#, LeafNode[Symbol, _, _]], markVar[#[[2]], call]]&, vars],
+    Infinity];
+
+  (* FindRoot[f, {x, x0}] or FindRoot[f, {x, x0, x1}] *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "FindRoot", _],
+      {_, CallNode[LeafNode[Symbol, "List", _], {LeafNode[Symbol, vn_, _], __}, _], ___}, _] :>
+      markVar[vn, call],
+    Infinity];
+
+  (* DSolve/NDSolve[eqns, y, x] -- 3rd arg is independent variable *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "DSolve" | "NDSolve", _],
+      {_, _, LeafNode[Symbol, vn_, _], ___}, _] :>
+      markVar[vn, call],
+    Infinity];
+
+  (* NDSolve[eqns, y, {x, x0, x1}] -- iterator form *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "NDSolve", _],
+      {_, _, CallNode[LeafNode[Symbol, "List", _], {LeafNode[Symbol, vn_, _], __}, _], ___}, _] :>
+      markVar[vn, call],
+    Infinity];
+
+  (* Limit[f, x -> x0] *)
+  Cases[ast,
+    call:CallNode[LeafNode[Symbol, "Limit", _],
+      {_, CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {LeafNode[Symbol, vn_, _], _}, _], ___}, _] :>
+      markVar[vn, call],
+    Infinity];
+
+  (* Deduplicate by start position in case of nested calls or overlapping matches *)
+  DeleteDuplicatesBy[Internal`BagPart[bag, All], #[[1, 1]]&]
+]
+
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/runScopingData"]] :=
 Catch[
 Module[{params, doc, uri, entry, ast, scopingData},
@@ -671,6 +770,9 @@ Module[{params, doc, uri, entry, ast, scopingData},
   ];
 
   scopingData = ScopingData[ast];
+
+  (* Merge in math function variable scoping (Integrate, D, Solve, Limit, etc.) *)
+  scopingData = Join[scopingData, extractMathScopingData[ast]];
 
   log[2, "after ScopingData"];
 

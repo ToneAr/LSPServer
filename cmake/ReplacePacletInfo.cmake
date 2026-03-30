@@ -15,10 +15,30 @@ string(REGEX REPLACE "Transport -> \"[a-zA-Z]*\"" "Transport -> \"${TRANSPORT}\"
 
 string(REGEX REPLACE "PlatformQualifier -> \"[a-zA-Z0-9 :]*\"" "PlatformQualifier -> \"${PlatformQualifier}\"" filedata ${filedata})
 
-if(${SYSTEMID} MATCHES "MacOSX")
-	string(REGEX REPLACE "SystemID -> {}" "SystemID -> {\"MacOSX-x86-64\",\"MacOSX-ARM64\"}" filedata ${filedata})
+if(SYSTEMID AND NOT SYSTEMID STREQUAL "")
+	if(${SYSTEMID} MATCHES "MacOSX")
+		string(REGEX REPLACE "SystemID -> {[^}]*}" "SystemID -> {\"MacOSX-x86-64\",\"MacOSX-ARM64\"}" filedata ${filedata})
+	else()
+		string(REGEX REPLACE "SystemID -> {[^}]*}" "SystemID -> {\"${SYSTEMID}\"}" filedata ${filedata})
+	endif()
 else()
-	string(REGEX REPLACE "SystemID -> {}" "SystemID -> {\"${SYSTEMID}\"}" filedata ${filedata})
+	# Auto-detect SystemIDs from LibraryResources subdirectories
+	get_filename_component(PACLET_DIR "${REPLACED_PACLETINFO}" DIRECTORY)
+	file(GLOB SYSID_CANDIDATES LIST_DIRECTORIES true "${PACLET_DIR}/LibraryResources/*")
+	set(SYSID_WL_LIST "")
+	foreach(CANDIDATE ${SYSID_CANDIDATES})
+		if(IS_DIRECTORY "${CANDIDATE}")
+			get_filename_component(SYSID_NAME "${CANDIDATE}" NAME)
+			if(SYSID_WL_LIST)
+				set(SYSID_WL_LIST "${SYSID_WL_LIST}, \"${SYSID_NAME}\"")
+			else()
+				set(SYSID_WL_LIST "\"${SYSID_NAME}\"")
+			endif()
+		endif()
+	endforeach()
+	if(SYSID_WL_LIST)
+		string(REGEX REPLACE "SystemID -> {[^}]*}" "SystemID -> {${SYSID_WL_LIST}}" filedata ${filedata})
+	endif()
 endif()
 
 

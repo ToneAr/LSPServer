@@ -665,11 +665,16 @@ Catch[
 Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
   defText, defAST, defCST, fileEntry, defFilePath,
   functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,
-  functionCallPatternCST, functionSource, functionCallPattern},
-  
+  functionCallPatternCST, functionSource, functionCallPattern, aliasContext},
+
   (* Strip explicit context prefix if present to get the bare name *)
+  (* Also detect if the prefix is a known alias context *)
+  aliasContext = None;
   tokenSymbol = If[StringContainsQ[symIn, "`"],
-    Last[StringSplit[symIn, "`"]],
+    With[{parts = StringSplit[symIn, "`"], ctxPart = StringJoin[Riffle[Most[StringSplit[symIn, "`"]], "`"]] <> "`"},
+      If[KeyExistsQ[GetContextAliases[], ctxPart], aliasContext = ctxPart];
+      Last[parts]
+    ],
     symIn
   ];
   
@@ -809,7 +814,8 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> None,
       "FunctionInformation" -> True,
-      "Context" -> context
+      "Context" -> context,
+      "AliasContext" -> aliasContext
     |>,
     <|
       "SymbolType" -> "CrossFile",
@@ -817,7 +823,8 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> functionCallPattern,
       "FunctionInformation" -> True,
-      "Context" -> context
+      "Context" -> context,
+      "AliasContext" -> aliasContext
     |>
   ]
 ]]
@@ -826,7 +833,7 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
 handleExternalSymbols[symIn_] :=
 Catch[
 Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentationLink,
-  defPatterns, downVals, upVals, subVals, symbol, foundContext},
+  defPatterns, downVals, upVals, subVals, symbol, foundContext, aliasContext},
 
   (* Get dependency contexts *)
   deps = GetDependencyContexts[];
@@ -837,7 +844,17 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
     bareSymbol = Last[StringSplit[symIn, "`"]];
     symContext = StringJoin[Riffle[Most[StringSplit[symIn, "`"]], "`"]] <> "`";
     fullSymbol = symIn;
-    
+
+    (* Resolve alias context to full context if needed (e.g. Alias` -> FullContext`) *)
+    aliasContext = None;
+    With[{aliasMap = GetContextAliases[]},
+      If[AssociationQ[aliasMap] && KeyExistsQ[aliasMap, symContext],
+        aliasContext = symContext;
+        symContext = aliasMap[symContext];
+        fullSymbol = symContext <> bareSymbol
+      ]
+    ];
+
     (* For explicit context, verify the symbol exists *)
     If[!Quiet[NameQ[fullSymbol]],
       Throw[<|
@@ -987,12 +1004,13 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
     "SymbolType" -> "External",
     "Usage" -> usage,
     "DocumentationLink" -> documentationLink,
-    "FunctionDefinitionPatterns" -> If[Length[defPatterns] > 0, 
-      StringRiffle[defPatterns, "\n"], 
+    "FunctionDefinitionPatterns" -> If[Length[defPatterns] > 0,
+      StringRiffle[defPatterns, "\n"],
       None
     ],
     "FunctionInformation" -> True,
-    "Context" -> symContext
+    "Context" -> symContext,
+    "AliasContext" -> aliasContext
   |>
 ]]
 
@@ -1126,6 +1144,9 @@ Backticks in Wolfram contexts (e.g. "System`") collide with markdown
 inline code syntax. We use double-backtick delimiters so the inner
 backtick is rendered literally: `` System` ``
 *)
+formatContextLine[context_String, alias_String] :=
+  "`` " <> alias <> " `` -> `` " <> context <> " ``"
+
 formatContextLine[context_String] :=
   "`` " <> context <> " ``"
 
@@ -1147,8 +1168,13 @@ formatDefinitionPatterns[_] := None
 formatUsageCallPatterns[assoc_] := 
 Module[{res, parts, contextLine, patternsBlock},
   
-  (* Build context line if available *)
-  contextLine = formatContextLine[Lookup[assoc, "Context", None]];
+  (* Build context line if available - show alias mapping when accessed via an alias context *)
+  contextLine = With[{ctx = Lookup[assoc, "Context", None], alias = Lookup[assoc, "AliasContext", None]},
+    If[StringQ[alias] && StringQ[ctx],
+      formatContextLine[ctx, alias],
+      formatContextLine[ctx]
+    ]
+  ];
   
   If[Not[TrueQ[assoc["FunctionInformation"]]],
     res = "No function information."
