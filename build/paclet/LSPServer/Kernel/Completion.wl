@@ -93,7 +93,7 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/completionFencep
 Catch[
 Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   completions, systemCompletions, pacletCompletions, optionCompletions,
-  contextCompletions, externalCompletions, kernelCtxCompletions,
+  contextCompletions, externalCompletions, kernelCtxCompletions, aliasedCompletions,
   keyCompletions, cst, result, keyContext},
 
   If[$Debug2,
@@ -237,14 +237,45 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   contextCompletions = getContextCompletions[prefix];
   externalCompletions = getExternalSymbolCompletions[prefix];
   kernelCtxCompletions = getKernelContextSymbolCompletions[prefix];
+  aliasedCompletions = getAliasedSymbolCompletions[prefix];
 
   (*
   Combine and deduplicate
-  Priority order: paclet symbols, external package symbols, kernel context symbols,
-  system symbols, options, contexts
+  Priority order: paclet symbols, aliased context symbols, external package symbols,
+  kernel context symbols, system symbols, options, contexts
   *)
-  completions = Join[pacletCompletions, externalCompletions, kernelCtxCompletions, systemCompletions, optionCompletions, contextCompletions];
+  completions = Join[pacletCompletions, aliasedCompletions, externalCompletions, kernelCtxCompletions, systemCompletions, optionCompletions, contextCompletions];
   completions = DeleteDuplicatesBy[completions, #["label"]&];
+
+  (*
+  For any completion whose label contains a backtick (context-qualified names and context
+  strings), add an explicit textEdit that replaces the full typed prefix with the label.
+  Without this, VSCode treats ` as a word separator and only replaces the text after the
+  last backtick — causing e.g. "Alias`" + insert "Alias`Symbol" = "Alias`Alias`Symbol`".
+  Items that already carry a textEdit (e.g. association key completions) are left alone.
+  *)
+  If[StringContainsQ[prefix, "`"],
+    Module[{lspLine0, lspPrefixStartChar0, lspPrefixEndChar0},
+      lspLine0         = line - 1;
+      lspPrefixEndChar0   = char - 1;
+      lspPrefixStartChar0 = char - 1 - StringLength[prefix];
+      completions = Map[
+        Function[{item},
+          If[StringContainsQ[item["label"], "`"] && !KeyExistsQ[item, "textEdit"],
+            Append[item, "textEdit" -> <|
+              "range" -> <|
+                "start" -> <| "line" -> lspLine0, "character" -> lspPrefixStartChar0 |>,
+                "end"   -> <| "line" -> lspLine0, "character" -> lspPrefixEndChar0   |>
+              |>,
+              "newText" -> item["label"]
+            |>],
+            item
+          ]
+        ],
+        completions
+      ]
+    ]
+  ];
 
   (*
   Limit the number of results
@@ -451,15 +482,18 @@ Module[{contexts, kernelContexts, matching, completions},
   Get contexts from the paclet index (workspace-defined)
   *)
   contexts = Keys[$PacletIndex["Contexts"]];
-  
+
   (*
   Get all kernel-known contexts using Contexts[].
   This dynamically discovers all available contexts (Internal`, Developer`,
   Compile`, JLink`, etc.) instead of relying on a hardcoded list.
   *)
   kernelContexts = GetKernelContextsCached[];
-  
-  contexts = DeleteDuplicates[Join[contexts, kernelContexts]];
+
+  (*
+  Include alias contexts defined via Needs["Full`" -> "Alias`"]
+  *)
+  contexts = DeleteDuplicates[Join[contexts, kernelContexts, Keys[GetContextAliases[]]]];
   
   (*
   Filter by prefix
@@ -679,6 +713,89 @@ Module[{deps, allExternalSymbols, matching, completions},
     {fullName, Take[matching, UpTo[30]]}
   ];
   
+  completions
+]
+
+
+(*
+Get completions for context-qualified symbols using aliases set up with
+Needs["FullContext`" -> "Alias`"].
+
+When a user types "Alias`Sym", this resolves "Alias`" to its full context,
+looks up symbols in that context, and returns completions labelled with the
+alias prefix so the user's code stays consistent.
+*)
+getAliasedSymbolCompletions[prefix_String] :=
+Module[{aliases, ctxPart, symbolPrefix, fullContext, allNames, matching, completions},
+
+  If[!StringContainsQ[prefix, "`"],
+    Return[{}]
+  ];
+
+  aliases = GetContextAliases[];
+  If[aliases === <||>,
+    Return[{}]
+  ];
+
+  (*
+  Split prefix into the context part and the partial symbol name.
+  E.g. "Alias`Foo" -> ctxPart = "Alias`", symbolPrefix = "Foo"
+       "Alias`"    -> ctxPart = "Alias`", symbolPrefix = ""
+  *)
+  ctxPart = StringJoin[Riffle[Most[StringSplit[prefix, "`", All]], "`"]] <> "`";
+  symbolPrefix = Last[StringSplit[prefix, "`", All]];
+
+  If[!KeyExistsQ[aliases, ctxPart],
+    Return[{}]
+  ];
+
+  fullContext = aliases[ctxPart];
+
+  (*
+  Look up symbols in the full context that match the symbol prefix.
+  *)
+  allNames = Quiet[Names[fullContext <> symbolPrefix <> "*"], {Names::notfound}];
+  If[!ListQ[allNames], allNames = {}];
+
+  matching = SortBy[allNames, {
+    !StringStartsQ[Last[StringSplit[#, "`"]], symbolPrefix]&,
+    StringLength[#]&
+  }];
+
+  completions = Table[
+    Module[{bareSymbol, aliasedLabel, usage, detail},
+      bareSymbol = Last[StringSplit[fullName, "`"]];
+      aliasedLabel = ctxPart <> bareSymbol;
+
+      usage = Quiet[
+        Check[
+          ToExpression[fullName <> "::usage"],
+          None,
+          {MessageName::noinfo}
+        ],
+        {MessageName::noinfo, ToExpression::notstrbox}
+      ];
+
+      detail = If[StringQ[usage],
+        StringTake[
+          StringReplace[usage, {"\n" -> " ", "\r" -> " ", RegularExpression["\\s+"] -> " "}],
+          UpTo[80]
+        ],
+        ctxPart <> " \[RightArrow] " <> fullContext
+      ];
+
+      <|
+        "label" -> aliasedLabel,
+        "kind" -> $CompletionItemKind["Function"],
+        "detail" -> detail,
+        "sortText" -> "1_" <> bareSymbol,
+        "filterText" -> aliasedLabel,
+        "labelDetails" -> <| "description" -> ctxPart |>
+      |>
+    ],
+    {fullName, Take[matching, UpTo[50]]}
+  ];
+
   completions
 ]
 
