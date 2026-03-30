@@ -17,9 +17,10 @@ Begin["`Private`"]
     End[]
 
 Needs["DatabaseLink`" -> "DBL`"];
-Needs["GeneralUtilities`" -> "GU`"]
+Needs["GeneralUtilities`" -> "GU`"];
 DatabaseLink`
-DBL`
+DatabaseLink`SQLSelect[];
+DBL`JDBCDriverNames[];
 GU`
 
 Plo

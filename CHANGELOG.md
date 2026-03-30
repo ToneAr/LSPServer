@@ -1,4 +1,24 @@
 
+## 2.9.41 - 30 Mar 2026
+
+### Improvements
+
+#### Context Alias Support
+
+- Hover and external-symbol resolution now understand alias-qualified package contexts introduced with `Needs["Package`" -> "Alias`"]`.
+- Hover shows both the alias context used in source and the resolved full context when applicable.
+- Alias-qualified contexts are treated consistently by dependency-aware symbol resolution.
+
+#### Semantic Tokens for Math Scoping Forms
+
+- Semantic token scoping now recognizes bound variables in common math constructs including `Integrate`, `NIntegrate`, `D`, `Solve`, `NSolve`, `Reduce`, `FindInstance`, `FindRoot`, `DSolve`, `NDSolve`, `Series`, `Residue`, and `Limit`.
+- Iterator-style variables in these forms are highlighted as scoped parameters more consistently.
+
+#### Tests
+
+- Expanded completion coverage for alias-qualified package loading.
+- Added test cases covering `Needs["DatabaseLink`" -> "DBL`"]` and alias-based symbol usage.
+
 ## 2.9.28 - 29 Mar 2026
 
 ### New Features
