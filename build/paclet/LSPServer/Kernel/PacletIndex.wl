@@ -37,9 +37,11 @@ GetFileLoadedContexts
 GetKernelContextsCached
 GetSymbolUsages
 GetContextAliases
+ProcessPendingIndexFiles
 
 $PacletIndex
 $WorkspaceRoot
+$PendingIndexFiles
 
 Begin["`Private`"]
 
@@ -102,6 +104,12 @@ $PacletIndex = <|
 |>
 
 $WorkspaceRoot = None
+
+(*
+Files queued for background indexing (populated by InitializePacletIndex,
+consumed by ProcessPendingIndexFiles during idle loop iterations)
+*)
+$PendingIndexFiles = {}
 
 (*
 Cached set of non-API symbol names for fast exclusion in extractPublicDeclarations
@@ -167,15 +175,38 @@ Module[{files, filteredFiles},
   ];
   
   (*
-  Index each file
+  Queue files for background indexing so the initialized handler can return
+  immediately and the server can begin accepting requests
   *)
-  Scan[indexFile, filteredFiles];
-  
+  $PendingIndexFiles = filteredFiles;
+
   If[$Debug2,
-    log["InitializePacletIndex: completed. Total symbols: ", Length[$PacletIndex["Symbols"]]]
+    log["InitializePacletIndex: queued ", Length[$PendingIndexFiles], " files for background indexing"]
   ];
-  
+
   $PacletIndex
+]
+
+
+(*
+Process a batch of pending index files.
+Called by ProcessScheduledJobs during idle loop iterations so that workspace
+indexing happens in the background without blocking LSP responses.
+Returns True if there are still files remaining to index.
+*)
+ProcessPendingIndexFiles[] :=
+Module[{n, batch},
+  If[Length[$PendingIndexFiles] == 0,
+    Return[False]
+  ];
+  n = Min[5, Length[$PendingIndexFiles]];
+  batch = $PendingIndexFiles[[;;n]];
+  $PendingIndexFiles = $PendingIndexFiles[[n + 1 ;;]];
+  Scan[indexFile, batch];
+  If[$Debug2,
+    log["ProcessPendingIndexFiles: indexed batch of ", n, ", ", Length[$PendingIndexFiles], " files remaining"]
+  ];
+  Length[$PendingIndexFiles] > 0
 ]
 
 

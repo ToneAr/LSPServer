@@ -24,7 +24,7 @@ initializeLSPComm["ListenSocket"] := SocketOpen[5555, "TCP"]
 
 (* Call-back function for SocketListen *)
 
-processData[dataByteArray_, sourceSocket_] := 
+processData[dataByteArray_, sourceSocket_] :=
 Module[{dataString, finalMsg, contentsIn, content, contents},
 
   If[!ByteArrayQ[dataByteArray],

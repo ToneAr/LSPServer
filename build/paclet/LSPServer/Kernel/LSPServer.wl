@@ -34,7 +34,7 @@ handleContentAfterShutdown
 
 $Debug3
 
-(*  
+(*
 level 0: Server start and exit log
 level 1: Content handler entry and exit log to understand the flow of the handlers
 level 2: Log inside a content handler for content handler debugging
@@ -621,10 +621,10 @@ Module[{cancels, params, id},
       $CancelMap[id] = True
     ], cancels];
 
-  
+
     log[2, "after preScanForCancels"];
     log[2, "$CancelMap: ", $CancelMap];
-  
+
 ]
 
 
@@ -636,7 +636,7 @@ expandContents[contentsIn_] :=
 Module[{contents, lastContents},
 
   contents = contentsIn;
-  (* 
+  (*
   This log can be used to know time to handle a feature.
   Time taken for a feature (x feature timing) = (feature exit log timing - new message entry timing)
   As we are changing the message queue to prioritise cumpletion message,
@@ -673,7 +673,7 @@ Module[{contents, lastContents},
     ];
 
     log[2, "after expandContent"];
-    
+
     contents = $PreExpandContentQueue;
   ];
 
@@ -699,6 +699,13 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   If[$ServerState == "shutdown",
     Throw[Null]
   ];
+
+  (*
+  Process a small batch of pending workspace index files on each idle iteration.
+  This lets InitializePacletIndex return immediately while indexing completes
+  in the background between requests.
+  *)
+  ProcessPendingIndexFiles[];
 
   openFilesMapCopy = $OpenFilesMap;
 
@@ -1160,10 +1167,10 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
           "save" -> <| "includeText" -> False |>,
           "change" -> $TextDocumentSyncKind["Full"]
         |>,
-        "completionProvider" -> <|
-          "resolveProvider" -> False, 
+        (* "completionProvider" -> <|
+          "resolveProvider" -> False,
           "triggerCharacters" -> {}
-        |>,
+        |>, *)
         "codeActionProvider" -> codeActionProviderValue,
         "colorProvider" -> $ColorProvider,
         "hoverProvider" -> True,
@@ -1212,7 +1219,7 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
 handleContent[content:KeyValuePattern["method" -> "initialized"]] :=
 Module[{warningMessages},
 
-  
+
   log[1, "initialized: Enter"];
 
 
@@ -1273,9 +1280,9 @@ handleContent[content:KeyValuePattern["method" -> "shutdown"]] :=
 Catch[
 Module[{id},
 
-  
+
   log[1, "shutdown: Enter"];
-  
+
 
   id = content["id"];
 
@@ -1305,10 +1312,10 @@ Unexpected call to exit
 handleContent[content:KeyValuePattern["method" -> "exit"]] :=
 Module[{},
 
-  
+
   log[1, "exit: Enter"];
   log[1, "exit: Exit"];
-  
+
 
   exitSemiGracefully[]
 ]
@@ -1356,9 +1363,9 @@ error code MethodNotFound (e.g. -32601).
 handleContent[content:KeyValuePattern["method" -> meth_ /; StringMatchQ[meth, "$/" ~~ __]]] :=
 Module[{id},
 
-  
+
   log[1, meth <> ": enter"];
-  
+
 
   If[KeyExistsQ[content, "id"],
     (*
@@ -1424,9 +1431,9 @@ Module[{id},
 expandContent[content:KeyValuePattern["method" -> "textDocument/didOpen"], pos_] :=
 Catch[
 Module[{params, doc, uri, res},
-  
+
   log[1, "textDocument/didOpen: enter expand"];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
@@ -1486,9 +1493,9 @@ Module[{params, doc, uri, text, entry},
 handleContent[content:KeyValuePattern["method" -> "textDocument/concreteParse"]] :=
 Catch[
 Module[{params, doc, uri, cst, text, entry, fileName, fileFormat},
-  
+
   log[1, "textDocument/concreteParse: Enter"];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
@@ -1574,9 +1581,9 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/concreteTabsPars
 Catch[
 Module[{params, doc, uri, text, entry, cstTabs, fileName, fileFormat},
 
-  
+
   log[1, "textDocument/concreteTabsParse: enter"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -1654,9 +1661,9 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/aggregateParse"]
 Catch[
 Module[{params, doc, uri, cst, text, entry, agg},
 
-  
+
   log[1, "textDocument/aggregateParse: Enter"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -1716,9 +1723,9 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/aggregateTabsPar
 Catch[
 Module[{params, doc, uri, entry, cstTabs, aggTabs},
 
-  
+
   log[1, "textDocument/aggregateTabsParse: enter"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -1775,9 +1782,9 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/abstractParse"]]
 Catch[
 Module[{params, doc, uri, entry, agg, ast, userSymbols},
 
-  
+
   log[1, "textDocument/abstractParse: enter"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -1831,13 +1838,13 @@ Module[{params, doc, uri, entry, agg, ast, userSymbols},
 
 
 findAllUserSymbols[ast_] := DeleteDuplicates[
-  Cases[ast, 
+  Cases[ast,
     {
       CallNode[
         LeafNode[Symbol, "SetDelayed" | "Set", <||>],
         {CallNode[LeafNode[Symbol, sym_, _], _, _], rhs : _} |
-        {LeafNode[Symbol, sym_, _], rhs : _}, 
-      _], 
+        {LeafNode[Symbol, sym_, _], rhs : _},
+      _],
     _} :> sym,
   8] (* Same depth used in finding function call pattern in Hover feature *)
 ]
@@ -1847,9 +1854,9 @@ expandContent[content:KeyValuePattern["method" -> "textDocument/didClose"], pos_
 Catch[
 Module[{params, doc, uri, res},
 
-  
+
   log[1, "textDocument/didClose: enter expand"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -1876,9 +1883,9 @@ Module[{params, doc, uri, res},
 handleContent[content:KeyValuePattern["method" -> "textDocument/didCloseFencepost"]] :=
 Module[{params, doc, uri},
 
-  
+
   log[1, "textDocument/didCloseFencepost: Enter"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -1908,9 +1915,9 @@ expandContent[content:KeyValuePattern["method" -> "textDocument/didSave"], pos_]
 Catch[
 Module[{params, doc, uri},
 
-  
+
   log[1, "textDocument/didSave: Enter"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -1937,11 +1944,11 @@ Module[{params, doc, uri},
 handleContent[content:KeyValuePattern["method" -> "textDocument/didSaveFencepost"]] :=
 Module[{},
 
-  
+
     log[1, "textDocument/didSaveFencepost: Enter"];
 
     log[1, "textDocument/didSaveFencepost: Exit"];
-  
+
 
   {}
 ]
@@ -1952,9 +1959,9 @@ expandContent[content:KeyValuePattern["method" -> "textDocument/didChange"], pos
 Catch[
 Module[{params, doc, uri, res},
 
-  
+
   log[1, "textDocument/didChange: enter expand"];
-  
+
 
   params = content["params"];
   doc = params["textDocument"];
@@ -2010,15 +2017,15 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
 
   text = lastChange["text"];
 
-  (* 
+  (*
       We do not want to keep entry["AST"] here. As the text is changed, AST needs to be re-evaluated.
 
-      But for fast response to the Completion messages, we can use the backdated AST. 
-      
-      If there are multiple didChangeFencepost messages in the queue, 
+      But for fast response to the Completion messages, we can use the backdated AST.
+
+      If there are multiple didChangeFencepost messages in the queue,
           "PreviousAST" -> entry["AST"]
       would break because from the second message onwards, entry["AST"] would be Missing.
-      
+
       So it's better to assign newly evaluated AST to entry["PreviousAST"] and use it as long as new AST is is not re-evaluated.
   *)
 
