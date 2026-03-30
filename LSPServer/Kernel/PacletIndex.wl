@@ -1441,7 +1441,7 @@ Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContext
   loadedContexts = Join[loadedContexts, #["context"]& /@ contextLoads];
 
   (* Add alias contexts from Needs["Full`" -> "Alias`"] so that Alias`Symbol is not flagged as unloaded *)
-  loadedContexts = Join[loadedContexts, Keys[Lookup[fileData, "ContextAliases", <||>]]];
+  loadedContexts = Join[loadedContexts, #["alias"]& /@ Lookup[fileData, "ContextAliases", {}]];
 
   (* Add all workspace-defined contexts (symbols defined in the paclet) *)
   workspaceContexts = Keys[$PacletIndex["Contexts"]];
