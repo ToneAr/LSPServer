@@ -36,6 +36,7 @@ GetContextLoadErrors
 GetFileLoadedContexts
 GetKernelContextsCached
 GetSymbolUsages
+GetContextAliases
 
 $PacletIndex
 $WorkspaceRoot
@@ -87,7 +88,8 @@ $PacletIndex structure:
     "MyPackage`Private`" -> {...},
     ...
   |>,
-  "Dependencies" -> {"Developer`", "GeneralUtilities`", ...}  (* All dependency contexts used in workspace *)
+  "Dependencies" -> {"Developer`", "GeneralUtilities`", ...},  (* All dependency contexts used in workspace *)
+  "ContextAliases" -> <| "Alias`" -> "FullContext`", ... |>  (* alias context -> full context, from Needs["Full`" -> "Alias`"] *)
 |>
 *)
 
@@ -95,7 +97,8 @@ $PacletIndex = <|
   "Symbols" -> <||>,
   "Files" -> <||>,
   "Contexts" -> <||>,
-  "Dependencies" -> {}
+  "Dependencies" -> {},
+  "ContextAliases" -> <||>
 |>
 
 $WorkspaceRoot = None
@@ -182,7 +185,7 @@ Index a single file
 indexFile[filePath_String] :=
 Catch[
 Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps,
-  contextLoads, explicitContextRefs, packageContext},
+  contextLoads, explicitContextRefs, packageContext, fileAliases},
   
   If[$Debug2,
     log["indexFile: ", filePath]
@@ -254,7 +257,12 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
   Extract the main package context if this is a package file
   *)
   packageContext = extractPackageContext[ast];
-  
+
+  (*
+  Extract context alias mappings from Needs["Full`" -> "Alias`"] calls
+  *)
+  fileAliases = extractContextAliases[ast];
+
   (*
   Add dependencies to global list and load external packages
   *)
@@ -271,11 +279,11 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
     *)
     loadExternalDependencies[fileDeps]
   ];
-  
+
   (*
   Update the index using batch operations to avoid quadratic AppendTo
   *)
-  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext];
+  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext, fileAliases];
 ]]
 
 
@@ -283,7 +291,7 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
 Batch add a file's data to the PacletIndex.
 Uses grouped-by-name operations instead of per-item AppendTo to avoid O(n^2).
 *)
-addFileToIndex[uri_, definitions_, usages_, symbols_, fileDeps_, contextLoads_, explicitContextRefs_, packageContext_] :=
+addFileToIndex[uri_, definitions_, usages_, symbols_, fileDeps_, contextLoads_, explicitContextRefs_, packageContext_, fileAliases_:{}] :=
 Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
   
   fileSymbolsBag = Internal`Bag[];
@@ -378,8 +386,19 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
     "Dependencies" -> fileDeps,
     "ContextLoads" -> contextLoads,
     "ExplicitContextRefs" -> explicitContextRefs,
-    "PackageContext" -> packageContext
+    "PackageContext" -> packageContext,
+    "ContextAliases" -> fileAliases
   |>;
+
+  (*
+  Merge file aliases into the global ContextAliases map (alias -> fullContext).
+  *)
+  Scan[
+    Function[{rec},
+      $PacletIndex["ContextAliases", rec["alias"]] = rec["fullContext"]
+    ],
+    fileAliases
+  ];
 ]
 
 
@@ -402,7 +421,7 @@ tag = {LeafNode[String, "MyPackage`", ...], CallNode[List, {LeafNode[String, "De
 Also extracts Needs["Package`"] calls at the top level.
 *)
 extractDependencies[ast_] :=
-Module[{packageDeps, needsDeps, allDeps},
+Module[{packageDeps, needsDeps, needsAliasDeps, allDeps},
   
   (*
   Extract from PackageNode tags - dependencies are in the List following the main context
@@ -422,8 +441,20 @@ Module[{packageDeps, needsDeps, allDeps},
       abstractContextString[s],
     Infinity
   ];
-  
-  allDeps = DeleteDuplicates[Join[packageDeps, needsDeps]];
+
+  (*
+  Also extract the full context from the aliased form: Needs["FullContext`" -> "Alias`"]
+  The full context string is the left-hand side of the Rule.
+  After Abstract, -> becomes CallNode[LeafNode[Symbol, "Rule", _], ...].
+  *)
+  needsAliasDeps = Cases[ast,
+    CallNode[LeafNode[Symbol, "Needs", _],
+      {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, s_String, _], LeafNode[String, _, _]}, _]}, _] :>
+      abstractContextString[s],
+    Infinity
+  ];
+
+  allDeps = DeleteDuplicates[Join[packageDeps, needsDeps, needsAliasDeps]];
   
   (* Filter out None values from failed parsing *)
   Select[allDeps, StringQ]
@@ -435,7 +466,7 @@ Extract detailed context loading information from AST.
 Returns a list of context load records with source locations.
 *)
 extractContextLoads[ast_] :=
-Module[{loads, packageLoads, needsLoads, getLoads, packageContext},
+Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageContext},
   loads = {};
   
   (*
@@ -467,6 +498,21 @@ Module[{loads, packageLoads, needsLoads, getLoads, packageContext},
       <| "context" -> abstractContextString[s], "source" -> src, "method" -> "Needs" |>,
     Infinity
   ];
+
+  (*
+  Extract aliased Needs["FullContext`" -> "Alias`"] calls with source locations.
+  Record the full context as the loaded context, and include the alias for reference.
+  After Abstract, -> becomes CallNode[LeafNode[Symbol, "Rule", _], ...].
+  *)
+  needsAliasLoads = Cases[ast,
+    CallNode[LeafNode[Symbol, "Needs", _],
+      {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, s_String, _], LeafNode[String, a_String, _]}, _]},
+      KeyValuePattern[Source -> src_]] :>
+      <| "context" -> abstractContextString[s], "alias" -> abstractContextString[a], "source" -> src, "method" -> "Needs" |>,
+    Infinity
+  ];
+
+  needsLoads = Join[needsLoads, needsAliasLoads];
   
   (*
   Extract Get["Package`"] calls with source locations
@@ -484,6 +530,25 @@ Module[{loads, packageLoads, needsLoads, getLoads, packageContext},
   loads = SortBy[loads, #["source"][[1]] &];
   
   loads
+]
+
+
+(*
+Extract context alias mappings from AST.
+Handles the form Needs["FullContext`" -> "Alias`"] which sets up $ContextAliases.
+Returns a list of associations: <| "fullContext" -> "FullContext`", "alias" -> "Alias`" |>
+*)
+extractContextAliases[ast_] :=
+Module[{aliases},
+  (* After Abstract, -> becomes CallNode[LeafNode[Symbol, "Rule", _], ...] *)
+  aliases = Cases[ast,
+    CallNode[LeafNode[Symbol, "Needs", _],
+      {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, fullCtx_String, _], LeafNode[String, aliasCtx_String, _]}, _]},
+      _] :>
+      <| "fullContext" -> abstractContextString[fullCtx], "alias" -> abstractContextString[aliasCtx] |>,
+    Infinity
+  ];
+  Select[aliases, StringQ[#["fullContext"]] && StringQ[#["alias"]] &]
 ]
 
 
@@ -882,7 +947,7 @@ Update the index for a single file when it changes
 UpdateFileIndex[uri_String, text_String] :=
 Catch[
 Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbols, fileDeps,
-  contextLoads, explicitContextRefs, packageContext},
+  contextLoads, explicitContextRefs, packageContext, fileAliases},
   
   (*
   Skip files in excluded directories
@@ -938,26 +1003,31 @@ Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbol
     ];
     loadExternalDependencies[fileDeps]
   ];
-  
+
   (*
   Extract detailed context loading information
   *)
   contextLoads = extractContextLoads[ast];
-  
+
   (*
   Extract explicit context references (e.g., Developer`ToPackedArray)
   *)
   explicitContextRefs = extractExplicitContextRefs[cst];
-  
+
   (*
   Extract the main package context if this is a package file
   *)
   packageContext = extractPackageContext[ast];
-  
+
+  (*
+  Extract context alias mappings from Needs["Full`" -> "Alias`"] calls
+  *)
+  fileAliases = extractContextAliases[ast];
+
   (*
   Update the index using batch operations to avoid quadratic AppendTo
   *)
-  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext];
+  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext, fileAliases];
 ]]
 
 
@@ -1009,6 +1079,18 @@ Module[{fileEntry, fileSymbols},
   *)
   $PacletIndex["Dependencies"] = DeleteDuplicates[
     Flatten[Lookup[Values[$PacletIndex["Files"]], "Dependencies", {}]]
+  ];
+
+  (*
+  Recompute global ContextAliases from remaining files
+  *)
+  $PacletIndex["ContextAliases"] = Association[
+    Flatten[
+      Map[
+        Function[{rec}, rec["alias"] -> rec["fullContext"]],
+        Flatten[Lookup[Values[$PacletIndex["Files"]], "ContextAliases", {}]]
+      ]
+    ]
   ];
   
   (*
@@ -1239,6 +1321,14 @@ GetDependencyContexts[] := $PacletIndex["Dependencies"]
 
 
 (*
+Get the context alias map for the workspace.
+Returns an Association mapping alias context strings to their full context strings,
+built from Needs["FullContext`" -> "Alias`"] calls across all indexed files.
+*)
+GetContextAliases[] := $PacletIndex["ContextAliases"]
+
+
+(*
 Check if a context is a known dependency (loaded via BeginPackage or Needs).
 *)
 IsDependencyContext[context_String] := MemberQ[$PacletIndex["Dependencies"], context]
@@ -1318,11 +1408,14 @@ Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContext
   (* Add contexts from Needs/Get/BeginPackage *)
   contextLoads = Lookup[fileData, "ContextLoads", {}];
   loadedContexts = Join[loadedContexts, #["context"]& /@ contextLoads];
-  
+
+  (* Add alias contexts from Needs["Full`" -> "Alias`"] so that Alias`Symbol is not flagged as unloaded *)
+  loadedContexts = Join[loadedContexts, Keys[Lookup[fileData, "ContextAliases", <||>]]];
+
   (* Add all workspace-defined contexts (symbols defined in the paclet) *)
   workspaceContexts = Keys[$PacletIndex["Contexts"]];
   loadedContexts = Join[loadedContexts, workspaceContexts];
-  
+
   DeleteDuplicates[loadedContexts]
 ]
 
