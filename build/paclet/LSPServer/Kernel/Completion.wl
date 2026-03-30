@@ -283,7 +283,14 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   completions = Take[completions, UpTo[100]];
 
   result = <|
-    "isIncomplete" -> Length[completions] >= 100,
+    (*
+    Always report isIncomplete -> True so the client re-requests from the server on each
+    keypress rather than filtering client-side.  Each completion source caps its own output
+    (e.g. system symbols at 50), so the combined list can be under 100 even when many more
+    completions exist for a more specific prefix.  Client-side filtering on that partial set
+    would hide results that the server would have returned for the narrowed prefix.
+    *)
+    "isIncomplete" -> True,
     "items" -> completions
   |>;
 

@@ -1,12 +1,12 @@
 
 Paclet[
   Name -> "LSPServer",
-  Version -> "2.9.32",
+  Version -> "2.9.33",
   WolframVersion -> "12.1+",
 
   Description -> "Language Server Protocol implementation for Wolfram Language.",
   Creator -> "Brenton Bostick <brenton@wolfram.com>",
-  BuildDate -> "Mon 30 Mar 2026 09:55:31",
+  BuildDate -> "Mon 30 Mar 2026 10:22:58",
   BuildNumber -> 0,
   BuildWolframVersionNumber -> 1410,
   BuildWolframLibraryVersion -> 0,
