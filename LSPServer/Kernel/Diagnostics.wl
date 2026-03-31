@@ -495,7 +495,8 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   *)
   systemSymbols = Join[
     WolframLanguageSyntax`Generate`$builtinFunctions,
-    WolframLanguageSyntax`Generate`$constants
+    WolframLanguageSyntax`Generate`$constants,
+    If[ListQ[WolframLanguageSyntax`Generate`$options], WolframLanguageSyntax`Generate`$options, {}]
   ];
 
   (*
