@@ -16,6 +16,8 @@ Begin["`Private`"]
 
     End[]
 
+Tooltip[];
+
 Needs["DatabaseLink`" -> "DBL`"];
 Needs["GeneralUtilities`" -> "GU`"];
 DatabaseLink`

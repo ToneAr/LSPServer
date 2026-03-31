@@ -166,12 +166,12 @@ WolframLanguageSyntax`Generate`$constants =
 
 WolframLanguageSyntax`Generate`$builtinFunctions :=
 	WolframLanguageSyntax`Generate`$builtinFunctions =
-	Complement[
-		Names["System`*"],
-		WolframLanguageSyntax`Generate`$options,
-		WolframLanguageSyntax`Generate`$experimentalSymbols,
-		WolframLanguageSyntax`Generate`$constants
-	]
+	(* Complement[ *)
+		Names["System`*"];
+		(* WolframLanguageSyntax`Generate`$options, *)
+		(* WolframLanguageSyntax`Generate`$experimentalSymbols, *)
+		(* WolframLanguageSyntax`Generate`$constants *)
+	(* ] *)
 
 WolframLanguageSyntax`Generate`$obsoleteSymbols =
 	Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
