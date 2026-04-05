@@ -215,6 +215,7 @@ Get[FileNameJoin[{location, "Kernel", "Diagnostics.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "FoldingRange.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Formatting.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Hover.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "TypeWL.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "ImplicitTokens.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "InlayHints.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "References.wl"}]]
@@ -1478,10 +1479,30 @@ Module[{params, doc, uri, text, entry},
   $OpenFilesMap[uri] = entry;
 
   (*
-  Update the paclet index for this file
+  Update the paclet index for this file, then cache the parsed artifacts into
+  the entry so textDocument/concreteParse, textDocument/aggregateParse, and
+  textDocument/abstractParse can skip their redundant re-parse steps.
   *)
   If[StringQ[$WorkspaceRootPath],
-    UpdateFileIndex[uri, text]
+    With[{parseResult = UpdateFileIndex[uri, text]},
+      If[ListQ[parseResult] && Length[parseResult] == 3,
+        Module[{e},
+          e = $OpenFilesMap[uri];
+          If[AssociationQ[e],
+            e["CST"] = parseResult[[1]];
+            If[!StringContainsQ[text, "\t"], e["CSTTabs"] = parseResult[[1]]];
+            e["Agg"] = parseResult[[2]];
+            e["AST"] = parseResult[[3]];
+            e["PreviousAST"] = parseResult[[3]];
+            With[{syms = findAllUserSymbols[parseResult[[3]]]},
+              e["UserSymbols"]         = syms;
+              e["PreviousUserSymbols"] = syms
+            ];
+            $OpenFilesMap[uri] = e
+          ]
+        ]
+      ]
+    ]
   ];
 
   log[1, "textDocument/didOpenFencepost: Exit"];
@@ -2045,7 +2066,27 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
   If[StringQ[$WorkspaceRootPath],
     AppendTo[entry["ScheduledJobs"],
       Function[{e}, If[Now - e["LastChange"] > Quantity[$DiagnosticsDelayAfterLastChange, "Seconds"],
-        UpdateFileIndex[uri, e["Text"]];
+        (* Run index update, then cache parsed artifacts into $OpenFilesMap so the
+           diagnostics pipeline can skip its redundant concreteParse / aggregateParse /
+           abstractParse steps. *)
+        With[{parseResult = UpdateFileIndex[uri, e["Text"]]},
+          If[ListQ[parseResult] && Length[parseResult] == 3,
+            Module[{curEntry = $OpenFilesMap[uri]},
+              If[AssociationQ[curEntry],
+                curEntry["CST"] = parseResult[[1]];
+                If[!StringContainsQ[e["Text"], "\t"], curEntry["CSTTabs"] = parseResult[[1]]];
+                curEntry["Agg"] = parseResult[[2]];
+                curEntry["AST"] = parseResult[[3]];
+                curEntry["PreviousAST"] = parseResult[[3]];
+                With[{syms = findAllUserSymbols[parseResult[[3]]]},
+                  curEntry["UserSymbols"]         = syms;
+                  curEntry["PreviousUserSymbols"] = syms
+                ];
+                $OpenFilesMap[uri] = curEntry
+              ]
+            ]
+          ]
+        ];
         {{}, True},
         {{}, False}]
       ]

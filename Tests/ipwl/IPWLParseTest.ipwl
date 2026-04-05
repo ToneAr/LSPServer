@@ -1,0 +1,16 @@
+(* Test fixture for IPWL pre-processor tests. *)
+
+(* Case 1: function return annotation *)
+computeSquare[x_Integer]: _Integer := x * x
+
+(* Case 2: declaration-only (no body) *)
+greet[name_String]: _String
+
+(* Case 3: variable annotation — already valid WL, no transform needed *)
+myVar: _Integer = 42
+
+(* Case 4: TagSet return annotation *)
+j /: Plot[j]: _String := "plotting j"
+
+(* Case 5: invalid annotation syntax — should emit IPWLSyntaxError *)
+badFunc[x_]: 123 := x
