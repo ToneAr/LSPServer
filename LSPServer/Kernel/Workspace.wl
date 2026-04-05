@@ -293,7 +293,7 @@ Module[{params, event, added, removed},
         (*
         Index files in the new folder
         *)
-        files = FileNames[{"*.wl", "*.m", "*.wls"}, folderPath, Infinity];
+        files = FileNames[{"*.wl", "*.m", "*.wls", "*.ipwl"}, folderPath, Infinity];
         Scan[indexFile, files]
       ]
     ],
