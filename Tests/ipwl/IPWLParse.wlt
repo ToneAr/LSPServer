@@ -45,3 +45,37 @@ VerificationTest[
   True,
   TestID -> "IPWL-Parse-SyntaxError"
 ]
+
+
+(* Tests 6-7: UpdateFileIndex stores DeclaredType and IsIPWL flag *)
+LSPServer`PacletIndex`$PacletIndex = <|"Symbols" -> <||>, "Files" -> <||>, "Contexts" -> <||>, "Dependencies" -> {}, "ContextAliases" -> <||>|>;
+ipwlPath = FileNameJoin[{DirectoryName[$TestFileName], "IPWLParseTest.ipwl"}];
+ipwlURI  = LocalObjects`PathToURI[ipwlPath];
+LSPServer`PacletIndex`UpdateFileIndex[ipwlURI, ReadString[ipwlPath]];
+
+VerificationTest[
+  Lookup[
+    SelectFirst[
+      Lookup[
+        Lookup[LSPServer`PacletIndex`$PacletIndex["Symbols"], "computeSquare", <||>],
+        "Definitions", {}
+      ],
+      #["kind"] === "declaration" &,
+      <||>
+    ],
+    "DeclaredType",
+    Missing["NotFound"]
+  ],
+  _Integer,
+  TestID -> "IPWL-Index-DeclaredTypeStored"
+]
+
+VerificationTest[
+  TrueQ[Lookup[
+    Lookup[LSPServer`PacletIndex`$PacletIndex["Files"], ipwlURI, <||>],
+    "IsIPWL",
+    False
+  ]],
+  True,
+  TestID -> "IPWL-Index-IsIPWLFlag"
+]
