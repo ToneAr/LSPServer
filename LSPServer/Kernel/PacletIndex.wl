@@ -68,6 +68,31 @@ With[{builtinFile = FileNameJoin[{
   ]
 ];
 
+(*
+  builtinSpecToPattern[s]
+  Convert a single input-spec string from $BuiltinPatterns into a WL pattern
+  expression suitable for MatchQ against a representative sample value.
+
+  Spec string vocabulary:
+    "Type..."  - BlankSequence[Symbol["Type"]]    (1+ expressions with head Type)
+    "Type*"    - BlankNullSequence[Symbol["Type"]] (0+ expressions with head Type)
+    "..."      - BlankSequence[]                   (1+ untyped)
+    "*"        - BlankNullSequence[]               (0+ untyped)
+    "_?Pred"   - ToExpression["_?Pred"]            (PatternTest - starts with "_")
+    "Type"     - Blank[Symbol["Type"]]             (exactly one typed arg)
+    None       - Blank[]                            (exactly one untyped arg)
+*)
+builtinSpecToPattern[s_String] :=
+  Which[
+    s === "...", BlankSequence[],
+    s === "*",   BlankNullSequence[],
+    StringEndsQ[s, "..."], BlankSequence[Symbol[StringDrop[s, -3]]],
+    StringEndsQ[s, "*"],   BlankNullSequence[Symbol[StringDrop[s, -1]]],
+    StringStartsQ[s, "_"], ToExpression[s],
+    True, Blank[Symbol[s]]
+  ]
+builtinSpecToPattern[None] := Blank[]
+
 
 (*
 $PacletIndex structure:
@@ -1314,20 +1339,14 @@ Module[{head, headName, calleeDefs, retPat},
           KeyExistsQ[$BuiltinPatterns, headName],
             Map[
               Function[{overload},
-                With[{
-                  inPats = Map[
-                    (* Plain type names ("String", "Integer", ...) -> Blank[TypeHead].
-                       Special pattern strings ("_?BooleanQ", "_?RuleQ") starting with
-                       "_" are full WL patterns -> use ToExpression instead. *)
-                    Function[{s}, If[StringQ[s],
-                      If[StringStartsQ[s, "_"], ToExpression[s], Blank[Symbol[s]]],
-                      Blank[]]],
-                    overload[[1]]
-                  ],
-                  retStr = overload[[2]]
-                },
+                Module[{specs = overload[[1]], isVar,
+                        inPats, retStr = overload[[2]]},
+                  isVar = Length[specs] > 0 && StringQ[Last[specs]] &&
+                            (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+                  inPats = builtinSpecToPattern /@ specs;
                   <|
                     "InputPatterns" -> inPats,
+                    "Variadic" -> isVar,
                     "DocComment" -> If[StringQ[retStr],
                       (* "_[N]" / "_[N]|_[M]" means return type = type of the Nth arg
                          (or a union of Nth/Mth arg types).  Store Blank[] as a non-None
@@ -1362,9 +1381,27 @@ Module[{head, headName, calleeDefs, retPat},
                 pats = Lookup[def, "InputPatterns", {}];
                 dc   = Lookup[def, "DocComment", None];
                 If[
-                  Length[pats] === Length[callArgSamples] &&
-                  AllTrue[Transpose[{callArgSamples, pats}],
-                    (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                  Module[{isVar = Lookup[def, "Variadic", False],
+                          fixedN, varElemPat},
+                    If[isVar && Length[pats] > 0,
+                      fixedN = Length[pats] - 1;
+                      varElemPat = With[{lp = Last[pats]},
+                        If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
+                        If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
+                        Blank[]]]];
+                      Length[callArgSamples] >= fixedN &&
+                      (fixedN === 0 || AllTrue[
+                        Transpose[{Take[callArgSamples, fixedN], Take[pats, fixedN]}],
+                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                      ]) &&
+                      AllTrue[Drop[callArgSamples, fixedN],
+                        (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
+                      ],
+                      Length[pats] === Length[callArgSamples] &&
+                      AllTrue[Transpose[{callArgSamples, pats}],
+                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                      ]
+                    ]
                   ] &&
                   AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing],
                   Throw[def]
@@ -1379,9 +1416,27 @@ Module[{head, headName, calleeDefs, retPat},
               Module[{pats},
                 pats = Lookup[def, "InputPatterns", {}];
                 If[
-                  Length[pats] === Length[callArgSamples] &&
-                  AllTrue[Transpose[{callArgSamples, pats}],
-                    (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                  Module[{isVar = Lookup[def, "Variadic", False],
+                          fixedN, varElemPat},
+                    If[isVar && Length[pats] > 0,
+                      fixedN = Length[pats] - 1;
+                      varElemPat = With[{lp = Last[pats]},
+                        If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
+                        If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
+                        Blank[]]]];
+                      Length[callArgSamples] >= fixedN &&
+                      (fixedN === 0 || AllTrue[
+                        Transpose[{Take[callArgSamples, fixedN], Take[pats, fixedN]}],
+                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                      ]) &&
+                      AllTrue[Drop[callArgSamples, fixedN],
+                        (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
+                      ],
+                      Length[pats] === Length[callArgSamples] &&
+                      AllTrue[Transpose[{callArgSamples, pats}],
+                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                      ]
+                    ]
                   ],
                   Throw[def]
                 ]
@@ -1616,16 +1671,14 @@ Module[{argSamples, localDefs, defs},
     If[KeyExistsQ[$BuiltinPatterns, headName],
       Map[
         Function[{overload},
-          With[{
-            inPats = Map[
-              Function[{s}, If[StringQ[s],
-                If[StringStartsQ[s, "_"], ToExpression[s], Blank[Symbol[s]]],
-                Blank[]]],
-              overload[[1]]],
-            retStr = overload[[2]]
-          },
+          Module[{specs = overload[[1]], isVar,
+                  inPats, retStr = overload[[2]]},
+            isVar = Length[specs] > 0 && StringQ[Last[specs]] &&
+                      (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+            inPats = builtinSpecToPattern /@ specs;
             <|
               "InputPatterns" -> inPats,
+              "Variadic" -> isVar,
               "DocComment" -> If[StringQ[retStr],
                 <|"ReturnPattern" -> If[StringMatchQ[retStr, "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
                     Blank[], ToExpression[retStr]],
@@ -1648,9 +1701,27 @@ Module[{argSamples, localDefs, defs},
           dc     = Lookup[def, "DocComment", None];
           retStr = If[AssociationQ[dc], Lookup[dc, "ReturnPatternString", ""], ""];
           If[
-            Length[pats] === Length[argSamples] &&
-            AllTrue[Transpose[{argSamples, pats}],
-              (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+            Module[{isVar = Lookup[def, "Variadic", False],
+                    fixedN, varElemPat},
+              If[isVar && Length[pats] > 0,
+                fixedN = Length[pats] - 1;
+                varElemPat = With[{lp = Last[pats]},
+                  If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
+                  If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
+                  Blank[]]]];
+                Length[argSamples] >= fixedN &&
+                (fixedN === 0 || AllTrue[
+                  Transpose[{Take[argSamples, fixedN], Take[pats, fixedN]}],
+                  (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                ]) &&
+                AllTrue[Drop[argSamples, fixedN],
+                  (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
+                ],
+                Length[pats] === Length[argSamples] &&
+                AllTrue[Transpose[{argSamples, pats}],
+                  (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+                ]
+              ]
             ] &&
             AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing],
             (* _[N] / _[N]|_[M] / _[N]|Null: recurse into the referenced call argument.
