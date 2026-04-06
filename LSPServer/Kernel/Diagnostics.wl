@@ -1684,14 +1684,14 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                   (* PacletIndex has no definitions (symbol only referenced, not defined).
                      Fall back to pre-generated builtin patterns for System` functions. *)
                   If[KeyExistsQ[$BuiltinPatterns, funcName],
-                    (* Each overload stored as {inputPatternList, returnPatternString}.
-                       Convert input type strings to Blank[T] pattern expressions. *)
                     Map[
                       Function[{overload},
-                        <|"InputPatterns" -> Map[
-                          Function[{s}, If[StringQ[s], Blank[Symbol[s]], Blank[]]],
-                          overload[[1]]
-                        ], "Variadic" -> False|>
+                        Module[{specs = overload[[1]], isVar},
+                          isVar = Length[specs] > 0 && StringQ[Last[specs]] &&
+                                    (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+                          <|"InputPatterns" -> builtinSpecToPattern /@ specs,
+                            "Variadic"      -> isVar|>
+                        ]
                       ],
                       $BuiltinPatterns[funcName]
                     ],
@@ -1752,12 +1752,30 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
             *)
             symptomatic = !AnyTrue[allDefs,
               Function[{d},
-                Module[{pats},
-                  pats = Lookup[d, "InputPatterns", {}];
-                  Length[pats] === Length[callArgs] &&
-                  AllTrue[
-                    Transpose[{argSamples, pats}],
-                    argMatchesPattern[#[[1]], #[[2]]] &
+                Module[{pats  = Lookup[d, "InputPatterns", {}],
+                        isVar = Lookup[d, "Variadic", False],
+                        fixedN, varElemPat},
+                  If[isVar && Length[pats] > 0,
+                    (* Variadic: check prefix + tail *)
+                    fixedN = Length[pats] - 1;
+                    varElemPat = With[{lp = Last[pats]},
+                      If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
+                      If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
+                      Blank[]]]];
+                    Length[argSamples] >= fixedN &&
+                    (fixedN === 0 || AllTrue[
+                      Transpose[{Take[argSamples, fixedN], Take[pats, fixedN]}],
+                      argMatchesPattern[#[[1]], #[[2]]] &
+                    ]) &&
+                    AllTrue[Drop[argSamples, fixedN],
+                      argMatchesPattern[#, varElemPat] &
+                    ],
+                    (* Fixed arity *)
+                    Length[pats] === Length[callArgs] &&
+                    AllTrue[
+                      Transpose[{argSamples, pats}],
+                      argMatchesPattern[#[[1]], #[[2]]] &
+                    ]
                   ]
                 ]
               ]
