@@ -2,9 +2,10 @@ Get[FileNameJoin[{DirectoryName[$TestFileName], "..", "hover", "Init.wl"}]];
 
 ipwlSrc = ReadString[FileNameJoin[{DirectoryName[$TestFileName], "IPWLParseTest.ipwl"}]];
 
-(* Test 1: function annotation is stripped to plain SetDelayed *)
+(* Test 1: function annotation is stripped to plain SetDelayed (annotation replaced with spaces) *)
 VerificationTest[
-  StringContainsQ[LSPServer`TypeWL`PreprocessIPWL[ipwlSrc][[1]], "computeSquare[x_Integer] :="],
+  StringContainsQ[LSPServer`TypeWL`PreprocessIPWL[ipwlSrc][[1]],
+    RegularExpression["computeSquare\\[x_Integer\\]\\s+:="]],
   True,
   TestID -> "IPWL-Parse-FunctionAnnotationStripped"
 ]
