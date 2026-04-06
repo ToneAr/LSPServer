@@ -22,7 +22,7 @@ allDiags = result[[1, "params", "diagnostics"]];
 VerificationTest[
   NoneTrue[allDiags,
     StringStartsQ[Lookup[#, "code", ""], "DeclaredTypeMismatch"] &&
-    StringContainsQ[Lookup[#, "code", ""], "addThreeInts"] &],
+    StringContainsQ[Lookup[#, "message", ""], "addThreeInts"] &],
   True,
   TestID -> "Builtin-Variadic-Plus-NoMismatch"
 ]
@@ -31,7 +31,7 @@ VerificationTest[
 VerificationTest[
   NoneTrue[allDiags,
     StringStartsQ[Lookup[#, "code", ""], "DeclaredTypeMismatch"] &&
-    StringContainsQ[Lookup[#, "code", ""], "joinThreeStrings"] &],
+    StringContainsQ[Lookup[#, "message", ""], "joinThreeStrings"] &],
   True,
   TestID -> "Builtin-Variadic-StringJoin-NoMismatch"
 ]
@@ -40,10 +40,14 @@ VerificationTest[
 VerificationTest[
   NoneTrue[allDiags,
     StringStartsQ[Lookup[#, "code", ""], "DeclaredTypeMismatch"] &&
-    StringContainsQ[Lookup[#, "code", ""], "andThree"] &],
+    StringContainsQ[Lookup[#, "message", ""], "andThree"] &],
   True,
   TestID -> "Builtin-Variadic-And-NoMismatch"
 ]
+
+(* Tests 4–8: unit tests for helper functions added in Task 2.
+   These FAIL until builtinSpecToPattern and overloadSpecMatchesArgs are
+   defined in LSPServer`Diagnostics`Private`. That is expected — TDD. *)
 
 (* Test 4: builtinSpecToPattern converts "Integer..." to BlankSequence[Integer] *)
 VerificationTest[
