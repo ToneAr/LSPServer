@@ -112,6 +112,23 @@ isVariadicArg[arg_] := MatchQ[arg,
 ]
 
 (*
+  True if the arg is a typed or untyped BlankSequence/BlankNullSequence
+  (excludes OptionsPattern, which is also variadic but contributes no type info).
+*)
+isSeqArg[arg_] := MatchQ[arg,
+  Verbatim[BlankSequence][___]                             |
+  Verbatim[BlankNullSequence][___]                         |
+  Verbatim[Pattern][_, Verbatim[BlankSequence][___]]       |
+  Verbatim[Pattern][_, Verbatim[BlankNullSequence][___]]
+]
+
+(* True if the arg is a BlankSequence (1+), not BlankNullSequence (0+) *)
+isBSArg[arg_] := MatchQ[arg,
+  Verbatim[BlankSequence][___]                       |
+  Verbatim[Pattern][_, Verbatim[BlankSequence][___]]
+]
+
+(*
   True if a DownValue rule is an error-handler / argument-check rule.
   Uses Extract[_, {2}, Hold] to inspect the RHS WITHOUT evaluating it,
   so no messages are triggered by doing this check.
@@ -304,6 +321,20 @@ extractDVOverloads[sym_Symbol] :=
                 hasVariadic = AnyTrue[argsList, isVariadicArg];
                 (* Drop variadic / options args; keep positional ones *)
                 types = typeFromArg /@ Select[argsList, !isVariadicArg[#] &];
+                (* Append variadic spec string if a BlankSequence/BlankNullSequence arg exists.
+                   "Type..." = 1+ args of that type; "Type*" = 0+ args; "..." / "*" = untyped. *)
+                Module[{seqArgs = Select[argsList, isSeqArg[#] &]},
+                  If[Length[seqArgs] > 0,
+                    With[{sa = First[seqArgs], t = typeFromArg[First[seqArgs]]},
+                      AppendTo[types,
+                        If[isBSArg[sa],
+                          If[StringQ[t], t <> "...", "..."],   (* BlankSequence: 1+ *)
+                          If[StringQ[t], t <> "*",   "*"]      (* BlankNullSequence: 0+ *)
+                        ]
+                      ]
+                    ]
+                  ]
+                ];
                 (* Extract the underlying symbol of the first positional arg
                    so inferReturnFromRHSSafe can detect identity patterns. *)
                 With[{posArgs = Select[argsList, !isVariadicArg[#] &]},
