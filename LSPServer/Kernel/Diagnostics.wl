@@ -868,18 +868,34 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
         If[MatchQ[node, CallNode[LeafNode[Symbol, _String, _], _List, _]],
           With[{fname = node[[1, 2]]},
             Which[
-              (* Builtin with a known fixed return type *)
+              (* Builtin with a known return type — pick the best arity-matching overload *)
               KeyExistsQ[$BuiltinPatterns, fname],
-                Switch[$BuiltinPatterns[fname][[1, 2]],
-                  "_?BooleanQ", True,          (* known boolean return *)
-                  "_Integer",   0,
-                  "_String",    "",
-                  "_Real",      0.,
-                  "_Rational",  1/2,
-                  "_List",      {},
-                  "_Association", <||>,
-                  None,         Missing["Unknown"],  (* no return type info *)
-                  _String,      0  (* any other known return type string -> non-boolean *)
+                With[{ovs = $BuiltinPatterns[fname], nArgs = Length[node[[2]]]},
+                  Module[{bestOv},
+                    bestOv = SelectFirst[ovs,
+                      Function[{ov},
+                        With[{specs = ov[[1]], n = Length[ov[[1]]]},
+                          If[n > 0 && StringQ[Last[specs]] &&
+                               (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]),
+                            nArgs >= n - 1,   (* variadic: at least fixedN args *)
+                            n === nArgs       (* fixed arity: exact match *)
+                          ]
+                        ]
+                      ],
+                      First[ovs]  (* fallback: first overload if nothing matches *)
+                    ];
+                    Switch[bestOv[[2]],
+                      "_?BooleanQ",   True,
+                      "_Integer",     0,
+                      "_String",      "",
+                      "_Real",        0.,
+                      "_Rational",    1/2,
+                      "_List",        {},
+                      "_Association", <||>,
+                      None,           Missing["Unknown"],
+                      _String,        0
+                    ]
+                  ]
                 ],
               (* User-defined: use DocComment ReturnPattern first,
                  then fall back to automatically InferredReturnPattern. *)
