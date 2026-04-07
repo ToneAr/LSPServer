@@ -12,11 +12,11 @@ Needs["CodeFormatter`"]
 Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
 
-(* 
+(*
 
   Line width after which new line will be inserted for Hover function definition pattern.
-   
-  The default line width is 78, which unnecessarily breaks the line in Hover function 
+
+  The default line width is 78, which unnecessarily breaks the line in Hover function
   definition pattern after 78 characters. We find many function definition patterns
   are usually more than 78 characters. So, we are setting the line width to 200.
 
@@ -47,19 +47,19 @@ expandContent[content:KeyValuePattern["method" -> "textDocument/hover"], pos_] :
 Catch[
 Module[{params, id, doc, uri, res},
 
-  
+
   log[1, "textDocument/hover: enter expand"];
 
-  
+
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-  
+
     Throw[{<| "method" -> "textDocument/hoverFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -67,7 +67,7 @@ Module[{params, id, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/hoverFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
@@ -85,13 +85,13 @@ Module[{params, id, doc, uri, res},
   res
 
 ]]
-  
-handleContent[content:KeyValuePattern["method" -> "textDocument/hoverFencepost"]] :=
+
+handleContent[content: KeyValuePattern["method" -> "textDocument/hoverFencepost"]] :=
 Catch[
-Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char, pre, ast, cstTabs, syms, toks, nums,
+Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char, pre, ast, cstTabs, syms, toks, nums, slots,
   res},
 
-  
+
   log[1, "textDocument/hoverFencepost: enter"];
 
 
@@ -102,16 +102,16 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-  
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
@@ -119,7 +119,7 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
 
   position = params["position"];
 
-  
+
   line = position["line"];
   char = position["character"];
   (*
@@ -132,11 +132,11 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
   log[2, "hover: before parse"];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
+
   text = entry["Text"];
   ast = entry["AST"];
   cstTabs = Lookup[entry, "CSTTabs", Null];
@@ -145,9 +145,11 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
     (*
     Using "TabWidth" -> 4 here because the notification is rendered down to HTML and tabs need to be expanded in HTML
     FIXME: Must use the tab width from the editor
+    For .ipwl files, parse from the annotation-free preprocessed source so token
+    positions align with what the PacletIndex and AST see.
     *)
-    cstTabs = CodeConcreteParse[text, "TabWidth" -> 4];
-    
+    cstTabs = CodeConcreteParse[Lookup[entry, "PreprocessedText", text], "TabWidth" -> 4];
+
     entry["CSTTabs"] = cstTabs;
 
     $OpenFilesMap[uri] = entry
@@ -170,16 +172,22 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
   log[2, "hover: before finding position"];
 
   toks = Cases[cstTabs,
-  LeafNode[_, _,
-    KeyValuePattern[Source -> src_ /; SourceMemberQ[src, {line, char}]]], Infinity];
+    (LeafNode | CompoundNode)[_, _,
+      KeyValuePattern[Source -> src_ /; SourceMemberQ[src, {line, char}]]], Infinity];
 
   log[2, "hover: after finding position"];
 
   strs = Cases[toks, LeafNode[String, _, _], Infinity];
 
-  syms = Cases[toks, LeafNode[Symbol, _, _], Infinity];
+  syms = Cases[toks, LeafNode[Symbol, _, _], {1}];
 
   nums = Cases[toks, LeafNode[Integer | Real | Rational, _, _], Infinity];
+
+  (* Slot/SlotSequence tokens: bare # and ## are LeafNodes; #n and ##n are CompoundNodes *)
+  slots = Cases[toks,
+    (LeafNode[_, s_String, _] /; StringStartsQ[s, "#"]) |
+    CompoundNode[Slot | SlotSequence, _, _],
+    Infinity];
 
   res =
     Which[
@@ -187,7 +195,10 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
         handleStrings[id, strs, line]
       ,
       syms != {},
-        handleSymbols[id, ast, cstTabs, syms]
+        handleSymbols[id, uri, ast, cstTabs, syms, line]
+      ,
+      slots != {},
+        handleSlots[id, uri, ast, cstTabs, slots, line]
       ,
       nums != {},
         handleNumbers[id, nums]
@@ -196,9 +207,9 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
         {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}
     ];
 
-  
+
   log[1, "hover hoverFencepost: exit"];
-  
+
 
   res
 ]]
@@ -231,7 +242,7 @@ Module[{lines, lineMap, originalLineNumber, line,
       segment1 = segments[[1]];
 
       rules = {};
-      
+
       decoded = convertSegment[segment1];
 
       (*
@@ -415,19 +426,127 @@ Module[{lines, lineMap, originalLineNumber, line,
 
 
 (*
+Private helper: infer the WL pattern for any literal AST node, resolving all
+the way down to atoms.  Recurses into List and Association constructors.
+
+  integer literal          -> Blank[Integer]
+  real literal             -> Blank[Real]
+  string literal           -> Blank[String]
+  rational literal         -> Blank[Rational]
+  True / False             -> _?BooleanQ
+  {1, 2, 3}                -> {___Integer}          (homogeneous atom list)
+  {1, 2., 3}               -> {(_Integer|_Real)..}  (mixed atom list)
+  {{1,2},{3,4}}            -> {{___Integer}..}       (nested lists)
+  <|"a"->1, "b"->2.|>     -> <|"a"->_Integer, "b"->_Real|>
+  unknown                  -> None
+*)
+inferNodePattern[node_] :=
+  Which[
+    MatchQ[node, LeafNode[Integer,  _, _]], Blank[Integer],
+    MatchQ[node, LeafNode[Real,     _, _]], Blank[Real],
+    MatchQ[node, LeafNode[String,   _, _]], Blank[String],
+    MatchQ[node, LeafNode[Rational, _, _]], Blank[Rational],
+    MatchQ[node, LeafNode[Symbol, "True" | "False", _]], _?BooleanQ,
+
+    MatchQ[node, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+      Module[{elemPats, deduped},
+        elemPats = DeleteCases[inferNodePattern /@ node[[2]], None];
+        deduped  = DeleteDuplicates[elemPats];
+        Which[
+          Length[deduped] === 0,
+            None,
+          Length[deduped] === 1 && MatchQ[deduped[[1]], _Blank],
+            List[BlankNullSequence @@ deduped[[1]]],
+          Length[deduped] === 1,
+            List[Repeated[deduped[[1]]]],
+          True,
+            List[Repeated[Alternatives @@ deduped]]
+        ]
+      ],
+
+    MatchQ[node, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
+      Module[{pairs},
+        pairs = Cases[node[[2]],
+          CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _],
+            {LeafNode[String, keyStr_String, _], valNode_}, _] :>
+            (StringTake[keyStr, {2, -2}] -> inferNodePattern[valNode])
+        ];
+        If[Length[pairs] === 0 || AnyTrue[pairs[[All, 2]], # === None &],
+          None,
+          Association @@ pairs
+        ]
+      ],
+
+    (* Part[expr, i] — element type of the collection *)
+    MatchQ[node, CallNode[LeafNode[Symbol, "Part", _], {_, __}, _]],
+      inferListElementPattern[node[[2, 1]]],
+
+    (* Lookup[assoc, key] — value type of the association *)
+    MatchQ[node, CallNode[LeafNode[Symbol, "Lookup", _], {_, _, ___}, _]],
+      Module[{assocArg = node[[2, 1]], valuePats},
+        Which[
+          MatchQ[assocArg, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
+            valuePats = DeleteDuplicates[DeleteCases[
+              Cases[assocArg[[2]],
+                CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, valNode_}, _] :>
+                  inferNodePattern[valNode],
+                1],
+              None]];
+            Switch[Length[valuePats], 0, None, 1, valuePats[[1]], _, Alternatives @@ valuePats],
+          True, None
+        ]
+      ],
+
+    True, None
+  ]
+
+
+(*
+Infer the WL hover pattern for a single element of a list-valued AST node.
+Used by iterator-variable and Map/Scan parameter inference.  Delegates to
+inferNodePattern for each element so that nested lists and associations resolve
+all the way down to atoms.
+
+  {1, 2, 3}              -> Blank[Integer]
+  {"a", "b"}             -> Blank[String]
+  {"", 2, 3}             -> Alternatives[Blank[String], Blank[Integer]]
+  {{1,2},{3,4}}          -> {___Integer}
+  {<|"a"->1|>}           -> <|"a"->_Integer|>
+  Range[n]               -> Blank[Integer]
+  unknown elements       -> None
+*)
+inferListElementPattern[listNode_] :=
+  Which[
+    MatchQ[listNode, CallNode[LeafNode[Symbol, "List", _], {_, ___}, _]],
+      Module[{types = DeleteDuplicates[DeleteCases[
+          inferNodePattern /@ listNode[[2]],
+          None]]},
+        Which[
+          Length[types] === 1, types[[1]],
+          Length[types] > 1,   Alternatives @@ types,
+          True,                None
+        ]
+      ],
+    MatchQ[listNode, CallNode[LeafNode[Symbol, "Range", _], {__}, _]], Blank[Integer],
+    True, None
+  ]
+
+
+(*
 For symbols, display their usage message
 *)
 
 
-handleUserSymbols[astIn_, cstIn_, symsIn_] := 
-Module[{tokenSymbol, functionSource, 
-  functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,  
+handleUserSymbols[uri_, astIn_, cstIn_, symsIn_, cursorLine_] :=
+Module[{tokenSymbol, functionSource,
+  functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,
   functionCallPatternCST, functionCallPattern, functionInformationAssoc, requiredUsage,
-  symbolContext},
+  symbolContext, docComments, defSources, docCommentsBySource, perDefDocComments,
+  inferredPattern, hasVarDefsInFile, declaredType, declaredTypeSource},
 
-  tokenSymbol = symsIn /. LeafNode[Symbol, ts_, _] :> ts; 
+  tokenSymbol = symsIn /. LeafNode[Symbol, ts_, _] :> ts;
 
-  tokenSymbol = First[tokenSymbol]; 
+  tokenSymbol = First[tokenSymbol];
 
   (*
   Look up the full context for this symbol from the PacletIndex.
@@ -436,53 +555,53 @@ Module[{tokenSymbol, functionSource,
   *)
   symbolContext = GetSymbolContext[tokenSymbol];
 
-  (* 
-  Get all the usage messages that are defined in the file 
+  (*
+  Get all the usage messages that are defined in the file
   *)
-  requiredUsage = Cases[astIn, 
+  requiredUsage = Cases[astIn,
     CallNode[
       LeafNode[Symbol, "Set" | "SetDelayed", <||>],
       {
         CallNode[
-          LeafNode[Symbol, "MessageName", <||>], 
+          LeafNode[Symbol, "MessageName", <||>],
           {
-            LeafNode[Symbol, tokenSymbol, _], 
+            LeafNode[Symbol, tokenSymbol, _],
             LeafNode[String, "\"usage\"", _],
             ___
-          }, 
+          },
           _
-        ], 
+        ],
         LeafNode[String, msg_, _]
-      }, 
+      },
       _
-    ] :> ToExpression[msg], 
-    (* 
+    ] :> ToExpression[msg],
+    (*
     This levelspec selection works for the following cases:
            usage messages without terminating ';'
-           usage within package context 
+           usage within package context
            usage messages without terminating ';' in a package
     *)
 
-    (* 
-    Test case: 
+    (*
+    Test case:
       A function is defined in a Package inside Private context and
       the function usage is defined in the Package.
 
       To get the usage right, depth of 6 is sufficient, because the usage pattern is within
-        
+
         ContainerNode[{                       (adds 2 levels)
             PackageNode[{                     (adds 2 levels)
                   CallNode[{                  (adds 2 levels)
     *)
     6
-  ]; 
+  ];
 
-  log[2, "requiredUsage from handleUserSymbols: "]; 
+  log[2, "requiredUsage from handleUserSymbols: "];
   log[2, requiredUsage];
 
 
-  (* 
-  Get functionCallPattern AST for functions with SetDelayed & UpSetDelayed 
+  (*
+  Get functionCallPattern AST for functions with SetDelayed & UpSetDelayed
   *)
   functionCallPatternAST1 = Cases[astIn, CallNode[
     LeafNode[Symbol, "Set" | "SetDelayed" | "UpSet" | "UpSetDelayed", _],
@@ -492,13 +611,13 @@ Module[{tokenSymbol, functionSource,
     },
     KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
 
-    (* 
-    Test case: 
+    (*
+    Test case:
       A function is defined in a Package inside Private context and
       the function usage is defined in the Package.
 
       To get the function-call-pattern right, depth of 8 is sufficient, because the function-call-pattern is within
-        
+
         ContainerNode[{                       (adds 2 levels)
             PackageNode[{                     (adds 2 levels)
                 ContextNode[{                 (adds 2 levels)
@@ -507,20 +626,20 @@ Module[{tokenSymbol, functionSource,
     ] :> lhs, 8
   ];
 
-  (* 
+  (*
   Delete LHS of the usage messages from the functionCallPattern
   *)
 
   functionCallPatternAST1 = DeleteCases[functionCallPatternAST1, $messageNamePattern];
 
-  (* 
-    Get functionCallPattern AST for functions with TagSetDelayed 
+  (*
+    Get functionCallPattern AST for functions with TagSetDelayed
   *)
   functionCallPatternAST2 = Cases[astIn, CallNode[
     LeafNode[Symbol, "TagSet" | "TagSetDelayed", _],
     {
-      LeafNode[Symbol, tokenSymbol, _], 
-      lhs:CallNode[_, _, _], 
+      LeafNode[Symbol, tokenSymbol, _],
+      lhs:CallNode[_, _, _],
       rhs:_
     },
     KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
@@ -532,18 +651,575 @@ Module[{tokenSymbol, functionSource,
 
   functionSource = #[[3, Key[Source]]]& /@ functionCallPatternAST;
 
-  (* 
-  Test case: 
+  (*
+  Test case:
     A function is defined in a Package inside Private context and
     the function usage is defined in the Package.
 
     To get the function-call-pattern right, depth of 6 is sufficient, because the function-call-pattern is within
-      
+
       ContainerNode[{                       (adds 2 levels)
               InfixNode[{                   (adds 2 levels)
                     BinaryNode[{            (adds 2 levels)
   *)
   functionCallPatternCST = FirstCase[cstIn, _[_, _, KeyValuePattern[Source -> #]], $Failed, 6]& /@ functionSource;
+
+  (*
+  Build a doc-comment lookup keyed by definition start-line.
+  We use the same extractDocComments logic from PacletIndex.
+  *)
+  docComments = ExtractDocComments[cstIn];
+
+  (*
+  For each function definition (by source), look up whether the line immediately
+  before it has a doc-comment, and collect those associations.
+  docCommentsBySource maps Source -> parsed doc-comment assoc (or None).
+  *)
+  defSources = #[[3, Key[Source]]]& /@ functionCallPatternAST;
+  docCommentsBySource = AssociationThread[
+    defSources,
+    Lookup[docComments, #[[1, 1]] - 1, None]& /@ defSources
+  ];
+
+  (*
+  Collect the unique doc-comments attached to the definitions of this symbol.
+  perDefDocComments is the list aligned with functionCallPatternCST.
+  *)
+  perDefDocComments = Lookup[docCommentsBySource, functionSource, None];
+
+  (*
+  Enrich each doc-comment with InputPatternStrings inferred from the corresponding
+  definition LHS.  Only typed blanks (e.g. x_Integer -> "_Integer") are included;
+  bare wildcards (x_) are omitted since they add no information.
+  *)
+  perDefDocComments = MapThread[
+    Function[{dc, lhsNode},
+      Module[{pats, strs},
+        pats = LSPServer`PacletIndex`ExtractLHSInputPatterns[lhsNode];
+        strs = Select[Map[ToString[#, InputForm] &, pats], # =!= "_" && StringLength[#] > 0 &];
+        Which[
+          AssociationQ[dc] && Length[strs] > 0,
+            Append[dc, "InputPatternStrings" -> strs],
+          !AssociationQ[dc] && Length[strs] > 0,
+            <|"Description" -> None, "InputPatternStrings" -> strs|>,
+          True, dc
+        ]
+      ]
+    ],
+    {perDefDocComments, functionCallPatternAST}
+  ];
+
+  (*
+  Inject InferredReturnPattern into doc-comments that lack an explicit Return: annotation.
+  This allows hover to show the automatically inferred return type even when the function
+  has no doc-comment at all, or has a doc-comment without a Return: field.
+  We look up InferredReturnPattern from the PacletIndex by matching definition source lines.
+  *)
+  Module[{pacletDefs, irpByLine},
+    pacletDefs = Lookup[
+      Lookup[LSPServer`PacletIndex`$PacletIndex["Symbols"], tokenSymbol, <||>],
+      "Definitions", {}
+    ];
+    (* Map: def start line -> InferredReturnPattern *)
+    irpByLine = Association[
+      Map[
+        Function[{def},
+          With[{irp = Lookup[def, "InferredReturnPattern", None]},
+            If[!MatchQ[irp, None | _Missing],
+              def["source"][[1, 1]] -> irp,
+              Nothing
+            ]
+          ]
+        ],
+        pacletDefs
+      ]
+    ];
+    If[Length[irpByLine] > 0,
+      perDefDocComments = MapThread[
+        Function[{dc, astNode},
+          Module[{defLine, irp, irpStr},
+            defLine = astNode[[3, Key[Source]]][[1, 1]];
+            irp = Lookup[irpByLine, defLine, None];
+            If[MatchQ[irp, None | _Missing],
+              dc,  (* no inferred pattern for this definition *)
+              irpStr = Quiet[ToString[irp, InputForm], {ToString::shdw}];
+              Which[
+                (* No DocComment at all: synthesize one with just the inferred return type *)
+                !AssociationQ[dc],
+                  <|"Description" -> None, "ReturnPattern" -> irp,
+                    "ReturnPatternString" -> irpStr|>,
+                (* DocComment exists but has no ReturnPattern: inject the inferred one *)
+                MatchQ[Lookup[dc, "ReturnPattern", None], None | _Missing],
+                  Append[dc, "ReturnPattern" -> irp, "ReturnPatternString" -> irpStr],
+                (* DocComment already has an explicit ReturnPattern: leave it alone *)
+                True, dc
+              ]
+            ]
+          ]
+        ],
+        {perDefDocComments, functionCallPatternAST}
+      ]
+    ]
+  ];
+
+  (*
+  Read the position-aware InferredPattern: pick the most recent constant/variable
+  definition whose source line is at or before the cursor line.  This makes hover
+  reflect the type of the variable AT the cursor position rather than always
+  showing the first (or merged) i  nferred pattern.
+  Also track whether the symbol has ANY variable definition in the current file.
+  so pre-assignment hover shows no type rather than falling through to the
+  (position-unaware) cross-file handler.
+  *)
+  {inferredPattern, hasVarDefsInFile} = Module[{syms, defs, byUri, varDefs, relevant, result},
+    syms = Lookup[LSPServer`PacletIndex`$PacletIndex, "Symbols", <||>];
+    If[!KeyExistsQ[syms, tokenSymbol],
+      {None, False},
+      defs = Lookup[syms[tokenSymbol], "Definitions", {}];
+      byUri = Select[defs, #["uri"] === uri &];
+      varDefs = Select[byUri, MemberQ[{"constant", "declaration"}, Lookup[#, "kind", ""]] &];
+      (* Keep only variable definitions at or before the cursor *)
+      relevant = Select[varDefs,
+        MatchQ[Lookup[#, "source", {}], {{l_, _}, _} /; l <= cursorLine] &
+      ];
+      (* Sort ascending by start line, pick the InferredPattern of the last assignment
+         that has a non-None, non-Missing InferredPattern.  None entries are skipped so
+         that an equality-If or other deliberately opaque assignment does not erase a
+         more informative PatternTest type inferred from an earlier comparison-If. *)
+      relevant = SortBy[relevant, #["source"][[1, 1]] &];
+      result = None;
+      Scan[
+        Function[{def},
+          Module[{ip},
+            ip = Lookup[def, "InferredPattern", None];
+            If[ip =!= None && !MatchQ[ip, _Missing], result = ip]
+          ]
+        ],
+        relevant
+      ];
+      {result, Length[varDefs] > 0}
+    ]
+  ];
+
+  (*
+  Read DeclaredType from PacletIndex - explicit .ipwl annotation, takes precedence
+  over InferredPattern everywhere. Check the current file's URI first, then any
+  companion .ipwl file.
+  *)
+  {declaredType, declaredTypeSource} = Module[{allDefs, dtEntry},
+    allDefs = Lookup[
+      Lookup[LSPServer`PacletIndex`$PacletIndex["Symbols"], tokenSymbol, <||>],
+      "Definitions", {}
+    ];
+    dtEntry = SelectFirst[allDefs,
+      !MatchQ[Lookup[#, "DeclaredType", None], None | _Missing] &,
+      None
+    ];
+    If[AssociationQ[dtEntry],
+      {
+        dtEntry["DeclaredType"],
+        (* Companion file hint: show filename when declaration comes from a different file *)
+        If[dtEntry["uri"] =!= uri,
+          FileNameTake[StringReplace[dtEntry["uri"], "file://" -> ""]],
+          None
+        ]
+      },
+      {None, None}
+    ]
+  ];
+
+  (*
+  Parameter pattern inference: if the PacletIndex produced no inferredPattern,
+  check whether tokenSymbol is a formal parameter of a function whose body
+  contains cursorLine.
+
+    Case A – typed named-function param:  f[x_Integer] := …  ->  Blank[Integer]
+    Case B – untyped Function param inferred from application:
+              Function[{a}, …][ "hello" ]  ->  Blank[String]
+  *)
+  If[inferredPattern === None,
+    inferredPattern = Module[
+      {cstBlankToPattern, argNodePattern},
+
+      (* Convert Blank[T]/BlankSequence[T] CST node -> WL expression e.g. Blank[Integer] *)
+      cstBlankToPattern = Function[{bn},
+        If[MatchQ[bn, CallNode[LeafNode[Symbol, "Blank"|"BlankSequence"|"BlankNullSequence", _],
+                               {LeafNode[Symbol, _String, _]}, _]],
+          Quiet[ToExpression[bn[[1,2]] <> "[" <> bn[[2,1,2]] <> "]"], {ToExpression::shdw}],
+          None (* untyped _ *)
+        ]
+      ];
+
+      (* Infer WL pattern from a literal argument node *)
+      argNodePattern = Function[{n},
+        Which[
+          MatchQ[n, LeafNode[String,   _, _]], Blank[String],
+          MatchQ[n, LeafNode[Integer,  _, _]], Blank[Integer],
+          MatchQ[n, LeafNode[Real,     _, _]], Blank[Real],
+          MatchQ[n, LeafNode[Rational, _, _]], Blank[Rational],
+          (* Part[expr, i] — element type of the collection *)
+          MatchQ[n, CallNode[LeafNode[Symbol, "Part", _], {_, __}, _]],
+            inferListElementPattern[n[[2, 1]]],
+          (* Lookup[assoc, key] — value type of the association *)
+          MatchQ[n, CallNode[LeafNode[Symbol, "Lookup", _], {_, _, ___}, _]],
+            Module[{assocArgN = n[[2, 1]], vPats},
+              Which[
+                MatchQ[assocArgN, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
+                  vPats = DeleteDuplicates[DeleteCases[
+                    Cases[assocArgN[[2]],
+                      CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, valNode_}, _] :>
+                        inferNodePattern[valNode],
+                      1],
+                    None]];
+                  Switch[Length[vPats], 0, None, 1, vPats[[1]], _, Alternatives @@ vPats],
+                True, None
+              ]
+            ],
+          True, None
+        ]
+      ];
+
+      Catch[
+        (* Case A: SetDelayed/Set  f[…, x_T, …] := …  *)
+        Scan[Function[{defNode},
+          Module[{s = Quiet[defNode[[3, Key[Source]]]]},
+            If[MatchQ[s, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2],
+              Cases[defNode[[2,1,2]],
+                CallNode[LeafNode[Symbol, "Pattern", _],
+                  {LeafNode[Symbol, tokenSymbol, _], bn_}, _] :>
+                  Module[{p = cstBlankToPattern[bn]},
+                    If[p =!= None, Throw[p]]
+                  ],
+                Infinity
+              ]
+            ]
+          ]],
+          Cases[astIn,
+            CallNode[LeafNode[Symbol, "SetDelayed"|"Set", _],
+              {CallNode[_, _List, _], _}, _], Infinity]
+        ];
+
+        (* Case B: Function[{…, a, …}, body][…, argN, …]  untyped param inferred from arg *)
+        Scan[Function[{appNode},
+          Module[{funcNode = appNode[[1]], params, bodySrc, paramNames, idx, p},
+            params = funcNode[[2,1,2]];  (* contents of List[...] *)
+            bodySrc = Quiet[funcNode[[2,2,3,Key[Source]]]];
+            If[!MatchQ[bodySrc, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2],
+              Return[]
+            ];
+            paramNames = Cases[params, LeafNode[Symbol, s_String, _] :> s, 1];
+            idx = FirstPosition[paramNames, tokenSymbol, None, {1}];
+            If[idx === None, Return[]];
+            idx = idx[[1]];
+            If[idx > Length[appNode[[2]]], Return[]];
+            p = argNodePattern[appNode[[2, idx]]];
+            If[p =!= None, Throw[p]]
+          ]],
+          Cases[astIn,
+            node:CallNode[
+              CallNode[LeafNode[Symbol, "Function", _],
+                {CallNode[LeafNode[Symbol, "List", _], _List, _], _}, _],
+              _List, _] :> node,
+            Infinity]
+        ];
+
+        (* Case C: Table/Do/Sum/Product/Array iterator variable
+           {i, lo, hi} or {i, n} -> _Integer;  {i, listExpr} -> element type of listExpr *)
+        Scan[Function[{iterNode},
+          Module[{args = iterNode[[2]], iterSrc},
+            If[Length[args] < 2, Return[]];
+            iterSrc = Quiet[iterNode[[3, Key[Source]]]];
+            If[!MatchQ[iterSrc, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2], Return[]];
+            Scan[Function[{spec},
+              If[MatchQ[spec, CallNode[LeafNode[Symbol, "List", _],
+                                       {LeafNode[Symbol, tokenSymbol, _], __}, _]],
+                Module[{specArgs = spec[[2]]},
+                  If[Length[specArgs] == 2 &&
+                     MatchQ[specArgs[[2]], CallNode[LeafNode[Symbol, "List", _], _, _]],
+                    (* {i, listExpr} -> element type *)
+                    Throw[With[{ep = inferListElementPattern[specArgs[[2]]]},
+                      If[ep === None, Blank[], ep]]],
+                    (* {i, lo} / {i, lo, hi} / {i, lo, hi, step} -> Integer *)
+                    Throw[Blank[Integer]]
+                  ]
+                ]
+              ]],
+              Rest[args] (* skip body; iterator specs are args 2..n *)
+            ]
+          ]],
+          Cases[astIn,
+            CallNode[LeafNode[Symbol, "Table"|"Do"|"Sum"|"Product"|"Array", _], _List, _],
+            Infinity]
+        ];
+
+        (* Case D: Map/Scan/Select[Function[{a,...}, body], list] -> a gets element type *)
+        Scan[Function[{mapNode},
+          Module[{args = mapNode[[2]], func, list, params, bodySrc, paramNames, idx, ep},
+            If[Length[args] < 2, Return[]];
+            {func, list} = Switch[mapNode[[1, 2]],
+              "Select" | "Pick", {args[[2]], args[[1]]},
+              _,                 {args[[1]], args[[2]]}
+            ];
+            If[!MatchQ[func, CallNode[LeafNode[Symbol, "Function", _],
+                                      {CallNode[LeafNode[Symbol, "List", _], _List, _], _}, _]],
+              Return[]
+            ];
+            params  = func[[2, 1, 2]];
+            bodySrc = Quiet[func[[2, 2, 3, Key[Source]]]];
+            If[!MatchQ[bodySrc, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2], Return[]];
+            paramNames = Cases[params, LeafNode[Symbol, s_String, _] :> s, 1];
+            idx = FirstPosition[paramNames, tokenSymbol, None, {1}];
+            If[idx === None, Return[]];
+            ep = inferListElementPattern[list];
+            Throw[If[ep === None, Blank[], ep]]
+          ]],
+          Cases[astIn,
+            CallNode[LeafNode[Symbol, "Map"|"Scan"|"Select"|"Pick"|"MapIndexed"|"MapThread", _],
+              _List, _], Infinity]
+        ];
+
+        (* Case E: Enclose[expr, Function[param, body]] -> param gets _Failure.
+           Works for both Function[{e,...}, body] (List form) and Function[e, body]
+           (single-symbol form).  Scope: cursor anywhere inside the Function node. *)
+        Scan[Function[{encNode},
+          Module[{args = encNode[[2]], func, funcSrc, paramNames},
+            If[Length[args] < 2, Return[]];
+            func = args[[2]];
+            funcSrc = Quiet[func[[3, Key[Source]]]];
+            If[!MatchQ[funcSrc, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2], Return[]];
+            Which[
+              (* Function[{e,...}, body] *)
+              MatchQ[func, CallNode[LeafNode[Symbol, "Function", _],
+                       {CallNode[LeafNode[Symbol, "List", _], _List, _], _}, _]],
+                paramNames = Cases[func[[2, 1, 2]], LeafNode[Symbol, s_String, _] :> s, 1],
+              (* Function[e, body] — single Symbol param, no List *)
+              MatchQ[func, CallNode[LeafNode[Symbol, "Function", _],
+                       {LeafNode[Symbol, _, _], _}, _]],
+                paramNames = {func[[2, 1, 2]]},
+              True, Return[]
+            ];
+            If[MemberQ[paramNames, tokenSymbol], Throw[Blank[Failure]]]
+          ]],
+          Cases[astIn,
+            CallNode[LeafNode[Symbol, "Enclose", _], _List, _], Infinity]
+        ];
+
+        (* Case F: Module/Block/With local variable.
+           Module[{x=5, y="hello", z, ...}, body] and With[{x=5, ...}, body]:
+             - cursor inside the outer node's source range
+             - tokenSymbol appears as the LHS of a Set in the var-list, or as a bare symbol
+             - type is inferred from the RHS (literals -> Blank[T]; List -> element pattern;
+               uninitialized -> Blank[])
+           Block behaves the same way at the analysis level. *)
+        Scan[Function[{mbwNode},
+          Catch[
+          Module[{scopeArgs, varListNode, outerSrc, varRhsPattern},
+            scopeArgs = mbwNode[[2]];
+            If[Length[scopeArgs] < 2, Throw[Null, "next"]];
+            varListNode = scopeArgs[[1]];
+            If[!MatchQ[varListNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+              Throw[Null, "next"]
+            ];
+            outerSrc = Quiet[mbwNode[[3, Key[Source]]]];
+            If[!MatchQ[outerSrc, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2], Throw[Null, "next"]];
+            varRhsPattern = Catch[
+              Scan[Function[{vn},
+                Which[
+                  (* plain symbol: uninitialized -> unknown type *)
+                  MatchQ[vn, LeafNode[Symbol, tokenSymbol, _]],
+                    Throw[Blank[]],
+                  (* x = rhs: infer type from rhs *)
+                  MatchQ[vn, CallNode[LeafNode[Symbol, "Set", _],
+                                      {LeafNode[Symbol, tokenSymbol, _], _}, _]],
+                    Module[{rhs = vn[[2, 2]], p},
+                      p = Which[
+                        argNodePattern[rhs] =!= None,
+                          argNodePattern[rhs],
+                        MatchQ[rhs, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+                          With[{ep = inferListElementPattern[rhs]},
+                            If[ep =!= None, ep, Blank[List]]],
+                        MatchQ[rhs, CallNode[LeafNode[Symbol, "Association", _], _, _]],
+                          Blank[Association],
+                        True, None
+                      ];
+                      Throw[p]
+                    ]
+                ]],
+              varListNode[[2]]
+            ]];
+          (* Flow-sensitive: scan body for re-assignments, pick last before cursor.
+             Skip entirely if tokenSymbol not found in var-list (varRhsPattern === Null). *)
+          If[varRhsPattern =!= Null,
+            Module[{initPat, allPairs, validPairs},
+              initPat = If[varRhsPattern === None, None, varRhsPattern];
+              allPairs = If[initPat =!= None, {{outerSrc[[1, 1]], initPat}}, {}];
+              allPairs = Join[allPairs,
+                Cases[Rest[scopeArgs],
+                  CallNode[LeafNode[Symbol, "Set", _],
+                    {LeafNode[Symbol, tokenSymbol, _], rhs_},
+                    KeyValuePattern[Source -> {{setLine_, _}, _}]] :>
+                    Module[{p = Which[
+                      argNodePattern[rhs] =!= None,
+                        argNodePattern[rhs],
+                      MatchQ[rhs, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+                        With[{ep = inferListElementPattern[rhs]},
+                          If[ep =!= None, ep, Blank[List]]],
+                      MatchQ[rhs, CallNode[LeafNode[Symbol, "Association", _], _, _]],
+                        Blank[Association],
+                      True, None
+                    ]},
+                    If[p =!= None, {setLine, p}, Nothing]
+                    ],
+                  Infinity]
+              ];
+              validPairs = Select[allPairs, #[[1]] <= cursorLine &];
+              If[Length[validPairs] > 0,
+                Throw[Last[SortBy[validPairs, First]][[2]]]
+              ]
+            ]
+          ]
+          ],
+          "next"]],
+          Cases[astIn,
+            CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
+            Infinity]
+        ];
+
+        None (* no parameter pattern found *)
+      ]    ]
+  ];
+
+  (*
+  Apply branch-narrowing to inferredPattern: if the cursor sits inside a branch
+  body of an If node whose condition constrains tokenSymbol, override the inferred
+  pattern with the branch-specific type.
+  Handles:
+    TypeQ[sym]          true  -> Blank[Type]          false -> Except[Blank[Type]]
+    sym op literal      true  -> PatternTest[base, (# op lit &)]
+                        false -> PatternTest[base, (# negOp lit &)]
+    Not[cond]                 -> swap true/false
+    And[c1, c2, ...]          -> first applicable conjunct
+  *)
+  inferredPattern = Module[
+    {compNegMap, basePattern, applyTrueCond, applyFalseCond, narrowed, typeQMap},
+
+    compNegMap = <|
+      "Greater" -> "LessEqual", "GreaterEqual" -> "Less",
+      "Less"    -> "GreaterEqual", "LessEqual"  -> "Greater"
+    |>;
+    typeQMap = <|
+      "StringQ"                       -> Blank[String],
+      "Internal`SymbolNameQ"          -> Blank[String],
+      "IntegerQ"                      -> Blank[Integer],
+      "MachineIntegerQ"               -> Blank[Integer],
+      "Internal`NonNegativeIntegerQ"  -> Blank[Integer],
+      "RealQ"                         -> Blank[Real],
+      "MachineRealQ"                  -> Blank[Real],
+      "NumberQ"                       -> Blank[Number],
+      "NumericQ"                      -> Blank[Number],
+      "InexactNumberQ"                -> Blank[Number],
+      "ListQ"                         -> Blank[List],
+      "VectorQ"                       -> Blank[List],
+      "MatrixQ"                       -> Blank[List],
+      "AssociationQ"                  -> Blank[Association]
+    |>;
+    basePattern = If[inferredPattern =!= None, inferredPattern, Blank[]];
+
+    applyTrueCond = Function[{cNode},
+      Which[
+        (* TypeQ[sym] *)
+        MatchQ[cNode, CallNode[LeafNode[Symbol, _String, _],
+                               {LeafNode[Symbol, tokenSymbol, _]}, _]],
+          Lookup[typeQMap, cNode[[1, 2]], None],
+
+        (* sym op literal: sym > 5, sym < 3, etc. *)
+        MatchQ[cNode, CallNode[
+            LeafNode[Symbol, "Greater"|"GreaterEqual"|"Less"|"LessEqual", _],
+            {LeafNode[Symbol, tokenSymbol, _],
+             LeafNode[Integer|Real|Rational, _, _]}, _]],
+          With[{op  = Symbol[cNode[[1, 2]]],
+                lv  = Quiet[ToExpression[cNode[[2, 2, 2]]], {ToExpression::shdw}]},
+            PatternTest[basePattern, Function[op[Slot[1], lv]]]
+          ],
+
+        (* And[c1, c2, ...]: first conjunct that applies *)
+        MatchQ[cNode, CallNode[LeafNode[Symbol, "And", _], _List, _]],
+          Catch[
+            Scan[Function[{sub},
+              Module[{r = applyTrueCond[sub]},
+                If[r =!= None, Throw[r]]]
+            ], cNode[[2]]];
+            None
+          ],
+
+        True, None
+      ]
+    ];
+
+    applyFalseCond = Function[{cNode},
+      Which[
+        (* Not[inner]: false of !cond means inner is true *)
+        MatchQ[cNode, CallNode[LeafNode[Symbol, "Not", _], {_}, _]],
+          applyTrueCond[cNode[[2, 1]]],
+
+        (* TypeQ[sym]: false branch -> Except[Blank[TypeName]] *)
+        MatchQ[cNode, CallNode[LeafNode[Symbol, _String, _],
+                               {LeafNode[Symbol, tokenSymbol, _]}, _]],
+          Module[{negPat = Lookup[typeQMap, cNode[[1, 2]], None]},
+            If[negPat === None, None, Except[negPat]]
+          ],
+
+        (* sym op literal: false branch has sym (negated op) literal *)
+        MatchQ[cNode, CallNode[
+            LeafNode[Symbol, "Greater"|"GreaterEqual"|"Less"|"LessEqual", _],
+            {LeafNode[Symbol, tokenSymbol, _],
+             LeafNode[Integer|Real|Rational, _, _]}, _]],
+          Module[{negOp = Lookup[compNegMap, cNode[[1, 2]], None],
+                  lv    = Quiet[ToExpression[cNode[[2, 2, 2]]], {ToExpression::shdw}]},
+            If[negOp === None, None,
+              With[{op = Symbol[negOp]},
+                PatternTest[basePattern, Function[op[Slot[1], lv]]]
+              ]
+            ]
+          ],
+
+        True, None
+      ]
+    ];
+
+    (* Scan all If nodes in the AST for one whose branch body contains cursorLine *)
+    narrowed = Catch[
+      Scan[Function[{ifNode},
+        Module[{args, trueSrc, falseSrc, r},
+          args = ifNode[[2]];
+          If[Length[args] < 2, Return[]];
+
+          (* True branch *)
+          trueSrc = Quiet[args[[2, 3, Key[Source]]], {}];
+          If[MatchQ[trueSrc, {{_Integer, _}, {_Integer, _}}] &&
+             trueSrc[[1, 1]] <= cursorLine <= trueSrc[[2, 1]],
+            r = applyTrueCond[args[[1]]];
+            If[r =!= None, Throw[r]]
+          ];
+
+          (* False branch *)
+          If[Length[args] >= 3,
+            falseSrc = Quiet[args[[3, 3, Key[Source]]], {}];
+            If[MatchQ[falseSrc, {{_Integer, _}, {_Integer, _}}] &&
+               falseSrc[[1, 1]] <= cursorLine <= falseSrc[[2, 1]],
+              r = applyFalseCond[args[[1]]];
+              If[r =!= None, Throw[r]]
+            ]
+          ]
+        ]
+      ],
+      Cases[astIn, CallNode[LeafNode[Symbol, "If", _], _, _], Infinity]
+      ];
+      inferredPattern  (* no branch override found *)
+    ];
+
+    narrowed
+  ];
 
   If[Length[functionCallPatternCST] == 0 && Length[requiredUsage] == 0,
     functionInformationAssoc =     <|
@@ -551,8 +1227,13 @@ Module[{tokenSymbol, functionSource,
       "Usage" -> None,
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> None,
-      "FunctionInformation" -> False,
-      "Context" -> symbolContext
+      "FunctionInformation" -> If[hasVarDefsInFile || inferredPattern =!= None ||
+                                  !MatchQ[declaredType, None | _Missing], True, False],
+      "Context" -> symbolContext,
+      "DocComments" -> {},
+      "InferredPattern" -> inferredPattern,
+      "DeclaredType" -> declaredType,
+      "DeclaredTypeSource" -> declaredTypeSource
     |>
     ,
     If[Length[functionCallPatternCST] == 0,
@@ -570,14 +1251,22 @@ Module[{tokenSymbol, functionSource,
       ,
       requiredUsage = StringRiffle[requiredUsage, "\n"]
     ];
-    
+
     functionInformationAssoc = <|
       "SymbolType" -> "UserDefined",
       "Usage" -> requiredUsage,
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> functionCallPattern,
       "FunctionInformation" -> True,
-      "Context" -> symbolContext
+      "Context" -> symbolContext,
+      (*
+      DocComments: list of doc-comment associations (or None) parallel to
+      the function definitions, deduplicated for display.
+      *)
+      "DocComments" -> DeleteDuplicates[Select[perDefDocComments, AssociationQ]],
+      "InferredPattern" -> inferredPattern,
+      "DeclaredType" -> declaredType,
+      "DeclaredTypeSource" -> declaredTypeSource
     |>
   ];
 
@@ -617,7 +1306,7 @@ Module[{usage, documentationLink, sym},
   usage = StringJoin[linearToMDSyntax[usage]];
 
   (*
-  
+
   Do not care about CONSTANT
 
   If[MemberQ[WolframLanguageSyntax`Generate`$constants, sym],
@@ -637,9 +1326,9 @@ Module[{usage, documentationLink, sym},
     usage = usage <> "\n\nOBSOLETE"
   ];
 
-  documentationLink = "[" <> sym <> ": "<> "Web Documentation]" <> 
+  documentationLink = "[" <> sym <> ": "<> "Web Documentation]" <>
         "(" <> "https://reference.wolfram.com/language/ref/" <> sym <> ".html" <> ")";
-  
+
   <|
     "SymbolType" -> "System",
     "Usage" -> usage,
@@ -677,11 +1366,11 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
     ],
     symIn
   ];
-  
+
   (* Look up symbol in PacletIndex *)
   symData = Lookup[$PacletIndex, "Symbols", <||>];
   symData = Lookup[symData, tokenSymbol, Null];
-  
+
   If[symData === Null,
     Throw[<|
       "SymbolType" -> "INVALID",
@@ -692,10 +1381,10 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       "Context" -> None
     |>]
   ];
-  
+
   defs = Replace[symData["Definitions"], _Missing -> {}];
   usages = Replace[symData["Usages"], _Missing -> {}];
-  
+
   If[Length[defs] === 0,
     Throw[<|
       "SymbolType" -> "INVALID",
@@ -706,29 +1395,29 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       "Context" -> None
     |>]
   ];
-  
+
   (* Get basic info from the first definition *)
   context = Replace[defs[[1]]["context"], _Missing -> None];
   kind = Replace[defs[[1]]["kind"], _Missing -> "unknown"];
   defUri = defs[[1]]["uri"];
-  
+
   (* Get usage message if available *)
   usage = If[Length[usages] > 0,
     StringRiffle[usages, "\n"],
     None
   ];
-  
+
   (*
   Extract function definition patterns from the definition file.
   Try the open file cache first, then read from disk.
   *)
   functionCallPattern = None;
-  
+
   If[kind === "function" || kind === "declaration",
-    
+
     (* Try to get the file - check if it's currently open first *)
     fileEntry = Lookup[$OpenFilesMap, defUri, Null];
-    
+
     If[fileEntry =!= Null,
       (* File is open - use its cached AST and CST *)
       defAST = fileEntry["AST"];
@@ -737,7 +1426,7 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
         defText = fileEntry["Text"];
         defCST = Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]]
       ],
-      
+
       (* File is not open - read from disk *)
       defFilePath = StringReplace[defUri, "file://" -> ""];
       defText = Quiet[Import[defFilePath, "Text"]];
@@ -759,7 +1448,7 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
         defAST = Null
       ]
     ];
-    
+
     If[defAST =!= Null && !FailureQ[defAST] && defCST =!= Null && !FailureQ[defCST],
       (* Extract function call patterns - same approach as handleUserSymbols *)
       functionCallPatternAST1 = Cases[defAST, CallNode[
@@ -771,29 +1460,29 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
         KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
         ] :> lhs, 8
       ];
-      
+
       (* Also try TagSetDelayed *)
       functionCallPatternAST2 = Cases[defAST, CallNode[
         LeafNode[Symbol, "TagSet" | "TagSetDelayed", _],
         {
-          LeafNode[Symbol, tokenSymbol, _], 
-          lhs:CallNode[_, _, _], 
+          LeafNode[Symbol, tokenSymbol, _],
+          lhs:CallNode[_, _, _],
           rhs:_
         },
         KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
         ] :> lhs, 8
       ];
-      
+
       functionCallPatternAST = Join[functionCallPatternAST1, functionCallPatternAST2];
-      
+
       (* Remove usage message LHS from patterns *)
       functionCallPatternAST = DeleteCases[functionCallPatternAST, $messageNamePattern];
-      
+
       If[Length[functionCallPatternAST] > 0,
         functionSource = #[[3, Key[Source]]]& /@ functionCallPatternAST;
         functionCallPatternCST = FirstCase[defCST, _[_, _, KeyValuePattern[Source -> #]], $Failed, 6]& /@ functionSource;
         functionCallPatternCST = DeleteCases[functionCallPatternCST, $Failed];
-        
+
         If[Length[functionCallPatternCST] > 0,
           functionCallPattern = CodeFormatCST /@ functionCallPatternCST;
           functionCallPattern = DeleteDuplicates[functionCallPattern];
@@ -804,7 +1493,7 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       ]
     ]
   ];
-  
+
   (* Build the result *)
   If[!StringQ[usage] && !StringQ[functionCallPattern],
     (* No info at all - but we know it exists, show basic info *)
@@ -815,7 +1504,20 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       "FunctionDefinitionPatterns" -> None,
       "FunctionInformation" -> True,
       "Context" -> context,
-      "AliasContext" -> aliasContext
+      "AliasContext" -> aliasContext,
+      "DocComments" -> Module[{enriched},
+        enriched = Function[{def},
+          Module[{dc, pats, strs},
+            dc = Replace[def["DocComment"], _Missing -> None];
+            If[!AssociationQ[dc], Return[dc]];
+            pats = Lookup[def, "InputPatterns", {}];
+            strs = Select[Map[ToString[#, InputForm] &, pats], # =!= "_" && StringLength[#] > 0 &];
+            If[Length[strs] > 0, Append[dc, "InputPatternStrings" -> strs], dc]
+          ]
+        ] /@ defs;
+        DeleteDuplicates[Select[enriched, AssociationQ]]
+      ],
+      "InferredPattern" -> Catch[Scan[Function[{d}, Module[{ip}, ip = Lookup[d, "InferredPattern", None]; If[ip =!= None && !MatchQ[ip, _Missing], Throw[ip]]]], defs]; None]
     |>,
     <|
       "SymbolType" -> "CrossFile",
@@ -824,7 +1526,20 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       "FunctionDefinitionPatterns" -> functionCallPattern,
       "FunctionInformation" -> True,
       "Context" -> context,
-      "AliasContext" -> aliasContext
+      "AliasContext" -> aliasContext,
+      "DocComments" -> Module[{enriched},
+        enriched = Function[{def},
+          Module[{dc, pats, strs},
+            dc = Replace[def["DocComment"], _Missing -> None];
+            If[!AssociationQ[dc], Return[dc]];
+            pats = Lookup[def, "InputPatterns", {}];
+            strs = Select[Map[ToString[#, InputForm] &, pats], # =!= "_" && StringLength[#] > 0 &];
+            If[Length[strs] > 0, Append[dc, "InputPatternStrings" -> strs], dc]
+          ]
+        ] /@ defs;
+        DeleteDuplicates[Select[enriched, AssociationQ]]
+      ],
+      "InferredPattern" -> Catch[Scan[Function[{d}, Module[{ip}, ip = Lookup[d, "InferredPattern", None]; If[ip =!= None && !MatchQ[ip, _Missing], Throw[ip]]]], defs]; None]
     |>
   ]
 ]]
@@ -837,7 +1552,7 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
 
   (* Get dependency contexts *)
   deps = GetDependencyContexts[];
-  
+
   (* Handle both bare symbols and explicitly contexted symbols *)
   If[StringContainsQ[symIn, "`"],
     (* Explicit context - extract parts and use directly *)
@@ -866,10 +1581,10 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
         "Context" -> None
       |>]
     ],
-    
+
     (* Bare symbol - try to find which dependency context it belongs to *)
     bareSymbol = symIn;
-    
+
     (* First, try to get context using proper evaluation *)
     symContext = Quiet[
       Check[
@@ -899,7 +1614,7 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
       ],
       {Context::notfound, ToExpression::sntx}
     ];
-    
+
     If[!StringQ[symContext] || symContext === "Global`" || symContext === "System`" || symContext === None,
       (* Symbol not found in any known context *)
       Throw[<|
@@ -912,7 +1627,7 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
       |>]
     ];
     fullSymbol = symContext <> bareSymbol;
-    
+
     (* For bare symbols, check if context is a dependency *)
     If[Length[deps] > 0 && !AnyTrue[deps, StringStartsQ[symContext, #] || symContext === # &],
       Throw[<|
@@ -924,7 +1639,7 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
         "Context" -> None
       |>]
     ];
-    
+
     (* If no deps tracked but we found a non-System/Global context, still try to get info *)
     If[Length[deps] == 0 && (symContext === "Global`" || symContext === "System`" || symContext === None),
       Throw[<|
@@ -937,7 +1652,7 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
       |>]
     ]
   ];
-  
+
   (*
   Ensure the context is loaded before trying to get usage.
   This is important because usage messages may not be properly formatted
@@ -947,7 +1662,7 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
     Check[Needs[symContext], Null, {Needs::nocont, Get::noopen}],
     {Needs::nocont, Get::noopen, General::stop}
   ];
-  
+
   (* Try to get usage message *)
   usage = Quiet[
     Check[
@@ -957,12 +1672,12 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
     ],
     {MessageName::noinfo, ToExpression::notstrbox}
   ];
-  
+
   If[!StringQ[usage],
     (* No usage message - provide basic info *)
     usage = "Symbol from " <> symContext
   ];
-  
+
   (* Extract definition patterns from DownValues, UpValues, SubValues *)
   defPatterns = Quiet[
     Check[
@@ -970,7 +1685,7 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
       downVals = DownValues[symbol];
       upVals = UpValues[symbol];
       subVals = SubValues[symbol];
-      
+
       (* Extract the LHS patterns from definitions *)
       Join[
         (* DownValues: f[args] := ... *)
@@ -985,21 +1700,21 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
     ],
     {DownValues::sym, UpValues::sym, SubValues::sym, ToExpression::sntx}
   ];
-  
+
   (* Remove duplicates and limit to reasonable number *)
   defPatterns = DeleteDuplicates[defPatterns];
   defPatterns = Take[defPatterns, UpTo[10]];
-  
+
   (* Extract paclet name for potential documentation link *)
   pacletName = First[StringSplit[symContext, "`"], ""];
-  
+
   (* Build documentation link if possible *)
   documentationLink = If[pacletName =!= "",
-    "[" <> bareSymbol <> " (" <> pacletName <> "): Web Documentation]" <> 
+    "[" <> bareSymbol <> " (" <> pacletName <> "): Web Documentation]" <>
       "(" <> "https://reference.wolfram.com/language/" <> pacletName <> "/ref/" <> bareSymbol <> ".html" <> ")",
     None
   ];
-  
+
   <|
     "SymbolType" -> "External",
     "Usage" -> usage,
@@ -1028,7 +1743,7 @@ Module[{str},
   str
 ]
 
-handleSymbols[id_, astIn_, cstIn_, symsIn_] :=
+handleSymbols[id_, uri_, astIn_, cstIn_, symsIn_, cursorLine_] :=
 Catch[
 Module[{lines, result, syms, functionInformationAssoc},
 
@@ -1038,15 +1753,15 @@ Module[{lines, result, syms, functionInformationAssoc},
 
   lines = Function[{sym},
 
-    (* 
+    (*
     Find system symbol information
     *)
     functionInformationAssoc = handleSystemSymbols[sym];
-    (* 
-    If system symbol information is not available, try to find the user defined function information 
+    (*
+    If system symbol information is not available, try to find the user defined function information
     *)
     If[functionInformationAssoc["SymbolType"] == "INVALID",
-      functionInformationAssoc = handleUserSymbols[astIn, cstIn, symsIn];
+      functionInformationAssoc = handleUserSymbols[uri, astIn, cstIn, symsIn, cursorLine];
     ];
     (*
     If user symbol information is not available (INVALID or no function info found),
@@ -1054,7 +1769,7 @@ Module[{lines, result, syms, functionInformationAssoc},
     handleUserSymbols returns "UserDefined" with FunctionInformation->False when
     no definitions or usage messages are found in the current file.
     *)
-    If[functionInformationAssoc["SymbolType"] == "INVALID" || 
+    If[functionInformationAssoc["SymbolType"] == "INVALID" ||
        (functionInformationAssoc["SymbolType"] == "UserDefined" && !TrueQ[functionInformationAssoc["FunctionInformation"]]),
       functionInformationAssoc = handleCrossFileSymbols[sym];
     ];
@@ -1126,7 +1841,142 @@ Module[{lines, result, nums, dec},
 ]]
 
 
-linearToMDSyntax[str_] := 
+(*
+For Slot (#, #1, #2) and SlotSequence (##, ##1) tokens, infer the pattern from
+the application context:
+  S1  direct application:  (body &)[args]  or  Function[body][args]
+        # -> pattern of args[[slotNum]];  ## -> BlankSequence[T] over all args
+  S2  mapping context:  Map[body &, list]  etc.
+        # -> element pattern of list;  ## -> BlankSequence version of that pattern
+*)
+handleSlots[id_, uri_, astIn_, cstIn_, slotsIn_, cursorLine_] :=
+Catch[
+Module[{slotTok, slotNum, isSequence, blankToSeq, inferredPattern, result},
+
+  slotTok = First[slotsIn];
+
+  (* Extract slot number and whether it's a SlotSequence *)
+  {slotNum, isSequence} = Which[
+    MatchQ[slotTok, CompoundNode[Slot, {_, LeafNode[Integer, n_String, _]}, _]],
+      {Quiet[ToExpression[slotTok[[2, 2, 2]]], {ToExpression::shdw}], False},
+    MatchQ[slotTok, CompoundNode[SlotSequence, {_, LeafNode[Integer, n_String, _]}, _]],
+      {Quiet[ToExpression[slotTok[[2, 2, 2]]], {ToExpression::shdw}], True},
+    StringStartsQ[Quiet[slotTok[[2]], {}], "##"],
+      {1, True},
+    True,  (* bare # - slot 1 *)
+      {1, False}
+  ];
+  If[!IntegerQ[slotNum], slotNum = 1];
+
+  (* Convert Blank[T]/Blank[] to BlankSequence[T]/BlankSequence[] for ## slots.
+     Recurses into Alternatives so mixed-type lists get __String | __Integer.
+     Uses Which/Head instead of Replace because Blank[t_] in a Replace rule is
+     not a sub-expression pattern - Blank is special in WL pattern matching. *)
+  blankToSeq = Function[{p},
+    Which[
+      Head[p] === Blank && Length[p] === 0, BlankSequence[],
+      Head[p] === Blank && Length[p] === 1, BlankSequence[p[[1]]],
+      Head[p] === Alternatives, Alternatives @@ (blankToSeq /@ List @@ p),
+      True, BlankSequence[]
+    ]
+  ];
+
+  inferredPattern = Catch[
+    (* S1: direct application  (body &)[…]  or  Function[body][…] *)
+    Scan[Function[{appNode},
+      Module[{funcNode = appNode[[1]], appArgs = appNode[[2]], funcSrc, ep},
+        funcSrc = Quiet[funcNode[[3, Key[Source]]]];
+        If[!MatchQ[funcSrc, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2], Return[]];
+        If[slotNum > Length[appArgs], Return[]];
+        If[isSequence,
+          (* ## matches all args from slotNum onward; collect their types *)
+          Module[{seqArgs = Drop[appArgs, slotNum - 1],
+                  seqTypes},
+            seqTypes = DeleteDuplicates[DeleteCases[
+              Map[Function[a, Which[
+                MatchQ[a, LeafNode[String,   _, _]], Blank[String],
+                MatchQ[a, LeafNode[Integer,  _, _]], Blank[Integer],
+                MatchQ[a, LeafNode[Real,     _, _]], Blank[Real],
+                MatchQ[a, LeafNode[Rational, _, _]], Blank[Rational],
+                True, None]], seqArgs],
+              None]];
+            ep = Which[
+              Length[seqTypes] === 1, seqTypes[[1]],
+              Length[seqTypes] > 1,   Alternatives @@ seqTypes,
+              True, None
+            ];
+            Throw[If[ep === None, BlankSequence[], blankToSeq[ep]]]
+          ],
+          (* # - single slot *)
+          Throw[With[{n = appArgs[[slotNum]]},
+            Which[
+              MatchQ[n, LeafNode[String,   _, _]], Blank[String],
+              MatchQ[n, LeafNode[Integer,  _, _]], Blank[Integer],
+              MatchQ[n, LeafNode[Real,     _, _]], Blank[Real],
+              MatchQ[n, LeafNode[Rational, _, _]], Blank[Rational],
+              True, None
+            ]
+          ]]
+        ]
+      ]],
+      Cases[astIn,
+        node:CallNode[
+          CallNode[LeafNode[Symbol, "Function", _], {_}, _],
+          _List, _] :> node,
+        Infinity]
+    ];
+
+    (* S2: Map/Scan/Select/Pick[body &, list] - # gets element type of list *)
+    Scan[Function[{mapNode},
+      Module[{mapArgs = mapNode[[2]], func, list, funcSrc, ep},
+        If[Length[mapArgs] < 2, Return[]];
+        {func, list} = Switch[mapNode[[1, 2]],
+          "Select" | "Pick", {mapArgs[[2]], mapArgs[[1]]},
+          _,                 {mapArgs[[1]], mapArgs[[2]]}
+        ];
+        (* Accept both  Function[body]  (no-param pure fn)  and  body & *)
+        If[!MatchQ[func, CallNode[LeafNode[Symbol, "Function", _], {_}, _]], Return[]];
+        funcSrc = Quiet[func[[3, Key[Source]]]];
+        If[!MatchQ[funcSrc, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2], Return[]];
+        If[slotNum =!= 1, Return[]];  (* simple Map uses slot 1 *)
+        ep = inferListElementPattern[list];
+        Throw[If[isSequence,
+          If[ep === None, BlankSequence[], blankToSeq[ep]],
+          If[ep === None, Blank[],         ep]
+        ]]
+      ]],
+      Cases[astIn,
+        CallNode[LeafNode[Symbol, "Map"|"Scan"|"Select"|"Pick"|"MapIndexed", _], _List, _],
+        Infinity]
+    ];
+
+    None
+  ];
+
+  result = Which[
+    (* DeclaredType takes precedence - show "Declared type:" label *)
+    !MatchQ[declaredType, None | _Missing],
+      Module[{dtLine = formatDeclaredType[declaredType, declaredTypeSource]},
+        If[StringQ[dtLine],
+          <|"contents" -> <|"kind" -> "markdown", "value" -> dtLine|>|>,
+          Null
+        ]
+      ],
+    (* Fall back to InferredPattern *)
+    inferredPattern === None || MatchQ[inferredPattern, None | _Missing],
+      Null,
+    True,
+      <|"contents" -> <|"kind" -> "markdown", "value" ->
+        "**Inferred Pattern:** `" <>
+        Quiet[ToString[inferredPattern, InputForm], {ToString::shdw}] <> "`"
+      |>|>
+  ];
+
+  {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> result |>}
+]]
+
+
+linearToMDSyntax[str_] :=
 Module[{},
   reassembleEmbeddedLinearSyntax[CodeTokenize[str]] /. {
     LeafNode[Token`Newline, _, _] -> "\n\n",
@@ -1165,9 +2015,196 @@ formatDefinitionPatterns[None] := None
 formatDefinitionPatterns[_] := None
 
 
-formatUsageCallPatterns[assoc_] := 
-Module[{res, parts, contextLine, patternsBlock},
-  
+(*
+Format a single doc-comment association as a Markdown block.
+Returns a string or None if the doc-comment is invalid.
+*)
+formatSingleDocComment[dc_Association] :=
+Module[{parts, descStr, retStr, retExpr, inputStrs},
+  parts = {};
+  descStr   = Lookup[dc, "Description", None];
+  inputStrs = Lookup[dc, "InputPatternStrings", {}];
+  retStr    = Lookup[dc, "ReturnPatternString", None];
+  retExpr   = Lookup[dc, "ReturnPattern", None];
+
+  If[StringQ[descStr] && StringLength[StringTrim[descStr]] > 0,
+    AppendTo[parts, escapeMarkdown[StringTrim[descStr]]]
+  ];
+
+  If[ListQ[inputStrs] && Length[inputStrs] > 0,
+    AppendTo[parts,
+      "**Parameters:** " <> StringRiffle["`" <> StringTrim[#] <> "`"& /@ inputStrs, ", "]]
+  ];
+
+  If[StringQ[retStr] && StringLength[StringTrim[retStr]] > 0,
+    AppendTo[parts, "**Returns:** `" <> StringTrim[retStr] <> "`"]
+  ];
+
+  If[Length[parts] == 0,
+    None,
+    StringRiffle[parts, "  \n"]  (* soft line break between desc, params, and return *)
+  ]
+]
+
+formatSingleDocComment[_] := None
+
+
+(*
+Format a list of doc-comment associations as a combined Markdown "Doc Comments" section.
+Applies description inheritance: the first overload in the list that has a non-None
+Description provides that description to all subsequent overloads whose Description is None.
+Returns a string, or None if there are no displayable comments.
+*)
+formatDocCommentsSection[docComments_List] :=
+Module[{inherited, filled, rendered, nonNone},
+  (*
+  Find the first non-None description in source order.
+  *)
+  inherited = Catch[
+    Scan[
+      Function[{dc},
+        Module[{desc},
+          desc = Lookup[dc, "Description", None];
+          If[StringQ[desc] && StringLength[StringTrim[desc]] > 0,
+            Throw[StringTrim[desc]]
+          ]
+        ]
+      ],
+      docComments
+    ];
+    None
+  ];
+
+  (*
+  Fill None descriptions with the inherited description.
+  *)
+  filled = If[StringQ[inherited],
+    Map[
+      Function[{dc},
+        If[AssociationQ[dc] && (Lookup[dc, "Description", None] === None || Lookup[dc, "Description", None] === ""),
+          Append[dc, "Description" -> inherited],
+          dc
+        ]
+      ],
+      docComments
+    ],
+    docComments
+  ];
+
+  rendered = formatSingleDocComment /@ filled;
+  nonNone  = Select[rendered, StringQ];
+  If[Length[nonNone] == 0,
+    None,
+    "---\n**Doc Comments**\n\n" <> StringRiffle[nonNone, "\n\n"]
+  ]
+]
+
+formatDocCommentsSection[_] := None
+
+
+(*
+Format a declared type annotation for display in hover markdown.
+Returns a string like "**Declared type:** `_Integer`", or None.
+Optional sourceFile adds "*(declared in file.ipwl)*" hint.
+Parametric forms (Blank[ParametricRef[...]]) are rendered as _[ref].
+*)
+(*
+  WL gotcha: Blank[T] in a function argument pattern matches anything with Head T, NOT the
+  literal expression Blank[T]. Use Which/Head checks to avoid this.
+*)
+formatDeclaredType[pat_, sourceFile_:None] :=
+Module[{str, hint},
+  If[pat === None || MatchQ[pat, _Missing | Null],
+    None,
+    hint = If[StringQ[sourceFile], " *(declared in " <> sourceFile <> ")*", ""];
+    Which[
+      (* Parametric form: Blank[ParametricRef[ref]] *)
+      Head[pat] === Blank && Length[pat] === 1 &&
+        Head[pat[[1]]] === LSPServer`TypeWL`ParametricRef,
+        "**Declared type:** `_[" <> ToString[pat[[1, 1]], InputForm] <> "]`" <> hint <> " *(parametric)*",
+      True,
+        str = Quiet[ToString[pat, InputForm], {ToString::shdw}];
+        If[StringQ[str] && StringLength[str] > 0,
+          "**Declared type:** `" <> str <> "`" <> hint,
+          None
+        ]
+    ]
+  ]
+]
+
+(*
+resolveParametricType[pat, argPatterns]
+  Given a DeclaredType (possibly Blank[ParametricRef[...]]) and a list of
+  argument patterns at the call site, returns the resolved concrete pattern
+  or the original pat if resolution is not possible.
+
+  Named ref: _[name] - not resolvable without call-site AST; returns pat unchanged.
+  Positional ref: _[n] - element head of arg n (1-based).
+  Non-parametric: pass through.
+*)
+(*
+  WL gotcha: cannot pattern-match on Blank[T] directly - use Which/Head instead.
+  Named ref returns itself (cannot resolve without call-site context).
+  Positional ref resolves from argPatterns[[n]] if possible.
+  Non-parametric passes through unchanged.
+*)
+resolveParametricType[pat_, argPatterns_List] :=
+  If[Head[pat] === Blank && Length[pat] === 1 &&
+     Head[pat[[1]]] === LSPServer`TypeWL`ParametricRef,
+    Module[{ref = pat[[1, 1]]},
+      Which[
+        (* Named ref: not resolvable at hover time without call-site context *)
+        StringQ[ref],
+          pat,
+        (* Positional ref: direct type of arg n *)
+        IntegerQ[ref],
+          If[ref >= 1 && ref <= Length[argPatterns],
+            argPatterns[[ref]],
+            pat
+          ],
+        (* Two-index ref: element/part type of arg n *)
+        ListQ[ref] && Length[ref] === 2 && IntegerQ[ref[[1]]] && IntegerQ[ref[[2]]],
+          Module[{n = ref[[1]]},
+            If[n >= 1 && n <= Length[argPatterns],
+              Module[{argPat = argPatterns[[n]]},
+                Which[
+                  (* {___T} or {__T} -> element head T *)
+                  Head[argPat] === List && Length[argPat] === 1 &&
+                    (Head[argPat[[1]]] === BlankNullSequence || Head[argPat[[1]]] === BlankSequence),
+                    If[Length[argPat[[1]]] === 1, Blank[argPat[[1, 1]]], Blank[]],
+                  True, pat
+                ]
+              ],
+              pat
+            ]
+          ],
+        True, pat
+      ]
+    ],
+    pat
+  ]
+
+
+(*
+Format an inferred variable pattern for display in hover markdown.
+Returns a string like "**Inferred Pattern:** `_Integer`", or None.
+*)
+formatInferredPattern[pat_] :=
+Module[{str},
+  If[pat === None || MatchQ[pat, _Missing | Null],
+    None,
+    str = Quiet[ToString[pat, InputForm], {ToString::shdw}];
+    If[StringQ[str] && StringLength[str] > 0,
+      "**Inferred Pattern:** `" <> str <> "`",
+      None
+    ]
+  ]
+]
+
+
+formatUsageCallPatterns[assoc_] :=
+Module[{res, parts, contextLine, patternsBlock, docSection, inferredPatLine},
+
   (* Build context line if available - show alias mapping when accessed via an alias context *)
   contextLine = With[{ctx = Lookup[assoc, "Context", None], alias = Lookup[assoc, "AliasContext", None]},
     If[StringQ[alias] && StringQ[ctx],
@@ -1175,7 +2212,21 @@ Module[{res, parts, contextLine, patternsBlock},
       formatContextLine[ctx]
     ]
   ];
-  
+
+  (* Build the doc-comments section (shown at the bottom) *)
+  docSection = formatDocCommentsSection[Lookup[assoc, "DocComments", {}]];
+
+  (* Declared type takes precedence over inferred pattern *)
+  declaredTypeLine = formatDeclaredType[
+    Lookup[assoc, "DeclaredType", None],
+    Lookup[assoc, "DeclaredTypeSource", None]
+  ];
+  (* Build the inferred-type line for variables - suppressed when DeclaredType is present *)
+  inferredPatLine = If[declaredTypeLine === None,
+    formatInferredPattern[Lookup[assoc, "InferredPattern", None]],
+    None
+  ];
+
   If[Not[TrueQ[assoc["FunctionInformation"]]],
     res = "No function information."
     ,
@@ -1185,59 +2236,76 @@ Module[{res, parts, contextLine, patternsBlock},
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
         AppendTo[parts, StringJoin[{assoc["Usage"]}]];
         AppendTo[parts, "_" <> assoc["DocumentationLink"] <> "_"];
+        If[StringQ[docSection], AppendTo[parts, docSection]];
         res = StringRiffle[parts, "\n\n"],
       "CrossFile",
         (* Cross-file workspace symbols *)
         parts = {};
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
-        
+
         If[StringQ[assoc["Usage"]],
           AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]]
         ];
-        
+
+        (* Declared type (from .ipwl) takes precedence over inferred pattern *)
+        If[StringQ[declaredTypeLine], AppendTo[parts, declaredTypeLine]];
+        (* Inferred type for variable assignments *)
+        If[StringQ[inferredPatLine], AppendTo[parts, inferredPatLine]];
+
         (* Definition patterns in a fenced code block *)
         patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
         If[StringQ[patternsBlock],
           AppendTo[parts, "**Definitions**"];
           AppendTo[parts, patternsBlock]
         ];
-        
+
+        If[StringQ[docSection], AppendTo[parts, docSection]];
+
         res = StringRiffle[parts, "\n\n"],
       "External",
         (* External package symbols *)
         parts = {};
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
         AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]];
-        
+
         (* Definition patterns in a fenced code block *)
         patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
         If[StringQ[patternsBlock],
           AppendTo[parts, "**Definitions**"];
           AppendTo[parts, patternsBlock]
         ];
-        
+
         (* Documentation link *)
         If[assoc["DocumentationLink"] =!= None,
           AppendTo[parts, "_" <> assoc["DocumentationLink"] <> "_"]
         ];
-        
+
+        If[StringQ[docSection], AppendTo[parts, docSection]];
+
         res = StringRiffle[parts, "\n\n"],
       _,
-        (* UserDefined symbols — defined in the current file *)
+        (* UserDefined symbols - defined in the current file *)
         parts = {};
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
-        
+
         If[StringQ[assoc["Usage"]],
           AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]]
         ];
-        
+
+        (* Declared type (from .ipwl) takes precedence over inferred pattern *)
+        If[StringQ[declaredTypeLine], AppendTo[parts, declaredTypeLine]];
+        (* Inferred type for variable assignments *)
+        If[StringQ[inferredPatLine], AppendTo[parts, inferredPatLine]];
+
         (* Definition patterns in a fenced code block *)
         patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
         If[StringQ[patternsBlock],
           AppendTo[parts, "**Definitions**"];
           AppendTo[parts, patternsBlock]
         ];
-        
+
+        If[StringQ[docSection], AppendTo[parts, docSection]];
+
         res = StringRiffle[parts, "\n\n"]
     ];
   ];
@@ -1246,7 +2314,7 @@ Module[{res, parts, contextLine, patternsBlock},
 ]
 
 
-endsWithOddBackslashesQ[str_String] := 
+endsWithOddBackslashesQ[str_String] :=
   StringMatchQ[str, RegularExpression[".*(?<!\\\\)\\\\(\\\\\\\\)*"]]
 
 convertSegment[segment_String /; StringMatchQ[segment, "\"" ~~ ___ ~~ "\""]] :=
@@ -1356,7 +2424,7 @@ interpretBox[StyleBox[___]] := (
   "\[UnknownGlyph]"
 )
 
-(* 
+(*
     This a workaround for bug #412513, which is a typo in the usage message in the BeginPackage function.
     When bug #412513 is fix, we can remove this workaround.
 *)
@@ -1505,12 +2573,12 @@ escapeMarkdown[s_String] :=
     Only escape characters that have special meaning in markdown and could break rendering.
     VSCode's markdown renderer is fairly tolerant, so we only need to escape:
     - Backticks (code spans)
-    - Asterisks (bold/italic) 
+    - Asterisks (bold/italic)
     - Underscores (bold/italic)
     - HTML special chars (< > &)
-    
-    We do NOT need to escape: () [] {} # + - . ! 
-    These only have special meaning in specific contexts and escaping them 
+
+    We do NOT need to escape: () [] {} # + - . !
+    These only have special meaning in specific contexts and escaping them
     makes the text harder to read.
     *)
     "`" -> "\\`",
@@ -1651,12 +2719,12 @@ Module[{embeddedLinearSyntax, openerPoss, closerPoss},
   ]
 ]]
 
-$messageNamePattern = CallNode[LeafNode[Symbol, "MessageName", _], 
+$messageNamePattern = CallNode[LeafNode[Symbol, "MessageName", _],
   {
-    LeafNode[Symbol, _, _], 
+    LeafNode[Symbol, _, _],
     LeafNode[String, _, _],
     ___
-  }, 
+  },
   _
 ];
 
