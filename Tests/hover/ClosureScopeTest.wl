@@ -25,8 +25,8 @@ Module[{x},
 
 (*  Case D: scope bleed check.
     x inside the module is Integer. x at file scope should have no type.
-    needsStr expects _String; called with file-scope x should NOT warn;
-    called with module-local Integer x it SHOULD warn. *)
+    Hover test (below) checks module-local x. Diagnostic tests are in ClosureScopeDiag.wlt:
+    needsStr[x] at file scope should NOT warn; needsStr[x] inside Module SHOULD warn. *)
 needsStr[x_String] := x
 
 Module[{x = 5},
