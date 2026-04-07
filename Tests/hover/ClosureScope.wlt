@@ -1,6 +1,7 @@
 Get[FileNameJoin[{DirectoryName[$TestFileName], "Init.wl"}]];
 initFunction[FileNameJoin[{DirectoryName[$TestFileName], "ClosureScopeTest.wl"}]];
 uri = LocalObjects`PathToURI[FileNameJoin[{DirectoryName[$TestFileName], "ClosureScopeTest.wl"}]];
+(* Populate the PacletIndex for this file so that cross-function pattern inference works. *)
 LSPServer`PacletIndex`UpdateFileIndex[uri, ReadString[FileNameJoin[{DirectoryName[$TestFileName], "ClosureScopeTest.wl"}]]];
 
 
