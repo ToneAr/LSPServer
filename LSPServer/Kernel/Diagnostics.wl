@@ -1744,6 +1744,11 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
               Throw[{}]
             ];
 
+            (* Strip Rule/RuleDelayed option arguments — they do not count toward
+               positional arity and should not be matched against typed parameters. *)
+            callArgs = Select[callArgs,
+              !MatchQ[#, CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], _, _]] &];
+
             (*
             Check arity: warn when no overload accepts the call\'s argument count.
             Variadic overloads (BlankSequence / BlankNullSequence / Optional) are
