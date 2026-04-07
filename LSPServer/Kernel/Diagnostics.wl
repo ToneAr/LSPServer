@@ -677,74 +677,6 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   ]; (* end If[$WorkspaceRootPath =!= None] *)
 
   (*
-  Check for function overloads missing doc-comments.
-
-  For each symbol that has at least one "function" definition with a DocComment,
-  we flag any other "function" definitions for that symbol in this file that
-  lack a DocComment.  This allows users who adopt doc-comments to be reminded
-  to document every overload.
-
-  We only warn if at least one overload in the file already has a DocComment,
-  so we don't spam projects that haven't opted in at all.
-  *)
-  Module[{fileDefsRaw, fileDefsBySymbol, docCommentLints},
-
-    (*
-    Pull all function definitions that belong to this file from the index.
-    *)
-    fileDefsRaw = Flatten[
-      Function[{symName},
-        Module[{defs},
-          defs = GetSymbolDefinitions[symName];
-          Select[defs, #["uri"] === uri && #["kind"] === "function" &] /.
-            d_Association :> Append[d, "symbolName" -> symName]
-        ]
-      ] /@ GetPacletSymbols[],
-      1
-    ];
-
-    (*
-    Group by symbol name.
-    *)
-    fileDefsBySymbol = GroupBy[fileDefsRaw, #["symbolName"]&];
-
-    docCommentLints = Flatten[
-      KeyValueMap[
-        Function[{symName, defs},
-          Module[{hasAnyDocComment, missing},
-            (*
-            Only warn when at least one overload in this file is documented.
-            *)
-            hasAnyDocComment = AnyTrue[defs, AssociationQ[#["DocComment"]] &];
-            If[!hasAnyDocComment,
-              Return[{}]
-            ];
-            (*
-            Flag every overload that is missing a doc-comment.
-            *)
-            missing = Select[defs, !AssociationQ[#["DocComment"]] &];
-            InspectionObject[
-              "MissingDocComment",
-              "Function \"" <> symName <> "\" overload is missing a doc-comment. " <>
-                "Add a (* Return: _Pattern *) comment (or (* Description: ... * Return: ... *)) immediately before this definition.",
-              "Warning",
-              <|
-                Source -> #["source"],
-                ConfidenceLevel -> 0.9,
-                "Argument" -> symName
-              |>
-            ]& /@ missing
-          ]
-        ],
-        fileDefsBySymbol
-      ],
-      1
-    ];
-
-    workspaceLints = Join[workspaceLints, docCommentLints]
-  ];
-
-  (*
   Check function call sites against doc-comment Param: input patterns.
 
   For every function call f[arg1, ..., argN] in the file where:
@@ -879,7 +811,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
         If[MatchQ[node, CallNode[LeafNode[Symbol, _String, _], _List, _]],
           With[{fname = node[[1, 2]]},
             Which[
-              (* Builtin with a known return type — pick the best arity-matching overload *)
+              (* Builtin with a known return type - pick the best arity-matching overload *)
               KeyExistsQ[$BuiltinPatterns, fname],
                 With[{ovs = $BuiltinPatterns[fname], nArgs = Length[node[[2]]]},
                   Module[{bestOv},
@@ -1195,7 +1127,62 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       *)
       localVarMap =
         Module[{rawEntries, convergenceEntries, condEntries, paramEntries,
-                iterEntries, mapParamEntries, allEntries},
+                iterEntries, mapParamEntries, allEntries,
+                closureVarRanges, findEnclosingClosureForVar},
+          (* Pre-scan: build closureVarRanges — maps each declared var name to the
+             list of source ranges of closures (Module/Block/With) that declare it.
+             Used to scope rawEntries and convergenceEntries to their closure. *)
+          closureVarRanges = Association[];
+          Scan[
+            Function[{mbwNode},
+              Catch[
+                Module[{varListNode, closureSrc, varList},
+                  If[Length[mbwNode[[2]]] < 1, Throw[Null, "next"]];
+                  varListNode = mbwNode[[2, 1]];
+                  If[!MatchQ[varListNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+                    Throw[Null, "next"]
+                  ];
+                  closureSrc = Quiet[mbwNode[[3, Key[Source]]]];
+                  If[!MatchQ[closureSrc, {{_Integer, _Integer}, {_Integer, _Integer}}],
+                    Throw[Null, "next"]
+                  ];
+                  varList = varListNode[[2]];
+                  Scan[Function[vn,
+                    Catch[
+                      Module[{vName},
+                        Which[
+                          MatchQ[vn, LeafNode[Symbol, _, _]],
+                            vName = vn[[2]],
+                          MatchQ[vn, CallNode[LeafNode[Symbol, "Set", _],
+                                              {LeafNode[Symbol, _, _], _}, _]],
+                            vName = vn[[2, 1, 2]],
+                          True, Throw[Null, "next"]
+                        ];
+                        closureVarRanges[vName] = Append[
+                          Lookup[closureVarRanges, vName, {}], closureSrc
+                        ]
+                      ]
+                    , "next"]
+                  ], varList]
+                ]
+              , "next"]
+            ],
+            Cases[ast, CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
+                  Infinity]
+          ];
+          (* Returns the innermost closure range that declares varName and contains line.
+             Returns None if line is not inside any closure that declares varName. *)
+          findEnclosingClosureForVar = Function[{varName, line},
+            Module[{ranges, candidates},
+              ranges = Lookup[closureVarRanges, varName, {}];
+              candidates = Select[ranges,
+                Function[r, r[[1, 1]] <= line <= r[[2, 1]]]
+              ];
+              If[Length[candidates] === 0, None,
+                Last[SortBy[candidates, #[[1, 1]] &]]
+              ]
+            ]
+          ];
           rawEntries = Cases[ast,
             CallNode[
               LeafNode[Symbol, "Set", _],
@@ -1212,7 +1199,8 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                    entry before the usage, and Missing["Unknown"] causes the check to pass. *)
                 assignLine = meta[[Key[Source], 1, 1]];
                 assignBranch = findEnclosingBranch[assignLine];
-                {varName, assignLine, sampleVal, assignBranch}
+                {varName, assignLine, sampleVal, assignBranch,
+                 findEnclosingClosureForVar[varName, assignLine]}
               ],
             Infinity
           ];
@@ -1257,7 +1245,8 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                             If[!MemberQ[branchVals, Missing["Unknown"]] &&
                                Length[DeleteDuplicates[Head /@ branchVals]] === 1,
                               (* All branches agree on Head (same type) *)
-                              {v, afterLine, branchVals[[1]], None},
+                              {v, afterLine, branchVals[[1]], None,
+                               findEnclosingClosureForVar[v, afterLine]},
                               Nothing
                             ]
                           ]
@@ -1275,9 +1264,9 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
           (* Condition-narrowing entries: for each If/Which/Switch, analyse the guard
              expression(s) to extract variable type constraints and inject them as
              virtual assignments at the start of each branch body.  This lets e.g.
-               If[StringQ[x], f[x], ...]  →  x is seen as String inside the true branch
-               If[x == 3, f[x], ...]      →  x is seen as integer 3 inside the true branch
-               Switch[x, _Integer, f[x]]  →  x is seen as Integer inside that branch
+               If[StringQ[x], f[x], ...]  ->  x is seen as String inside the true branch
+               If[x == 3, f[x], ...]      ->  x is seen as integer 3 inside the true branch
+               Switch[x, _Integer, f[x]]  ->  x is seen as Integer inside that branch
 
              For If[cond, t, f]:
                - True branch (t): apply positive constraints from cond.
@@ -1390,8 +1379,8 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
             1
           ];
 
-          (* Iterator-variable entries: Table/Do/Sum/Product/Array {i, lo, hi} → i is Integer;
-             {i, listExpr} → i gets element type of listExpr.
+          (* Iterator-variable entries: Table/Do/Sum/Product/Array {i, lo, hi} -> i is Integer;
+             {i, listExpr} -> i gets element type of listExpr.
              Entries are scoped to the whole iterator-call range. *)
           iterEntries = Flatten[
             Cases[ast,
@@ -1449,12 +1438,18 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
             1
           ];
 
+          (* Append closureRange = None to entry types that are already scope-guarded
+             by branchRange or defSrc (condEntries, paramEntries, iterEntries, mapParamEntries). *)
+          condEntries      = Map[Append[#, None] &, condEntries];
+          paramEntries     = Map[Append[#, None] &, paramEntries];
+          iterEntries      = Map[Append[#, None] &, iterEntries];
+          mapParamEntries  = Map[Append[#, None] &, mapParamEntries];
           allEntries = Join[condEntries, rawEntries, convergenceEntries,
                             paramEntries, iterEntries, mapParamEntries];
           GroupBy[
             allEntries,
             First,
-            Function[entries, SortBy[Map[Function[e, {e[[2]], e[[3]], e[[4]]}], entries], First]]
+            Function[entries, SortBy[Map[Function[e, {e[[2]], e[[3]], e[[4]], e[[5]]}], entries], First]]
           ]
         ];
 
@@ -1562,9 +1557,31 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                 (e[[3]] === None || (
                   MatchQ[e[[3]], {{_Integer, _Integer}, {_Integer, _Integer}}] &&
                   e[[3, 1, 1]] <= argLine <= e[[3, 2, 1]]
+                )) &&
+                (e[[4]] === None || (
+                  MatchQ[e[[4]], {{_Integer, _Integer}, {_Integer, _Integer}}] &&
+                  e[[4, 1, 1]] <= argLine <= e[[4, 2, 1]]
                 ))
               ]];
               If[Length[valid] > 0, Last[valid][[2]], Missing["Unknown"]]
+            ],
+          (* Part[expr, i] — element sample value of the collection *)
+          MatchQ[argNode, CallNode[LeafNode[Symbol, "Part", _], {_, __}, _]],
+            inferListElementSample[argNode[[2, 1]]],
+          (* Lookup[assoc, key] — a sample value from the association's values *)
+          MatchQ[argNode, CallNode[LeafNode[Symbol, "Lookup", _], {_, _, ___}, _]],
+            Module[{assocArgD = argNode[[2, 1]], valSamples},
+              Which[
+                MatchQ[assocArgD, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
+                  valSamples = DeleteDuplicates[DeleteCases[
+                    Cases[assocArgD[[2]],
+                      CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, valNode_}, _] :>
+                        inferArgSampleValue[valNode],
+                      1],
+                    _Missing]];
+                  If[Length[valSamples] === 1, valSamples[[1]], Missing["Unknown"]],
+                True, Missing["Unknown"]
+              ]
             ],
           True, Missing["Unknown"]
         ]
@@ -1909,7 +1926,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       (* Convert a Blank-typed pattern expression to a representative concrete value.
          Returns Missing["Unknown"] for patterns that can't be sampled this way.
          NOTE: Uses === (structural equality) NOT MatchQ, because MatchQ[Blank[X], Blank[]]
-         is always True (Blank[] matches anything) — SameQ checks the expression itself. *)
+         is always True (Blank[] matches anything) - SameQ checks the expression itself. *)
       patternToSampleValue = Function[{pat},
         Which[
           pat === Blank[],            Missing["Unknown"],
@@ -2079,7 +2096,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
               declEntry = SelectFirst[allDefs,
                 #["uri"] === uri && #["kind"] === "declaration" &&
                 !MatchQ[Lookup[#, "DeclaredType", None], None | _Missing] &&
-                (* Skip parametric — use Head check, not Blank[ParametricRef[_]] *)
+                (* Skip parametric - use Head check, not Blank[ParametricRef[_]] *)
                 !(Head[Lookup[#, "DeclaredType", None]] === Blank &&
                   Length[Lookup[#, "DeclaredType", None]] === 1 &&
                   Head[Lookup[#, "DeclaredType", None][[1]]] === LSPServer`TypeWL`ParametricRef) &,
