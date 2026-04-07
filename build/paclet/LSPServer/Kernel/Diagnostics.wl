@@ -1546,7 +1546,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
              are always visible. *)
           MatchQ[argNode, LeafNode[Symbol, _String, _]] && KeyExistsQ[localVarMap, argNode[[2]]],
             Module[{varName = argNode[[2]], entries, argLine, valid},
-              entries = localVarMap[varName];  (* sorted {{line, sampleVal, branchRange}, ...} *)
+              entries = localVarMap[varName];  (* sorted {{line, sampleVal, branchRange, closureRange}, ...} *)
               argLine = argNode[[3, Key[Source], 1, 1]];
               valid = Select[entries, Function[e,
                 e[[1]] <= argLine &&
