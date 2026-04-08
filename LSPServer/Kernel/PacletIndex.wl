@@ -38,6 +38,7 @@ GetKernelContextsCached
 GetSymbolUsages
 GetContextAliases
 ProcessPendingIndexFiles
+GetLoadedDependencySymbols
 
 $PacletIndex
 $WorkspaceRoot
@@ -143,13 +144,13 @@ Module[{pathParts},
 
 InitializePacletIndex[workspaceRoot_String] :=
 Module[{files, filteredFiles},
-  
+
   If[$Debug2,
     log["InitializePacletIndex: starting for ", workspaceRoot]
   ];
-  
+
   $WorkspaceRoot = workspaceRoot;
-  
+
   (*
   Reset the index
   *)
@@ -159,21 +160,21 @@ Module[{files, filteredFiles},
     "Contexts" -> <||>,
     "Dependencies" -> {}
   |>;
-  
+
   (*
   Find all Wolfram Language files in the workspace
   *)
   files = FileNames[{"*.wl", "*.m", "*.wls"}, workspaceRoot, Infinity];
-  
+
   (*
   Filter out files in excluded directories (build*, node_modules, .git, etc.)
   *)
   filteredFiles = Select[files, !shouldExcludeFile[#]&];
-  
+
   If[$Debug2,
     log["InitializePacletIndex: found ", Length[files], " files, ", Length[filteredFiles], " after filtering"]
   ];
-  
+
   (*
   Queue files for background indexing so the initialized handler can return
   immediately and the server can begin accepting requests
@@ -217,73 +218,73 @@ indexFile[filePath_String] :=
 Catch[
 Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps,
   contextLoads, explicitContextRefs, packageContext, fileAliases},
-  
+
   If[$Debug2,
     log["indexFile: ", filePath]
   ];
-  
+
   (*
   Read the file
   *)
   text = Quiet[Import[filePath, "Text"]];
-  
+
   If[!StringQ[text],
     If[$Debug2, log["indexFile: failed to read file"]];
     Throw[Null]
   ];
-  
+
   (*
   Parse the file
   *)
   cst = Quiet[CodeConcreteParse[text]];
-  
+
   If[FailureQ[cst],
     If[$Debug2, log["indexFile: failed to parse file"]];
     Throw[Null]
   ];
-  
+
   (*
   Abstract the CST to get definitions
   *)
   ast = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[cst]]];
-  
+
   If[FailureQ[ast],
     If[$Debug2, log["indexFile: failed to abstract file"]];
     Throw[Null]
   ];
-  
+
   uri = "file://" <> filePath;
-  
+
   (*
   Extract definitions from the AST
   *)
   definitions = extractDefinitions[ast, uri];
-  
+
   (*
   Extract usage messages
   *)
   usages = extractUsages[ast, uri];
-  
+
   (*
   Extract symbol references
   *)
   symbols = extractSymbolReferences[cst, uri];
-  
+
   (*
   Extract package dependencies (from BeginPackage and Needs)
   *)
   fileDeps = extractDependencies[ast];
-  
+
   (*
   Extract detailed context loading information
   *)
   contextLoads = extractContextLoads[ast];
-  
+
   (*
   Extract explicit context references (e.g., Developer`ToPackedArray)
   *)
   explicitContextRefs = extractExplicitContextRefs[cst];
-  
+
   (*
   Extract the main package context if this is a package file
   *)
@@ -324,18 +325,18 @@ Uses grouped-by-name operations instead of per-item AppendTo to avoid O(n^2).
 *)
 addFileToIndex[uri_, definitions_, usages_, symbols_, fileDeps_, contextLoads_, explicitContextRefs_, packageContext_, fileAliases_:{}] :=
 Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
-  
+
   fileSymbolsBag = Internal`Bag[];
-  
+
   (*
   Group definitions by symbol name for batch insert
   *)
   defsByName = GroupBy[definitions, #["name"]&];
-  
+
   KeyValueMap[
     Function[{name, defs},
       Internal`StuffBag[fileSymbolsBag, name];
-      
+
       If[!KeyExistsQ[$PacletIndex["Symbols"], name],
         $PacletIndex["Symbols", name] = <|
           "Definitions" -> {},
@@ -343,13 +344,13 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
           "Usages" -> {}
         |>
       ];
-      
+
       (* Batch append all definitions for this symbol at once *)
       $PacletIndex["Symbols", name, "Definitions"] = Join[
         $PacletIndex["Symbols", name, "Definitions"],
         KeyDrop[#, "name"]& /@ defs
       ];
-      
+
       (* Track by context — use first definition's context *)
       Module[{ctx},
         ctx = defs[[1]]["context"];
@@ -365,12 +366,12 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
     ],
     defsByName
   ];
-  
+
   (*
   Group usages by symbol name for batch insert
   *)
   usagesByName = GroupBy[usages, #["name"]&];
-  
+
   KeyValueMap[
     Function[{name, usageList},
       If[KeyExistsQ[$PacletIndex["Symbols"], name],
@@ -383,12 +384,12 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
     ],
     usagesByName
   ];
-  
+
   (*
   Group references by symbol name for batch insert
   *)
   refsByName = GroupBy[symbols, #["name"]&];
-  
+
   KeyValueMap[
     Function[{name, refs},
       If[!KeyExistsQ[$PacletIndex["Symbols"], name],
@@ -398,7 +399,7 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
           "Usages" -> {}
         |>
       ];
-      
+
       (* Batch append all references for this symbol at once *)
       $PacletIndex["Symbols", name, "References"] = Join[
         $PacletIndex["Symbols", name, "References"],
@@ -407,7 +408,7 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
     ],
     refsByName
   ];
-  
+
   (*
   Track file in index with enhanced context information
   *)
@@ -453,7 +454,7 @@ Also extracts Needs["Package`"] calls at the top level.
 *)
 extractDependencies[ast_] :=
 Module[{packageDeps, needsDeps, needsAliasDeps, allDeps},
-  
+
   (*
   Extract from PackageNode tags - dependencies are in the List following the main context
   *)
@@ -462,7 +463,7 @@ Module[{packageDeps, needsDeps, needsAliasDeps, allDeps},
       Cases[deps, LeafNode[String, s_String, _] :> abstractContextString[s]],
     {0, 2}
   ] // Flatten;
-  
+
   (*
   Also extract from Needs["Package`"] and Get["Package`"] calls anywhere in the file.
   These may be at top level, inside PackageNode, inside ContextNode (Private), etc.
@@ -486,7 +487,7 @@ Module[{packageDeps, needsDeps, needsAliasDeps, allDeps},
   ];
 
   allDeps = DeleteDuplicates[Join[packageDeps, needsDeps, needsAliasDeps]];
-  
+
   (* Filter out None values from failed parsing *)
   Select[allDeps, StringQ]
 ]
@@ -499,18 +500,18 @@ Returns a list of context load records with source locations.
 extractContextLoads[ast_] :=
 Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageContext},
   loads = {};
-  
+
   (*
   Extract BeginPackage context and its dependencies
   *)
   packageLoads = Cases[ast,
-    PackageNode[{LeafNode[String, ctx_String, KeyValuePattern[Source -> src_]], rest___}, _, _] :> 
+    PackageNode[{LeafNode[String, ctx_String, KeyValuePattern[Source -> src_]], rest___}, _, _] :>
       Module[{mainCtx, deps},
         mainCtx = abstractContextString[ctx];
         (* The main package context is implicitly "loaded" *)
-        deps = Cases[{rest}, 
+        deps = Cases[{rest},
           CallNode[LeafNode[Symbol, "List", _], depList_List, _] :>
-            Cases[depList, LeafNode[String, s_String, KeyValuePattern[Source -> depSrc_]] :> 
+            Cases[depList, LeafNode[String, s_String, KeyValuePattern[Source -> depSrc_]] :>
               <| "context" -> abstractContextString[s], "source" -> depSrc, "method" -> "BeginPackage" |>
             ],
           {1}
@@ -520,7 +521,7 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageConte
       ],
     {0, 2}
   ] // Flatten;
-  
+
   (*
   Extract Needs["Package`"] calls with source locations
   *)
@@ -544,7 +545,7 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageConte
   ];
 
   needsLoads = Join[needsLoads, needsAliasLoads];
-  
+
   (*
   Extract Get["Package`"] calls with source locations
   *)
@@ -553,13 +554,13 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageConte
       <| "context" -> abstractContextString[s], "source" -> src, "method" -> "Get" |>,
     Infinity
   ];
-  
+
   loads = Join[packageLoads, needsLoads, getLoads];
-  
+
   (* Filter out None values and sort by source location *)
   loads = Select[loads, StringQ[#["context"]] &];
   loads = SortBy[loads, #["source"][[1]] &];
-  
+
   loads
 ]
 
@@ -607,7 +608,7 @@ Module[{refs},
       ],
     Infinity
   ];
-  
+
   refs
 ]
 
@@ -621,7 +622,7 @@ Module[{packageContexts},
     PackageNode[{LeafNode[String, ctx_String, _], ___}, _, _] :> abstractContextString[ctx],
     {0, 2}
   ];
-  
+
   If[Length[packageContexts] > 0,
     First[packageContexts],
     None
@@ -636,18 +637,18 @@ Only loads packages that are likely system/external packages.
 *)
 loadExternalDependencies[deps_List] :=
 Module[{externalDeps, workspaceContexts},
-  
+
   (*
   Get contexts that are defined within the workspace - don't try to load these
   *)
   workspaceContexts = Keys[$PacletIndex["Contexts"]];
-  
+
   (*
   Filter to external dependencies:
   - Not in workspace contexts
   - Not already a subcontext of a workspace context
   *)
-  externalDeps = Select[deps, 
+  externalDeps = Select[deps,
     Function[{dep},
       And[
         !MemberQ[workspaceContexts, dep],
@@ -655,7 +656,7 @@ Module[{externalDeps, workspaceContexts},
       ]
     ]
   ];
-  
+
   (*
   Try to load each external dependency
   *)
@@ -689,10 +690,10 @@ Arguments:
 *)
 walkASTForDefinitions[bag_, node_, currentContext_, inPrivate_, uri_] :=
 Module[{newContext, contextStrings, newInPrivate, packageContext},
-  
+
   newContext = currentContext;
   newInPrivate = inPrivate;
-  
+
   (*
   Track context from PackageNode/ContextNode
   The AST abstracts BeginPackage/EndPackage into PackageNode and Begin/End into ContextNode
@@ -706,7 +707,7 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
         newContext = contextStrings[[1]];
         (* Reset private flag when entering a new package *)
         newInPrivate = False;
-        
+
         (*
         Extract public symbol declarations from the package
         These are symbols that appear between BeginPackage and Begin["`Private`"]
@@ -721,7 +722,7 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
       If[Length[contextStrings] > 0,
         Module[{subContext, baseContext},
           subContext = contextStrings[[1]];
-          newContext = If[StringQ[currentContext], 
+          newContext = If[StringQ[currentContext],
             (* Join contexts properly *)
             (* e.g., "MyPackage`" + "`Private`" -> "MyPackage`Private`" *)
             If[StringStartsQ[subContext, "`"],
@@ -743,7 +744,7 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
         ]
       ]
   ];
-  
+
   (*
   Extract definitions from Set/SetDelayed
   Note: Pattern variables in MatchQ don't bind, so we extract values directly with [[2]]
@@ -792,7 +793,7 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
     (*
     Options definition: Options[f] = {...}
     *)
-    MatchQ[node, CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _], 
+    MatchQ[node, CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _],
       {CallNode[LeafNode[Symbol, "Options", _], {LeafNode[Symbol, _String, _]}, _], _}, _]],
       Internal`StuffBag[bag, <|
         "name" -> node[[2, 1, 2, 1, 2]],
@@ -806,7 +807,7 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
     (*
     Attributes definition: Attributes[f] = {...}
     *)
-    MatchQ[node, CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _], 
+    MatchQ[node, CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _],
       {CallNode[LeafNode[Symbol, "Attributes", _], {LeafNode[Symbol, _String, _]}, _], _}, _]],
       Internal`StuffBag[bag, <|
         "name" -> node[[2, 1, 2, 1, 2]],
@@ -817,7 +818,7 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
         "visibility" -> If[newInPrivate, "private", "public"]
       |>]
   ];
-  
+
   (*
   Recurse into children
   Note: Switch patterns do NOT bind variables, so we must use node[[2]] directly
@@ -848,10 +849,10 @@ Symbols declared here form the public API of the package
 
 Pattern:
   BeginPackage["MyPackage`"]
-  
+
   myFunction::usage = "..."   <- public declaration
   myConstant                  <- public declaration (just mentioning creates it)
-  
+
   Begin["`Private`"]
   ...
   End[]
@@ -859,25 +860,25 @@ Pattern:
 *)
 extractPublicDeclarations[bag_, packageNode_, packageContext_, uri_] :=
 Module[{children, publicSection, publicSymbols, privateStart},
-  
+
   children = packageNode[[2]];
-  
+
   (*
   Find the index of the first ContextNode (Begin["`Private`"])
   Everything before that is public declarations
   *)
-  privateStart = FirstPosition[children, 
-    ContextNode[{LeafNode[String, s_String, _], ___}, _, _] /; 
+  privateStart = FirstPosition[children,
+    ContextNode[{LeafNode[String, s_String, _], ___}, _, _] /;
       StringContainsQ[Quiet[ToExpression[s]], "Private"],
     {Length[children] + 1},
     {1}
   ][[1]];
-  
+
   (*
   Get the public section (before Private)
   *)
   publicSection = Take[children, privateStart - 1];
-  
+
   (*
   Find all symbol references in the public section
   These are the declared public API
@@ -888,7 +889,7 @@ Module[{children, publicSection, publicSymbols, privateStart},
       !KeyExistsQ[$nonAPISymbols, name],
     Infinity
   ];
-  
+
   (*
   Add each public symbol as a declaration
   *)
@@ -897,7 +898,7 @@ Module[{children, publicSection, publicSymbols, privateStart},
       Module[{name, src},
         name = sym[[2]];
         src = sym[[3, Key[Source]]];
-        
+
         Internal`StuffBag[bag, <|
           "name" -> name,
           "uri" -> uri,
@@ -930,26 +931,26 @@ Extract usage messages from AST
 *)
 extractUsages[ast_, uri_] :=
 Module[{usages},
-  usages = Cases[ast, 
+  usages = Cases[ast,
     CallNode[
       LeafNode[Symbol, "Set" | "SetDelayed", _],
       {
         CallNode[
-          LeafNode[Symbol, "MessageName", _], 
+          LeafNode[Symbol, "MessageName", _],
           {
-            LeafNode[Symbol, name_String, _], 
+            LeafNode[Symbol, name_String, _],
             LeafNode[String, "\"usage\"", _],
             ___
-          }, 
+          },
           _
-        ], 
+        ],
         LeafNode[String, msg_String, _]
-      }, 
+      },
       _
-    ] :> <| "name" -> name, "usage" -> Quiet[ToExpression[msg], Syntax::stresc] |>, 
+    ] :> <| "name" -> name, "usage" -> Quiet[ToExpression[msg], Syntax::stresc] |>,
     Infinity
   ];
-  
+
   Select[usages, StringQ[#["usage"]]&]
 ]
 
@@ -959,7 +960,7 @@ Extract symbol references from CST
 *)
 extractSymbolReferences[cst_, uri_] :=
 Module[{symbols},
-  symbols = Cases[cst, 
+  symbols = Cases[cst,
     LeafNode[Symbol, name_String, KeyValuePattern[Source -> src_]] :> <|
       "name" -> name,
       "uri" -> uri,
@@ -967,7 +968,7 @@ Module[{symbols},
     |>,
     Infinity
   ];
-  
+
   symbols
 ]
 
@@ -979,7 +980,7 @@ UpdateFileIndex[uri_String, text_String] :=
 Catch[
 Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbols, fileDeps,
   contextLoads, explicitContextRefs, packageContext, fileAliases},
-  
+
   (*
   Skip files in excluded directories
   *)
@@ -990,40 +991,40 @@ Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbol
     ];
     Throw[Null]
   ];
-  
+
   If[$Debug2,
     log["UpdateFileIndex: ", uri]
   ];
-  
+
   (*
   Remove old entries for this file
   *)
   RemoveFileFromIndex[uri];
-  
+
   (*
   Parse the new content
   *)
   cst = Quiet[CodeConcreteParse[text]];
-  
+
   If[FailureQ[cst],
     If[$Debug2, log["UpdateFileIndex: failed to parse"]];
     Throw[Null]
   ];
-  
+
   ast = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[cst]]];
-  
+
   If[FailureQ[ast],
     If[$Debug2, log["UpdateFileIndex: failed to abstract"]];
     Throw[Null]
   ];
-  
+
   (*
   Extract and add new entries
   *)
   definitions = extractDefinitions[ast, uri];
   usages = extractUsages[ast, uri];
   symbols = extractSymbolReferences[cst, uri];
-  
+
   (*
   Extract package dependencies and load external ones
   *)
@@ -1067,30 +1068,30 @@ Remove a file from the index
 *)
 RemoveFileFromIndex[uri_String] :=
 Module[{fileEntry, fileSymbols},
-  
+
   fileEntry = Lookup[$PacletIndex["Files"], uri, Null];
-  
+
   If[fileEntry === Null,
     Return[Null]
   ];
-  
+
   fileSymbols = fileEntry["Symbols"];
-  
+
   (*
   Remove definitions and references from this file
   *)
   Scan[
     Function[{symName},
       If[KeyExistsQ[$PacletIndex["Symbols"], symName],
-        $PacletIndex["Symbols", symName, "Definitions"] = 
+        $PacletIndex["Symbols", symName, "Definitions"] =
           DeleteCases[$PacletIndex["Symbols", symName, "Definitions"], KeyValuePattern["uri" -> uri]];
-        $PacletIndex["Symbols", symName, "References"] = 
+        $PacletIndex["Symbols", symName, "References"] =
           DeleteCases[$PacletIndex["Symbols", symName, "References"], KeyValuePattern["uri" -> uri]];
-        
+
         (*
         Remove symbol entry if empty
         *)
-        If[$PacletIndex["Symbols", symName, "Definitions"] === {} && 
+        If[$PacletIndex["Symbols", symName, "Definitions"] === {} &&
            $PacletIndex["Symbols", symName, "References"] === {} &&
            $PacletIndex["Symbols", symName, "Usages"] === {},
           $PacletIndex["Symbols", symName] =.
@@ -1099,12 +1100,12 @@ Module[{fileEntry, fileSymbols},
     ],
     fileSymbols
   ];
-  
+
   (*
   Remove file entry
   *)
   $PacletIndex["Files", uri] =.;
-  
+
   (*
   Recompute global Dependencies from remaining files to prevent stale entries
   *)
@@ -1123,7 +1124,7 @@ Module[{fileEntry, fileSymbols},
       ]
     ]
   ];
-  
+
   (*
   Clean up Contexts: remove symbol names that no longer have any definitions
   *)
@@ -1162,12 +1163,12 @@ Get symbols for completion with optional prefix filter
 GetSymbolsForCompletion[prefix_String:""] :=
 Module[{allSymbols, filtered},
   allSymbols = Keys[$PacletIndex["Symbols"]];
-  
+
   If[prefix === "",
     filtered = allSymbols,
     filtered = Select[allSymbols, StringStartsQ[#, prefix, IgnoreCase -> True]&]
   ];
-  
+
   (*
   Return symbols with their kind and usage info
   *)
@@ -1177,7 +1178,7 @@ Module[{allSymbols, filtered},
       defs = symData["Definitions"];
       kind = If[Length[defs] > 0, defs[[1]]["kind"], "unknown"];
       usage = If[Length[symData["Usages"]] > 0, symData["Usages"][[1]], None];
-      
+
       <|
         "name" -> sym,
         "kind" -> kind,
@@ -1203,12 +1204,36 @@ Module[{},
 
 
 (*
+Get short-name symbols from dependency contexts that are actually loaded in the kernel.
+Used by UndefinedSymbol diagnostics to suppress false positives for symbols
+from BeginPackage/Needs dependencies that are available at runtime.
+*)
+GetLoadedDependencySymbols[uri_String] :=
+Module[{fileData, contextLoads, depContexts, kernelContexts, loadedCtxs},
+  fileData = Lookup[$PacletIndex["Files"], uri, <||>];
+  If[fileData === <||>, Return[{}]];
+
+  contextLoads = Lookup[fileData, "ContextLoads", {}];
+  depContexts = DeleteDuplicates[Cases[#["context"]& /@ contextLoads, _String]];
+
+  (* Only include contexts actually present in the kernel — i.e. successfully loaded *)
+  kernelContexts = GetKernelContextsCached[];
+  loadedCtxs = Select[depContexts, MemberQ[kernelContexts, #]&];
+
+  (* Return short (unqualified) names of all symbols from those contexts *)
+  DeleteDuplicates @ Flatten[
+    Function[{ctx}, StringReplace[Names[ctx <> "*"], ctx -> ""]] /@ loadedCtxs
+  ]
+]
+
+
+(*
 Get all workspace symbols for workspace/symbol search
 *)
 GetAllWorkspaceSymbols[] :=
 Module[{bag},
   bag = Internal`Bag[];
-  
+
   KeyValueMap[
     Function[{name, data},
       Scan[
@@ -1231,7 +1256,7 @@ Module[{bag},
     ],
     $PacletIndex["Symbols"]
   ];
-  
+
   Internal`BagPart[bag, All]
 ]
 
@@ -1242,7 +1267,7 @@ Search workspace symbols by query
 SearchWorkspaceSymbols[query_String] :=
 Module[{allSymbols},
   allSymbols = GetAllWorkspaceSymbols[];
-  
+
   If[query === "",
     allSymbols,
     Select[allSymbols, StringContainsQ[#["name"], query, IgnoreCase -> True]&]
@@ -1257,13 +1282,13 @@ Returns the context string or None if not found
 GetSymbolContext[symbolName_String] :=
 Module[{symData, defs},
   symData = Lookup[$PacletIndex["Symbols"], symbolName, Null];
-  
+
   If[symData === Null,
     Return[None]
   ];
-  
+
   defs = symData["Definitions"];
-  
+
   If[Length[defs] === 0,
     None
     ,
@@ -1285,11 +1310,11 @@ Module[{contextSymbols, publicSymbols},
   Get all symbols in this context
   *)
   contextSymbols = Lookup[$PacletIndex["Contexts"], context, {}];
-  
+
   (*
   Filter to only public symbols
   *)
-  publicSymbols = Select[contextSymbols, 
+  publicSymbols = Select[contextSymbols,
     Function[{symName},
       Module[{defs},
         defs = Lookup[$PacletIndex["Symbols"], symName, <||>]["Definitions"];
@@ -1297,7 +1322,7 @@ Module[{contextSymbols, publicSymbols},
           (*
           Check if any definition in this context is public
           *)
-          AnyTrue[defs, 
+          AnyTrue[defs,
             #["context"] === context && #["visibility"] === "public" &
           ]
           ,
@@ -1306,7 +1331,7 @@ Module[{contextSymbols, publicSymbols},
       ]
     ]
   ];
-  
+
   publicSymbols
 ]
 
@@ -1326,13 +1351,13 @@ Returns True if public, False if private or unknown
 IsSymbolPublic[symbolName_String] :=
 Module[{symData, defs},
   symData = Lookup[$PacletIndex["Symbols"], symbolName, Null];
-  
+
   If[symData === Null,
     Return[False]
   ];
-  
+
   defs = symData["Definitions"];
-  
+
   If[!ListQ[defs] || Length[defs] === 0,
     False
     ,
@@ -1413,21 +1438,21 @@ Module[{ctx},
 
 GetFileLoadedContexts[uri_String] :=
 Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContexts, kernelContexts},
-  
+
   fileData = Lookup[$PacletIndex["Files"], uri, <||>];
-  
+
   (*
   Get all contexts known to the kernel (cached).
   *)
   kernelContexts = GetKernelContextsCached[];
-  
+
   If[fileData === <||>,
     Return[DeleteDuplicates[kernelContexts]]
   ];
-  
+
   (* Start with all kernel-known contexts *)
   loadedContexts = kernelContexts;
-  
+
   (* Add the file's own package context if it exists *)
   packageContext = Lookup[fileData, "PackageContext", None];
   If[StringQ[packageContext],
@@ -1435,7 +1460,7 @@ Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContext
     (* Also add the Private subcontext *)
     AppendTo[loadedContexts, packageContext <> "Private`"]
   ];
-  
+
   (* Add contexts from Needs/Get/BeginPackage *)
   contextLoads = Lookup[fileData, "ContextLoads", {}];
   loadedContexts = Join[loadedContexts, #["context"]& /@ contextLoads];
@@ -1468,18 +1493,18 @@ Each error: <| "symbol" -> "name", "context" -> "Ctx`", "fullName" -> "Ctx`name"
 *)
 GetContextLoadErrors[uri_String] :=
 Module[{explicitRefs, loadedContexts, loadedContextsSet},
-  
+
   explicitRefs = GetFileExplicitContextRefs[uri];
   loadedContexts = GetFileLoadedContexts[uri];
-  
+
   (* Build Association for O(1) exact-match lookup instead of repeated MemberQ *)
   loadedContextsSet = Association[Thread[loadedContexts -> True]];
-  
+
   (* Functional approach: Map + Nothing avoids quadratic AppendTo *)
   Function[{ref},
     Module[{ctx},
       ctx = ref["context"];
-      If[!KeyExistsQ[loadedContextsSet, ctx] && 
+      If[!KeyExistsQ[loadedContextsSet, ctx] &&
          !AnyTrue[loadedContexts, StringStartsQ[ctx, #] &],
         Append[ref, "error" -> "Context \"" <> ctx <> "\" is not loaded. Add Needs[\"" <> ctx <> "\"] to load it."],
         Nothing
