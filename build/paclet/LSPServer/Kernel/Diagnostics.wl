@@ -7,10 +7,10 @@ Needs["LSPServer`PacletIndex`"]
 Needs["LSPServer`IgnorePatterns`"]
 Needs["LSPServer`Utils`"]
 Needs["CodeInspector`"]
-Needs["CodeInspector`SuppressedRegions`"] (* for SuppressedRegions *)
+Needs["CodeInspector`SuppressedRegions`"]
 Needs["CodeInspector`Utils`"]
 Needs["CodeParser`"]
-Needs["CodeParser`Scoping`"] (* for scopingDataObject *)
+Needs["CodeParser`Scoping`"]
 
 
 expandContent[content:KeyValuePattern["method" -> "textDocument/runDiagnostics"], pos_] :=
@@ -18,13 +18,13 @@ Catch[
 Module[{params, doc, uri, res},
 
   log[1, "textDocument/runDiagnostics: enter expand"];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{}]
@@ -33,13 +33,13 @@ Module[{params, doc, uri, res},
   res = <| "method" -> #, "params" -> params |>& /@ {
     "textDocument/concreteParse",
     "textDocument/suppressedRegions",
-    "textDocument/parseIgnoreComments",  (* Parse wl-disable comments *)
+    "textDocument/parseIgnoreComments",
     "textDocument/runConcreteDiagnostics",
     "textDocument/aggregateParse",
     "textDocument/runAggregateDiagnostics",
     "textDocument/abstractParse",
     "textDocument/runAbstractDiagnostics",
-    "textDocument/runScopingData", (* implemented in SemanticTokens.wl *)
+    "textDocument/runScopingData",
     "textDocument/runScopingDiagnostics",
     "textDocument/runWorkspaceDiagnostics"
   };
@@ -60,14 +60,14 @@ Module[{params, doc, uri, entry, cst, suppressedRegions},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -77,7 +77,7 @@ Module[{params, doc, uri, entry, cst, suppressedRegions},
   If[suppressedRegions =!= Null,
     Throw[{}]
   ];
-  
+
   cst = entry["CST"];
 
   log[2, "before SuppressedRegions"];
@@ -85,7 +85,7 @@ Module[{params, doc, uri, entry, cst, suppressedRegions},
   suppressedRegions = SuppressedRegions[cst];
 
   log["after SuppressedRegions"];
-  
+
   entry["SuppressedRegions"] = suppressedRegions;
 
   $OpenFilesMap[uri] = entry;
@@ -111,7 +111,7 @@ Module[{params, doc, uri, entry, cst, ignoreData},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -120,7 +120,7 @@ Module[{params, doc, uri, entry, cst, ignoreData},
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -129,7 +129,7 @@ Module[{params, doc, uri, entry, cst, ignoreData},
   If[Lookup[entry, "IgnoreData", Null] =!= Null,
     Throw[{}]
   ];
-  
+
   cst = entry["CST"];
 
   If[$Debug2,
@@ -142,7 +142,7 @@ Module[{params, doc, uri, entry, cst, ignoreData},
     log["after ParseIgnoreComments"];
     log["ignoreData: ", ignoreData]
   ];
-  
+
   entry["IgnoreData"] = ignoreData;
 
   $OpenFilesMap[uri] = entry;
@@ -161,14 +161,14 @@ Module[{params, doc, uri, entry, cst, cstLints, suppressedRegions},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -178,7 +178,7 @@ Module[{params, doc, uri, entry, cst, cstLints, suppressedRegions},
   If[cstLints =!= Null,
     Throw[{}]
   ];
-  
+
   cst = entry["CST"];
 
 
@@ -222,14 +222,14 @@ Module[{params, doc, uri, entry, agg, aggLints, suppressedRegions},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -277,14 +277,14 @@ Module[{params, doc, uri, entry, ast, cst, astLints, suppressedRegions},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -308,7 +308,7 @@ Module[{params, doc, uri, entry, ast, cst, astLints, suppressedRegions},
     suppressedRegions = SuppressedRegions[cst];
     entry["SuppressedRegions"] = suppressedRegions;
   ];
-  
+
 
   log[2, "before CodeInspectAST"];
 
@@ -343,14 +343,14 @@ Module[{params, doc, uri, entry, cst, scopingLints, scopingData, filtered, suppr
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -389,7 +389,7 @@ Module[{params, doc, uri, entry, cst, scopingLints, scopingData, filtered, suppr
   isActive = makeIsActiveFunc[suppressedRegions];
 
   scopingLints = Select[scopingLints, isActive];
-  
+
   (*
   If $SemanticTokens, then only keep:
   errors
@@ -436,7 +436,8 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/runWorkspaceDiag
 Catch[
 Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   suppressedRegions, isActive, pacletSymbols, systemSymbols, localSymbols,
-  scopingData, locallyDefinedSymbols, contextErrors, contextLints},
+  scopingData, locallyDefinedSymbols, contextErrors, contextLints,
+  depSymbols, depSymbolsSet},
 
   If[$Debug2,
     log["textDocument/runWorkspaceDiagnostics: enter"]
@@ -447,7 +448,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     If[$Debug2,
       log["stale"]
     ];
@@ -456,7 +457,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -485,7 +486,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   (*
   Get all symbol references in the file
   *)
-  symbolRefs = Cases[cst, 
+  symbolRefs = Cases[cst,
     LeafNode[Symbol, name_String, KeyValuePattern[Source -> src_]] :> <|"name" -> name, "source" -> src|>,
     Infinity
   ];
@@ -505,6 +506,13 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   pacletSymbols = GetPacletSymbols[];
 
   (*
+  Get symbols from dependency contexts (BeginPackage/Needs) that are loaded in the kernel.
+  These are NOT false-positive undefined — they're provided by a loaded package.
+  *)
+  depSymbols = LSPServer`PacletIndex`GetLoadedDependencySymbols[uri];
+  depSymbolsSet = Association[Thread[depSymbols -> True]];
+
+  (*
   Get locally defined symbols from scoping data
   *)
   scopingData = Lookup[entry, "ScopingData", {}];
@@ -513,7 +521,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   (*
   Find undefined symbols - those not in system, paclet, or local scope
   *)
-  undefined = Select[symbolRefs, 
+  undefined = Select[symbolRefs,
     Function[{ref},
       Module[{name},
         name = ref["name"];
@@ -528,6 +536,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
         And[
           !MemberQ[systemSymbols, name],
           !MemberQ[pacletSymbols, name],
+          !KeyExistsQ[depSymbolsSet, name],
           !MemberQ[locallyDefinedSymbols, name],
           !StringMatchQ[name, LetterCharacter],  (* Single letter variables *)
           !StringContainsQ[name, "`"],  (* Context paths *)
@@ -559,7 +568,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   Check for context loading errors (using symbols from unloaded contexts)
   *)
   contextErrors = GetContextLoadErrors[uri];
-  
+
   contextLints = Table[
     InspectionObject[
       "UnloadedContext",
@@ -574,7 +583,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
     ],
     {err, Take[contextErrors, UpTo[20]]}
   ];
-  
+
   workspaceLints = Join[workspaceLints, contextLints];
 
   (*
@@ -585,8 +594,8 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   workspaceLints = Select[workspaceLints, isActive];
 
   If[$Debug2,
-    log["workspaceLints: ", Length[workspaceLints], " issues (", 
-        Length[undefined], " undefined symbols, ", 
+    log["workspaceLints: ", Length[workspaceLints], " issues (",
+        Length[undefined], " undefined symbols, ",
         Length[contextErrors], " context errors)"]
   ];
 
@@ -609,22 +618,22 @@ Module[{params, doc, uri, entry},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
+
   entry["CSTLints"] =.;
 
   entry["AggLints"] =.;
-  
+
   entry["ASTLints"] =.;
 
   entry["ScopingLints"] =.;
@@ -632,7 +641,7 @@ Module[{params, doc, uri, entry},
   entry["WorkspaceLints"] =.;
 
   entry["IgnoreData"] =.;
-  
+
   (* Also clear from the global ignore data map *)
   ClearIgnoreData[uri];
 
@@ -646,7 +655,7 @@ Module[{params, doc, uri, entry},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/publishDiagnostics"]] :=
 Catch[
-Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints, astLints, 
+Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints, astLints,
   scopingLints, workspaceLints, diagnostics, ignoreData, beforeIgnoreCount},
 
   log[1, "textDocument/publishDiagnostics: enter"];
@@ -656,12 +665,12 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
-  
+
   entry = Lookup[$OpenFilesMap, uri, Null];
 
   (*
@@ -716,7 +725,7 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
   ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
   beforeIgnoreCount = Length[lints];
   lints = Select[lints, !ShouldIgnoreDiagnostic[#, ignoreData]&];
-  
+
   If[$Debug2,
     log["lints after ignore filtering: ", Length[lints], " (", beforeIgnoreCount - Length[lints], " ignored)"]
   ];
@@ -732,7 +741,7 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
   lints = Complement[lints, shadowing];
   *)
 
-  
+
   (*
   Make sure to sort lints before taking
 
