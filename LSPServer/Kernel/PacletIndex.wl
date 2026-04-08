@@ -70,17 +70,25 @@ With[{builtinFile = FileNameJoin[{
 
 (*
   builtinSpecToPattern[s]
-  Convert a single input-spec string from $BuiltinPatterns into a WL pattern
+  Convert a single input spec from $BuiltinPatterns into a WL pattern
   expression suitable for MatchQ against a representative sample value.
 
-  Spec string vocabulary:
-    "Type..."  - BlankSequence[Symbol["Type"]]    (1+ expressions with head Type)
-    "Type*"    - BlankNullSequence[Symbol["Type"]] (0+ expressions with head Type)
-    "..."      - BlankSequence[]                   (1+ untyped)
-    "*"        - BlankNullSequence[]               (0+ untyped)
-    "_?Pred"   - ToExpression["_?Pred"]            (PatternTest - starts with "_")
-    "Type"     - Blank[Symbol["Type"]]             (exactly one typed arg)
-    None       - Blank[]                            (exactly one untyped arg)
+  New format (WL patterns stored directly):
+    __Type  - BlankSequence[Type]      (1+ expressions with head Type)
+    ___Type - BlankNullSequence[Type]  (0+ expressions with head Type)
+    __      - BlankSequence[]          (1+ untyped)
+    ___     - BlankNullSequence[]      (0+ untyped)
+    _?Pred  - PatternTest[Blank[], Pred]
+    _Type   - Blank[Type]              (exactly one typed arg)
+    None    - Blank[]                  (exactly one untyped arg)
+
+  Legacy string format (still accepted for backward compatibility):
+    "Type..." - BlankSequence[Symbol["Type"]]
+    "Type*"   - BlankNullSequence[Symbol["Type"]]
+    "..."     - BlankSequence[]
+    "*"       - BlankNullSequence[]
+    "_?Pred"  - ToExpression["_?Pred"]
+    "Type"    - Blank[Symbol["Type"]]
 *)
 builtinSpecToPattern[s_String] :=
   Which[
@@ -92,6 +100,7 @@ builtinSpecToPattern[s_String] :=
     True, Blank[Symbol[s]]
   ]
 builtinSpecToPattern[None] := Blank[]
+builtinSpecToPattern[p_] := p  (* already a WL pattern — pass through *)
 
 
 (*
@@ -984,36 +993,36 @@ ExtractDocComments = extractDocComments;
 extractArgPatternExpr[argNode]
   Given one argument AST node from a function definition LHS, returns a WL
   pattern expression that can be used directly with MatchQ.  Examples:
-    x_Integer                                      → _Integer
-    x_                                             → _
-    _Real                                          → _Real
-    {x_Real, y_Real}                               → {_Real, _Real}
-    x__                                            → __
-    KeyValuePattern[{"k" -> x_Integer, ...}]     → KeyValuePattern[{"k" -> _Integer, ...}]
-    x:KeyValuePattern[...]                         → KeyValuePattern[...]   (strips Pattern name)
-    anything else                                  → _   (conservative)
+    x_Integer                                      -> _Integer
+    x_                                             -> _
+    _Real                                          -> _Real
+    {x_Real, y_Real}                               -> {_Real, _Real}
+    x__                                            -> __
+    KeyValuePattern[{"k" -> x_Integer, ...}]     -> KeyValuePattern[{"k" -> _Integer, ...}]
+    x:KeyValuePattern[...]                         -> KeyValuePattern[...]   (strips Pattern name)
+    anything else                                  -> _   (conservative)
 *)
 extractArgPatternExpr[argNode_] :=
   Which[
-    (* Named typed blank: x_H → _H *)
+    (* Named typed blank: x_H -> _H *)
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Pattern", _],
       {_, CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, _, _]}, _]}, _]],
       Blank[Symbol[argNode[[2, 2, 2, 1, 2]]]]
     ,
-    (* Bare typed blank: _H → _H *)
+    (* Bare typed blank: _H -> _H *)
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, _, _]}, _]],
       Blank[Symbol[argNode[[2, 1, 2]]]]
     ,
-    (* Named bare blank: x_ → _ *)
+    (* Named bare blank: x_ -> _ *)
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Pattern", _],
       {_, CallNode[LeafNode[Symbol, "Blank", _], {}, _]}, _]],
       Blank[]
     ,
-    (* Bare blank: _ → _ *)
+    (* Bare blank: _ -> _ *)
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Blank", _], {}, _]],
       Blank[]
     ,
-    (* List pattern {p1, p2, ...} → recurse into each element *)
+    (* List pattern {p1, p2, ...} -> recurse into each element *)
     MatchQ[argNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
       extractArgPatternExpr /@ argNode[[2]]
     ,
@@ -1056,7 +1065,7 @@ extractArgPatternExpr[argNode_] :=
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Optional", _], _, _]],
       Blank[]
     ,
-    (* Complex patterns (PatternTest, Alternatives, Condition, etc.) → _ conservative *)
+    (* Complex patterns (PatternTest, Alternatives, Condition, etc.) -> _ conservative *)
     True,
       Blank[]
   ]
@@ -1066,9 +1075,9 @@ extractLHSInputPatterns[lhsCallNode]
   Given the LHS CallNode of a function definition, returns a list with one WL
   pattern expression per argument, suitable for use with MatchQ.
   Examples:
-    f[x_Integer, y_String]    → {_Integer, _String}
-    f[{x_Real, y_Real}]       → {{_Real, _Real}}
-    f[x_]                     → {_}
+    f[x_Integer, y_String]    -> {_Integer, _String}
+    f[{x_Real, y_Real}]       -> {{_Real, _Real}}
+    f[x_]                     -> {_}
   Returns {} if lhsCallNode is not a CallNode.
 *)
 extractLHSInputPatterns[lhsNode_] :=
@@ -1205,11 +1214,11 @@ inferArgSampleValueForRHS[argNode_] :=
 inferPatternFromRHS[rhsNode, docComments, uri]
   Given the RHS of a Set assignment (as an AST node), infer a WL pattern expression
   for the value that will be stored in the variable.  Returns a pattern expression
-  (e.g. _Integer, _List, …) or None if no inference is possible.
+  (e.g. _Integer, _List, ...) or None if no inference is possible.
 
   Resolution priority:
-    1. Literal leaf nodes  → _Integer / _Real / _String / _Symbol
-    2. List / Association  → _List / _Association
+    1. Literal leaf nodes  -> _Integer / _Real / _String / _Symbol
+    2. List / Association  -> _List / _Association
     3. f[args] call - find the first definition of f whose InputPatterns match the
        actual call arguments (using structural MatchQ), and return its ReturnPattern.
        This allows overload-sensitive inference: f[{1., 1.}] resolves to _Real when
@@ -1219,23 +1228,23 @@ inferPatternFromRHS[rhsNode, docComments, uri]
 inferPatternFromRHS[rhsNode_, docComments_Association, uri_String] :=
 Module[{head, headName, calleeDefs, retPat},
 
-  Which[
+  Switch[rhsNode,
     (*
     Literal integer
     *)
-    MatchQ[rhsNode, LeafNode[Integer, _, _]],
+    LeafNode[Integer, _, _],
       _Integer
     ,
     (*
     Literal real number
     *)
-    MatchQ[rhsNode, LeafNode[Real, _, _]],
+    LeafNode[Real, _, _],
       _Real
     ,
     (*
     Literal string
     *)
-    MatchQ[rhsNode, LeafNode[String, _, _]],
+    LeafNode[String, _, _],
       _String
     ,
     (*
@@ -1243,7 +1252,7 @@ Module[{head, headName, calleeDefs, retPat},
     homogeneous lists, {(T1|T2)..} for mixed-atom lists, or _List when the
     element types cannot be determined.
     *)
-    MatchQ[rhsNode, CallNode[LeafNode[Symbol, "List", _], _, _]],
+    CallNode[LeafNode[Symbol, "List", _], _, _],
       With[{pat = inferLiteralNodePattern[rhsNode]},
         If[pat === None, _List, pat]
       ]
@@ -1253,7 +1262,7 @@ Module[{head, headName, calleeDefs, retPat},
     structured <|key -> _T, ...|> pattern when all string-keyed values are
     inferrable, or _Association otherwise.
     *)
-    MatchQ[rhsNode, CallNode[LeafNode[Symbol, "Association", _], _, _]],
+    CallNode[LeafNode[Symbol, "Association", _], _, _],
       With[{pat = inferLiteralNodePattern[rhsNode]},
         If[pat === None, _Association, pat]
       ]
@@ -1263,7 +1272,7 @@ Module[{head, headName, calleeDefs, retPat},
     (Map[f] with a single arg is the operator form; we don't infer a return type for that.)
     MapIndexed and MapThread also always return a list when given 2+ args.
     *)
-    MatchQ[rhsNode, CallNode[LeafNode[Symbol, "Map" | "MapIndexed" | "MapThread", _], {_, _, ___}, _]],
+    CallNode[LeafNode[Symbol, "Map" | "MapIndexed" | "MapThread", _], {_, _, ___}, _],
       _List
     ,
     (*
@@ -1271,7 +1280,7 @@ Module[{head, headName, calleeDefs, retPat},
     union of all their inferred types.  Handled before the generic CallNode case so the
     variadic arg structure is resolved without needing fixed-arity overloads in $BuiltinPatterns.
     *)
-    MatchQ[rhsNode, CallNode[LeafNode[Symbol, "Which", _], _List, _]],
+    CallNode[LeafNode[Symbol, "Which", _], _List, _],
       Module[{argNodes, nargs, valueIdxs, valuePats},
         argNodes  = rhsNode[[2]];
         nargs     = Length[argNodes];
@@ -1294,7 +1303,7 @@ Module[{head, headName, calleeDefs, retPat},
     Switch[expr, p1, v1, p2, v2, ...]: odd-position args >= 3 are value branches; return type
     is the union of all their inferred types.
     *)
-    MatchQ[rhsNode, CallNode[LeafNode[Symbol, "Switch", _], _List, _]],
+    CallNode[LeafNode[Symbol, "Switch", _], _List, _],
       Module[{argNodes, nargs, valueIdxs, valuePats},
         argNodes  = rhsNode[[2]];
         nargs     = Length[argNodes];
@@ -1314,11 +1323,192 @@ Module[{head, headName, calleeDefs, retPat},
       ]
     ,
     (*
+    CompoundExpression[e1, e2, ...]: return type = type of the last element.
+    This is needed so that If/Which/Switch branch bodies like (b; 2.) are correctly
+    inferred as _Real (the type of the last expression, 2.).
+    *)
+    CallNode[LeafNode[Symbol, "CompoundExpression", _], _List, _],
+      If[Length[rhsNode[[2]]] === 0, None,
+        inferPatternFromRHS[Last[rhsNode[[2]]], docComments, uri]
+      ]
+    ,
+    (*
+    If[cond, trueBranch, falseBranch, ...]: branch-aware return type.
+    Three cases:
+      1. cond is sym op literal (comparison: >, >=, <, <=):
+           true branch last expr = sym  ->  PatternTest[_Integer, (# op lit &)]
+           false branch           ->  infer normally
+           returns Alternatives[falsePat, truePat]  (false first = common/wider type)
+      2. cond is sym == literal or sym === literal (equality):
+           returns None so position-aware hover falls back to a prior assignment
+           with a more specific PatternTest type.
+      3. other conditions:
+           union of all branch types (same as Which/Switch)
+    *)
+    CallNode[LeafNode[Symbol, "If", _], _List, _],
+      Module[{args, cond, symName, opName, lv, trueBranch, falseBranch,
+              truePat, falsePat, lastOfBranch, branchPats},
+        args = rhsNode[[2]];
+        If[Length[args] < 2, None,
+          cond = args[[1]];
+          lastOfBranch = Function[{bn},
+            If[MatchQ[bn, CallNode[LeafNode[Symbol, "CompoundExpression", _], _List, _]],
+              Last[bn[[2]]], bn]
+          ];
+          Which[
+            (* Comparison condition on a symbol: sym > lit, sym < lit, etc. *)
+            MatchQ[cond, CallNode[
+                LeafNode[Symbol, "Greater"|"GreaterEqual"|"Less"|"LessEqual", _],
+                {LeafNode[Symbol, _String, _], LeafNode[Integer|Real|Rational, _, _]},
+                _]],
+              symName = cond[[2, 1, 2]];
+              opName  = cond[[1, 2]];
+              lv      = Quiet[ToExpression[cond[[2, 2, 2]]], {ToExpression::shdw}];
+              trueBranch  = args[[2]];
+              falseBranch = If[Length[args] >= 3, args[[3]], None];
+              (* True branch: if last expr is the condition symbol, apply PatternTest *)
+              truePat = With[{lastNode = lastOfBranch[trueBranch]},
+                If[MatchQ[lastNode, LeafNode[Symbol, symName, _]],
+                  With[{op = Symbol[opName], v = lv},
+                    PatternTest[_Integer, Function[op[Slot[1], v]]]
+                  ],
+                  inferPatternFromRHS[trueBranch, docComments, uri]
+                ]
+              ];
+              falsePat = If[falseBranch =!= None,
+                inferPatternFromRHS[falseBranch, docComments, uri], None];
+              With[{pats = DeleteCases[DeleteDuplicates[{falsePat, truePat}], None]},
+                Switch[Length[pats], 0, None, 1, pats[[1]], _, Apply[Alternatives, pats]]
+              ],
+
+            (* Equality condition: too specific for a PatternTest union.
+               Return None so position-aware hover falls back to a prior assignment
+               that carries a comparison-based PatternTest. *)
+            MatchQ[cond, CallNode[LeafNode[Symbol, "Equal"|"SameQ", _],
+                {LeafNode[Symbol, _String, _], _} |
+                {_, LeafNode[Symbol, _String, _]}, _]],
+              None,
+
+            (* Other condition: union of all branch types, like Which/Switch *)
+            True,
+              branchPats = DeleteCases[
+                Map[Function[n, If[n <= Length[args],
+                    inferPatternFromRHS[args[[n]], docComments, uri], None]],
+                  Range[2, Length[args]]],
+                None
+              ];
+              With[{deduped = DeleteDuplicates[branchPats]},
+                Switch[Length[deduped], 0, None, 1, deduped[[1]], _, Apply[Alternatives, deduped]]
+              ]
+          ]
+        ]
+      ]
+    ,
+    (*
+    Enclose[body, Function[param, cbody]] special case.
+    The failure callback always receives _Failure, so:
+      - arg 1 type  = inferPatternFromRHS of the body expression
+      - arg 2 type  = _Failure when the callback body is the parameter itself,
+                      otherwise inferred from the callback body (approximation)
+      - 1-arg form  = arg1type | _Failure  (callback omitted; Enclose can throw Failure)
+    This is needed because _[2] in the generic builtin spec would be None (Function nodes
+    have no stand-alone inferred type).
+    *)
+    CallNode[LeafNode[Symbol, "Enclose", _], _List, _],
+      Module[{args, bodyPat, cbPat, pats, cb, paramName, cbBody},
+        args = rhsNode[[2]];
+        bodyPat = If[Length[args] >= 1,
+          inferPatternFromRHS[args[[1]], docComments, uri], None];
+        cbPat = Which[
+          (* 1-arg: no explicit callback; Enclose may raise _Failure itself *)
+          Length[args] < 2, Blank[Failure],
+          (* 2+ args: analyse the callback *)
+          True,
+            cb = args[[2]];
+            Which[
+              (* Function[{param,...}, body] — list-form params *)
+              MatchQ[cb, CallNode[LeafNode[Symbol, "Function", _],
+                           {CallNode[LeafNode[Symbol, "List", _],
+                                     {LeafNode[Symbol, _, _]}, _], _}, _]],
+                paramName = cb[[2, 1, 2, 1, 2]];
+                cbBody    = cb[[2, 2]];
+                If[MatchQ[cbBody, LeafNode[Symbol, paramName, _]],
+                  Blank[Failure],
+                  With[{bp = inferPatternFromRHS[cbBody, docComments, uri]},
+                    If[bp =!= None, bp, Blank[Failure]]]],
+              (* Function[param, body] — bare-symbol param *)
+              MatchQ[cb, CallNode[LeafNode[Symbol, "Function", _],
+                           {LeafNode[Symbol, _, _], _}, _]],
+                paramName = cb[[2, 1, 2]];
+                cbBody    = cb[[2, 2]];
+                If[MatchQ[cbBody, LeafNode[Symbol, paramName, _]],
+                  Blank[Failure],
+                  With[{bp = inferPatternFromRHS[cbBody, docComments, uri]},
+                    If[bp =!= None, bp, Blank[Failure]]]],
+              (* Unknown callback form — conservative: _Failure *)
+              True, Blank[Failure]
+            ]
+        ];
+        pats = DeleteCases[DeleteDuplicates[{bodyPat, cbPat}], None];
+        Switch[Length[pats], 0, None, 1, pats[[1]], _, Apply[Alternatives, pats]]
+      ]
+    ,
+    (*
+    Module[{vars...}, body] / Block[{vars...}, body] / With[{vars...}, body]:
+    return type = type of the body expression (last argument).
+    Handled before the generic CallNode case so we recurse directly into the body
+    rather than attempting to look up Module/Block/With in $BuiltinPatterns.
+    *)
+    CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
+      With[{args = rhsNode[[2]]},
+        If[Length[args] < 2, None,
+          inferPatternFromRHS[Last[args], docComments, uri]
+        ]
+      ]
+    ,
+    (*
+    Part[expr, i] — propagate the element type of the collection.
+      {1,2,3}[[2]]   -> _Integer
+      Range[n][[i]]  -> _Integer
+    *)
+    CallNode[LeafNode[Symbol, "Part", _], {exprArg_, __}, _],
+      Module[{elems, pats},
+        Which[
+          MatchQ[exprArg, CallNode[LeafNode[Symbol, "List", _], {_, ___}, _]],
+            elems = exprArg[[2]];
+            pats  = DeleteDuplicates[DeleteCases[
+              inferPatternFromRHS[#, docComments, uri]& /@ elems, None]];
+            Switch[Length[pats], 0, None, 1, pats[[1]], _, Alternatives @@ pats],
+          MatchQ[exprArg, CallNode[LeafNode[Symbol, "Range", _], {__}, _]], Blank[Integer],
+          True, None
+        ]
+      ]
+    ,
+    (*
+    Lookup[assoc, key] — propagate the value type of the association.
+      Lookup[<|"a"->1, "b"->2|>, key]  -> _Integer
+    *)
+    CallNode[LeafNode[Symbol, "Lookup", _], {assocArg_, _, ___}, _],
+      Which[
+        MatchQ[assocArg, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
+          Module[{valuePats},
+            valuePats = DeleteDuplicates[DeleteCases[
+              Cases[assocArg[[2]],
+                CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, valNode_}, _] :>
+                  inferPatternFromRHS[valNode, docComments, uri],
+                1],
+              None]];
+            Switch[Length[valuePats], 0, None, 1, valuePats[[1]], _, Alternatives @@ valuePats]
+          ],
+        True, None
+      ]
+    ,
+    (*
     General function call - find the best-matching overload and return its ReturnPattern.
     "Best" means InputPatterns match the actual call arguments via structural MatchQ.
     Falls back to $BuiltinPatterns for System` functions not in the PacletIndex.
     *)
-    MatchQ[rhsNode, CallNode[LeafNode[Symbol, headName_String, _], _, _]],
+    CallNode[LeafNode[Symbol, headName_String, _], _, _],
       headName = rhsNode[[1, 2]];
 
       Module[{callArgSamples, allDefs, matchingDef},
@@ -1340,22 +1530,22 @@ Module[{head, headName, calleeDefs, retPat},
             Map[
               Function[{overload},
                 Module[{specs = overload[[1]], isVar,
-                        inPats, retStr = overload[[2]]},
-                  isVar = Length[specs] > 0 && StringQ[Last[specs]] &&
-                            (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+                        inPats, retPat = overload[[2]]},
+                  isVar = Length[specs] > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence];
                   inPats = builtinSpecToPattern /@ specs;
                   <|
                     "InputPatterns" -> inPats,
                     "Variadic" -> isVar,
-                    "DocComment" -> If[StringQ[retStr],
-                      (* "_[N]" / "_[N]|_[M]" means return type = type of the Nth arg
-                         (or a union of Nth/Mth arg types).  Store Blank[] as a non-None
-                         marker so the first-pass overload search finds it. *)
-                      <|"ReturnPattern" -> If[
-                            StringMatchQ[retStr, "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
-                            Blank[], ToExpression[retStr]],
-                        "ReturnPatternString" -> retStr|>,
-                      None
+                    "DocComment" -> Which[
+                      retPat === None, None,
+                      (* Parametric "_[N]" / "_[N]|_[M]" patterns kept as string literals.
+                         Store Blank[] as a non-None marker so the first-pass search finds it. *)
+                      StringQ[retPat],
+                        <|"ReturnPattern" -> Blank[],
+                          "ReturnPatternString" -> retPat|>,
+                      (* Actual WL pattern — store directly, no ReturnPatternString needed *)
+                      True,
+                        <|"ReturnPattern" -> retPat|>
                     ]
                   |>
                 ]
@@ -1456,7 +1646,7 @@ Module[{head, headName, calleeDefs, retPat},
                  a function call (not a literal), we recurse into inferPatternFromRHS so
                  that chains like  var = Echo @ f[{1., 1.}]  resolve transitively.
                  Note: use ___ wildcard suffix to match trailing "|..." union parts. *)
-              AssociationQ[dc] && StringMatchQ[dc["ReturnPatternString"],
+              AssociationQ[dc] && StringMatchQ[Lookup[dc, "ReturnPatternString", ""],
                 "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
                 Module[{retStr, argIdxs, hasNull, argNodes, argPats},
                   retStr   = dc["ReturnPatternString"];
@@ -1518,9 +1708,8 @@ Module[{head, headName, calleeDefs, retPat},
             None
           ]
         ]
-      ]
-    ,
-    True,
+      ],
+    _,
       None
   ]
 ]
@@ -1625,7 +1814,11 @@ Module[{localFuncDefs},
                 args whose return types become available only after the second pass. *)
              (StringQ[def["rhsCallHead"]] &&
               MemberQ[{"If","Which","Switch","Check","Catch","Quiet","Module","Block","With"},
-                      def["rhsCallHead"]])),
+                      def["rhsCallHead"]]) ||
+             (* Retry when callee has user-defined overloads (e.g. TagSetDelayed) that
+                may provide a more specific return type than the builtin default. *)
+             (StringQ[def["rhsCallHead"]] &&
+              Length[Lookup[localFuncDefs, def["rhsCallHead"], {}]] > 0)),
           Module[{resolved},
             resolved = resolveCallReturnPattern[def["rhsCallHead"], def["rhsCallArgs"], localFuncDefs];
             If[resolved =!= None,
@@ -1672,18 +1865,19 @@ Module[{argSamples, localDefs, defs},
       Map[
         Function[{overload},
           Module[{specs = overload[[1]], isVar,
-                  inPats, retStr = overload[[2]]},
-            isVar = Length[specs] > 0 && StringQ[Last[specs]] &&
-                      (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+                  inPats, retPat = overload[[2]]},
+            isVar = Length[specs] > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence];
             inPats = builtinSpecToPattern /@ specs;
             <|
               "InputPatterns" -> inPats,
               "Variadic" -> isVar,
-              "DocComment" -> If[StringQ[retStr],
-                <|"ReturnPattern" -> If[StringMatchQ[retStr, "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
-                    Blank[], ToExpression[retStr]],
-                  "ReturnPatternString" -> retStr|>,
-                None
+              "DocComment" -> Which[
+                retPat === None, None,
+                StringQ[retPat],
+                  <|"ReturnPattern" -> Blank[],
+                    "ReturnPatternString" -> retPat|>,
+                True,
+                  <|"ReturnPattern" -> retPat|>
               ]
             |>
           ]
@@ -1810,6 +2004,24 @@ resolveCallReturnPattern["CompoundExpression", argNodes_List, localFuncDefs_Asso
     ]
   ]
 
+(* Module / Block / With: return type = type of the body (last argument).
+   Module[{vars...}, body] and Block[{vars...}, body] and With[{vars...}, body]
+   all return the value of their body expression.  We ignore the var-list (first
+   arg) and recurse into the body exactly like CompoundExpression recurses into
+   its last element. *)
+resolveCallReturnPattern["Module" | "Block" | "With", argNodes_List, localFuncDefs_Association] :=
+  Module[{body, sv},
+    If[Length[argNodes] < 2, Return[None]];
+    body = Last[argNodes];
+    sv = sampleToPattern[inferArgSampleValueForRHS[body]];
+    If[sv =!= None, sv,
+      If[MatchQ[body, CallNode[LeafNode[Symbol, _String, _], _List, _]],
+        resolveCallReturnPattern[body[[1, 2]], body[[2]], localFuncDefs],
+        None
+      ]
+    ]
+  ]
+
 (* Which / Switch: return type = union of value-branch types, mirroring inferPatternFromRHS *)
 resolveCallReturnPattern["Which", argNodes_List, localFuncDefs_Association] :=
   Module[{argSamples, nargs, valueIdxs, valuePats},
@@ -1864,6 +2076,137 @@ resolveCallReturnPattern["Switch", argNodes_List, localFuncDefs_Association] :=
     ];
     With[{deduped = DeleteDuplicates[valuePats]},
       Switch[Length[deduped], 0, None, 1, deduped[[1]], _, Apply[Alternatives, deduped]]
+    ]
+  ]
+
+(* If[cond, trueBranch, falseBranch]: mirrors the inferPatternFromRHS If case.
+   Used in the second-pass retry for definitions whose first-pass returned None.
+   - Comparison cond (sym > lit, etc.): PatternTest for true branch, normal for false.
+   - Equality cond (sym == lit): return None so position-aware falls back.
+   - Other: union of branch types. *)
+resolveCallReturnPattern["If", argNodes_List, localFuncDefs_Association] :=
+  Module[{cond, symName, opName, lv, trueBranch, falseBranch,
+          truePat, falsePat, lastOfBranch, branchPats},
+    If[Length[argNodes] < 2, Return[None]];
+    cond        = argNodes[[1]];
+    lastOfBranch = Function[{bn},
+      If[MatchQ[bn, CallNode[LeafNode[Symbol, "CompoundExpression", _], _List, _]],
+        Last[bn[[2]]], bn]
+    ];
+    Which[
+      MatchQ[cond, CallNode[
+          LeafNode[Symbol, "Greater"|"GreaterEqual"|"Less"|"LessEqual", _],
+          {LeafNode[Symbol, _String, _], LeafNode[Integer|Real|Rational, _, _]},
+          _]],
+        symName = cond[[2, 1, 2]];
+        opName  = cond[[1, 2]];
+        lv      = Quiet[ToExpression[cond[[2, 2, 2]]], {ToExpression::shdw}];
+        trueBranch  = argNodes[[2]];
+        falseBranch = If[Length[argNodes] >= 3, argNodes[[3]], None];
+        truePat = With[{lastNode = lastOfBranch[trueBranch]},
+          If[MatchQ[lastNode, LeafNode[Symbol, symName, _]],
+            With[{op = Symbol[opName], v = lv}, PatternTest[_Integer, Function[op[Slot[1], v]]]],
+            resolveCallReturnPattern["CompoundExpression",
+              If[MatchQ[trueBranch, CallNode[LeafNode[Symbol, "CompoundExpression", _], _List, _]],
+                trueBranch[[2]], {trueBranch}], localFuncDefs]
+          ]
+        ];
+        falsePat = If[falseBranch =!= None,
+          resolveCallReturnPattern["CompoundExpression",
+            If[MatchQ[falseBranch, CallNode[LeafNode[Symbol, "CompoundExpression", _], _List, _]],
+              falseBranch[[2]], {falseBranch}], localFuncDefs],
+          None];
+        With[{pats = DeleteCases[DeleteDuplicates[{falsePat, truePat}], None]},
+          Switch[Length[pats], 0, None, 1, pats[[1]], _, Apply[Alternatives, pats]]
+        ],
+
+      MatchQ[cond, CallNode[LeafNode[Symbol, "Equal"|"SameQ", _],
+          {LeafNode[Symbol, _String, _], _} |
+          {_, LeafNode[Symbol, _String, _]}, _]],
+        None,
+
+      True,
+        branchPats = DeleteCases[
+          Map[Function[n, If[n <= Length[argNodes],
+              resolveCallReturnPattern["CompoundExpression",
+                With[{bn = argNodes[[n]]},
+                  If[MatchQ[bn, CallNode[LeafNode[Symbol, "CompoundExpression", _], _List, _]],
+                    bn[[2]], {bn}]], localFuncDefs], None]],
+            Range[2, Length[argNodes]]],
+          None
+        ];
+        With[{deduped = DeleteDuplicates[branchPats]},
+          Switch[Length[deduped], 0, None, 1, deduped[[1]], _, Apply[Alternatives, deduped]]
+        ]
+    ]
+  ]
+
+(* Enclose[body, Function[param, cbody]]: mirrors the inferPatternFromRHS Enclose case. *)
+resolveCallReturnPattern["Enclose", argNodes_List, localFuncDefs_Association] :=
+  Module[{bodyPat, cbPat, cb, paramName, cbBody, pats},
+    bodyPat = If[Length[argNodes] >= 1,
+      inferPatternFromRHS[argNodes[[1]], {}, ""], None];
+    cbPat = Which[
+      Length[argNodes] < 2, Blank[Failure],
+      True,
+        cb = argNodes[[2]];
+        Which[
+          MatchQ[cb, CallNode[LeafNode[Symbol, "Function", _],
+                       {CallNode[LeafNode[Symbol, "List", _],
+                                 {LeafNode[Symbol, _, _]}, _], _}, _]],
+            paramName = cb[[2, 1, 2, 1, 2]];
+            cbBody    = cb[[2, 2]];
+            If[MatchQ[cbBody, LeafNode[Symbol, paramName, _]],
+              Blank[Failure],
+              With[{bp = inferPatternFromRHS[cbBody, {}, ""]},
+                If[bp =!= None, bp, Blank[Failure]]]],
+          MatchQ[cb, CallNode[LeafNode[Symbol, "Function", _],
+                       {LeafNode[Symbol, _, _], _}, _]],
+            paramName = cb[[2, 1, 2]];
+            cbBody    = cb[[2, 2]];
+            If[MatchQ[cbBody, LeafNode[Symbol, paramName, _]],
+              Blank[Failure],
+              With[{bp = inferPatternFromRHS[cbBody, {}, ""]},
+                If[bp =!= None, bp, Blank[Failure]]]],
+          True, Blank[Failure]
+        ]
+    ];
+    pats = DeleteCases[DeleteDuplicates[{bodyPat, cbPat}], None];
+    Switch[Length[pats], 0, None, 1, pats[[1]], _, Apply[Alternatives, pats]]
+  ]
+
+(* Part[expr, i] — return the element type of the collection argument *)
+resolveCallReturnPattern["Part", argNodes_List, localFuncDefs_Association] :=
+  If[Length[argNodes] < 1, None,
+    Module[{exprArg = argNodes[[1]], elems, pats},
+      Which[
+        MatchQ[exprArg, CallNode[LeafNode[Symbol, "List", _], {_, ___}, _]],
+          elems = exprArg[[2]];
+          pats  = DeleteDuplicates[DeleteCases[
+            sampleToPattern[inferArgSampleValueForRHS[#]]& /@ elems, None]];
+          Switch[Length[pats], 0, None, 1, pats[[1]], _, Alternatives @@ pats],
+        MatchQ[exprArg, CallNode[LeafNode[Symbol, "Range", _], {__}, _]], Blank[Integer],
+        True, None
+      ]
+    ]
+  ]
+
+(* Lookup[assoc, key] — return the value type of the association argument *)
+resolveCallReturnPattern["Lookup", argNodes_List, localFuncDefs_Association] :=
+  If[Length[argNodes] < 1, None,
+    Module[{assocArg = argNodes[[1]], valuePats},
+      Which[
+        MatchQ[assocArg, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
+          valuePats = DeleteDuplicates[DeleteCases[
+            Cases[assocArg[[2]],
+              CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, valNode_}, _] :>
+                With[{sp = sampleToPattern[inferArgSampleValueForRHS[valNode]]},
+                  If[sp =!= None, sp, inferPatternFromRHS[valNode, {}, ""]]],
+              1],
+            None]];
+          Switch[Length[valuePats], 0, None, 1, valuePats[[1]], _, Alternatives @@ valuePats],
+        True, None
+      ]
     ]
   ]
 
@@ -2223,6 +2566,43 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
             node[[3, Key["Definitions"]]]
           ]
         ]
+      ]
+    ,
+    (*
+    TagSet/TagSetDelayed definition: tag /: Head[tag, ...] := rhs
+    Store under the LHS call head (e.g. "Plot") so that return-type inference
+    for  a = Plot[j]  picks up the DocComment ReturnPattern.
+    *)
+    MatchQ[node, CallNode[LeafNode[Symbol, "TagSetDelayed" | "TagSet", _],
+      {LeafNode[Symbol, _, _], CallNode[LeafNode[Symbol, _, _], _, _], _},
+      _]],
+      Module[{src, defStartLine, docComment, lhsNode, rhsNode, lhsHead, inputPatterns, inferredRetPat, rhsCallHead, rhsCallArgs},
+        src = node[[3, Key[Source]]];
+        defStartLine = src[[1, 1]];
+        docComment = Lookup[docComments, defStartLine - 1, None];
+        lhsNode = node[[2, 2]];
+        rhsNode = node[[2, 3]];
+        lhsHead = lhsNode[[1, 2]];
+        inputPatterns = extractLHSInputPatterns[lhsNode];
+        inferredRetPat = inferPatternFromRHS[rhsNode, docComments, uri];
+        {rhsCallHead, rhsCallArgs} = If[
+          MatchQ[rhsNode, CallNode[LeafNode[Symbol, _String, _], _List, _]],
+          {rhsNode[[1, 2]], rhsNode[[2]]},
+          {None, {}}
+        ];
+        Internal`StuffBag[bag, <|
+          "name" -> lhsHead,
+          "uri" -> uri,
+          "source" -> src,
+          "kind" -> "function",
+          "context" -> newContext,
+          "visibility" -> If[newInPrivate, "private", "public"],
+          "DocComment" -> docComment,
+          "InputPatterns" -> inputPatterns,
+          "InferredReturnPattern" -> inferredRetPat,
+          "rhsCallHead" -> rhsCallHead,
+          "rhsCallArgs" -> rhsCallArgs
+        |>]
       ]
     ,
     (*

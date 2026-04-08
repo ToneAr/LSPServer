@@ -1476,6 +1476,11 @@ Module[{params, doc, uri, text, entry},
     "LastChange" -> Now
   |>;
 
+  (* Pre-process .ipwl files so the parse handlers use annotation-free source *)
+  If[StringEndsQ[uri, ".ipwl"],
+    entry["PreprocessedText"] = LSPServer`TypeWL`PreprocessIPWL[text][[1]]
+  ];
+
   $OpenFilesMap[uri] = entry;
 
   (*
@@ -1542,7 +1547,7 @@ Module[{params, doc, uri, cst, text, entry, fileName, fileFormat},
     Throw[{}]
   ];
 
-  text = entry["Text"];
+  text = Lookup[entry, "PreprocessedText", entry["Text"]];
 
   If[$Debug2,
     log["text: ", stringLineTake[StringTake[ToString[text, InputForm], UpTo[1000]], UpTo[20]]];
@@ -1631,7 +1636,7 @@ Module[{params, doc, uri, text, entry, cstTabs, fileName, fileFormat},
     Throw[{}]
   ];
 
-  text = entry["Text"];
+  text = Lookup[entry, "PreprocessedText", entry["Text"]];
 
   (*
   Using "TabWidth" -> 4 here because the notification is rendered down to HTML and tabs need to be expanded in HTML
@@ -2057,6 +2062,11 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
     "PreviousAST" -> entry["PreviousAST"],
     "PreviousUserSymbols" -> entry["PreviousUserSymbols"]
   |>;
+
+  (* Pre-process .ipwl files so the parse handlers use annotation-free source *)
+  If[StringEndsQ[uri, ".ipwl"],
+    entry["PreprocessedText"] = LSPServer`TypeWL`PreprocessIPWL[text][[1]]
+  ];
 
   $OpenFilesMap[uri] = entry;
 

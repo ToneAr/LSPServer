@@ -1,7 +1,7 @@
 
 Paclet[
   Name -> "LSPServer",
-  Version -> "2.9.43",
+  Version -> "2.9.59",
   WolframVersion -> "12.1+",
 
   Description -> "Language Server Protocol implementation for Wolfram Language.",

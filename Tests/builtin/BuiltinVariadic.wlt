@@ -47,7 +47,7 @@ VerificationTest[
 
 (* Tests 4–8: unit tests for helper functions added in Task 2.
    These FAIL until builtinSpecToPattern and overloadSpecMatchesArgs are
-   defined in LSPServer`Diagnostics`Private`. That is expected — TDD. *)
+   defined in LSPServer`Diagnostics`Private`. That is expected - TDD. *)
 
 (* Test 4: builtinSpecToPattern converts "Integer..." to BlankSequence[Integer] *)
 VerificationTest[

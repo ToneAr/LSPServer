@@ -1,0 +1,13 @@
+(* IPWL diagnostic test fixture *)
+
+(* Case 1: return type MATCHES declared type - no warning *)
+returnsCorrect[x_]: _Integer := x + 1
+
+(* Case 2: return type MISMATCHES declared type - DeclaredTypeMismatch *)
+returnsMismatch[x_]: _Integer := "wrong type"
+
+(* Case 3: unknown callee - no warning *)
+returnsUnknown[x_]: _Integer := someUnknownFunction[x]
+
+(* Case 4: IPWLSyntaxError - bad annotation (bare literal) *)
+badAnnotation[x_]: 123 := x

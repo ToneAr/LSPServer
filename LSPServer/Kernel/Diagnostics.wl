@@ -27,17 +27,25 @@ With[{builtinFile = FileNameJoin[{
 
 (*
   builtinSpecToPattern[s]
-  Convert a single input-spec string from $BuiltinPatterns into a WL pattern
+  Convert a single input spec from $BuiltinPatterns into a WL pattern
   expression suitable for MatchQ against a representative sample value.
 
-  Spec string vocabulary:
-    "Type..."  - BlankSequence[Symbol["Type"]]    (1+ expressions with head Type)
-    "Type*"    - BlankNullSequence[Symbol["Type"]] (0+ expressions with head Type)
-    "..."      - BlankSequence[]                   (1+ untyped)
-    "*"        - BlankNullSequence[]               (0+ untyped)
-    "_?Pred"   - ToExpression["_?Pred"]            (PatternTest -- starts with "_")
-    "Type"     - Blank[Symbol["Type"]]             (exactly one typed arg)
-    None       - Blank[]                            (exactly one untyped arg)
+  New format (WL patterns stored directly):
+    __Type  - BlankSequence[Type]      (1+ expressions with head Type)
+    ___Type - BlankNullSequence[Type]  (0+ expressions with head Type)
+    __      - BlankSequence[]          (1+ untyped)
+    ___     - BlankNullSequence[]      (0+ untyped)
+    _?Pred  - PatternTest[Blank[], Pred]
+    _Type   - Blank[Type]              (exactly one typed arg)
+    None    - Blank[]                  (exactly one untyped arg)
+
+  Legacy string format (still accepted for backward compatibility):
+    "Type..." - BlankSequence[Symbol["Type"]]
+    "Type*"   - BlankNullSequence[Symbol["Type"]]
+    "..."     - BlankSequence[]
+    "*"       - BlankNullSequence[]
+    "_?Pred"  - ToExpression["_?Pred"]
+    "Type"    - Blank[Symbol["Type"]]
 *)
 builtinSpecToPattern[s_String] :=
   Which[
@@ -49,46 +57,44 @@ builtinSpecToPattern[s_String] :=
     True, Blank[Symbol[s]]
   ]
 builtinSpecToPattern[None] := Blank[]
+builtinSpecToPattern[p_] := p  (* already a WL pattern — pass through *)
 
 (*
   overloadSpecMatchesArgs[specs, argSamples]
-  True when the overload described by specs (a List of spec strings) is
+  True when the overload described by specs (a List of WL patterns) is
   compatible with the given argument samples.
 
   For fixed-arity overloads: exact length match + element-wise MatchQ.
-  For variadic overloads (last spec ends with "..." or "*"):
+  For variadic overloads (last spec is BlankSequence or BlankNullSequence):
     - at least Length[specs]-1 args required
     - fixed prefix args matched normally
     - each tail arg matched against the element type (Blank[T])
   Missing["Unknown"] args always match (unresolvable types pass through).
 *)
 overloadSpecMatchesArgs[specs_List, argSamples_List] :=
-  Module[{n = Length[specs], m = Length[argSamples],
-          isVar, fixedN, varSpec, varElemPat},
-    isVar = n > 0 && StringQ[Last[specs]] &&
-              (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+  Module[{wlSpecs = builtinSpecToPattern /@ specs,
+          n, m, isVar, fixedN, varSpec, varElemPat},
+    n = Length[wlSpecs];
+    m = Length[argSamples];
+    isVar = n > 0 && MatchQ[Last[wlSpecs], _BlankSequence | _BlankNullSequence];
     If[!isVar,
       (* Fixed arity: exact length + element-wise match *)
       n === m && (n === 0 || AllTrue[
-        Transpose[{argSamples, builtinSpecToPattern /@ specs}],
+        Transpose[{argSamples, wlSpecs}],
         (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
       ]),
       (* Variadic: at least fixedN args; prefix match + tail element match *)
       fixedN  = n - 1;
-      varSpec = Last[specs];
+      varSpec = Last[wlSpecs];
       (* Element pattern for checking each tail arg individually *)
-      varElemPat = Which[
-        varSpec === "..." || varSpec === "*", Blank[],
-        StringEndsQ[varSpec, "..."],
-          Blank[Symbol[StringDrop[varSpec, -3]]],
-        StringEndsQ[varSpec, "*"],
-          Blank[Symbol[StringDrop[varSpec, -1]]],
-        True, Blank[]
-      ];
+      varElemPat = With[{lp = varSpec},
+        If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
+        If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
+        Blank[]]]];
       m >= fixedN &&
       (fixedN === 0 || AllTrue[
         Transpose[{Take[argSamples, fixedN],
-                   builtinSpecToPattern /@ Take[specs, fixedN]}],
+                   Take[wlSpecs, fixedN]}],
         (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
       ]) &&
       AllTrue[Drop[argSamples, fixedN],
@@ -522,7 +528,7 @@ Catch[
 Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   suppressedRegions, isActive, pacletSymbols, systemSymbols, localSymbols,
   scopingData, locallyDefinedSymbols, contextErrors, contextLints,
-  depSymbols, depSymbolsSet},
+  dependencySymbolSet},
 
   If[$Debug2,
     log["textDocument/runWorkspaceDiagnostics: enter"]
@@ -592,11 +598,24 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   pacletSymbols = GetPacletSymbols[];
 
   (*
-  Get symbols from dependency contexts (BeginPackage/Needs) that are loaded in the kernel.
-  These are NOT false-positive undefined — they're provided by a loaded package.
+  Build a set of short symbol names from all successfully-loaded dependency
+  contexts (loaded via BeginPackage[ctx, {deps}] or Needs[]).
+  Names[ctx<>"*"] returns non-empty only if the package was actually loaded;
+  if Needs failed the list is empty and symbols stay eligible for UndefinedSymbol.
   *)
-  depSymbols = LSPServer`PacletIndex`GetLoadedDependencySymbols[uri];
-  depSymbolsSet = Association[Thread[depSymbols -> True]];
+  dependencySymbolSet = Association[
+    Flatten[Map[
+      Function[{ctx},
+        Module[{names = Quiet[Names[ctx <> "*"]]},
+          If[ListQ[names] && Length[names] > 0,
+            Map[StringReplace[#, StartOfString ~~ ctx -> ""] -> True &, names],
+            {}
+          ]
+        ]
+      ],
+      GetDependencyContexts[]
+    ]]
+  ];
 
   (*
   Get locally defined symbols from scoping data
@@ -624,6 +643,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
           !MemberQ[pacletSymbols, name],
           !KeyExistsQ[depSymbolsSet, name],
           !MemberQ[locallyDefinedSymbols, name],
+          !KeyExistsQ[dependencySymbolSet, name],  (* loaded dependency packages *)
           !StringMatchQ[name, LetterCharacter],  (* Single letter variables *)
           !StringContainsQ[name, "`"],  (* Context paths *)
           !StringMatchQ[name, "$" ~~ LetterCharacter],  (* $ prefixed single letters *)
@@ -818,8 +838,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                     bestOv = SelectFirst[ovs,
                       Function[{ov},
                         With[{specs = ov[[1]], n = Length[ov[[1]]]},
-                          If[n > 0 && StringQ[Last[specs]] &&
-                               (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]),
+                          If[n > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence],
                             nArgs >= n - 1,   (* variadic: at least fixedN args *)
                             n === nArgs       (* fixed arity: exact match *)
                           ]
@@ -827,17 +846,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                       ],
                       First[ovs]  (* fallback: first overload if nothing matches *)
                     ];
-                    Switch[bestOv[[2]],
-                      "_?BooleanQ",   True,
-                      "_Integer",     0,
-                      "_String",      "",
-                      "_Real",        0.,
-                      "_Rational",    1/2,
-                      "_List",        {},
-                      "_Association", <||>,
-                      None,           Missing["Unknown"],
-                      _String,        0
-                    ]
+                    patternToSampleValue[bestOv[[2]]]
                   ]
                 ],
               (* User-defined: use DocComment ReturnPattern first,
@@ -1731,8 +1740,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                     Map[
                       Function[{overload},
                         Module[{specs = overload[[1]], isVar},
-                          isVar = Length[specs] > 0 && StringQ[Last[specs]] &&
-                                    (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+                          isVar = Length[specs] > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence];
                           <|"InputPatterns" -> builtinSpecToPattern /@ specs,
                             "Variadic"      -> isVar|>
                         ]
