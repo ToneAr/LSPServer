@@ -4,6 +4,8 @@ BeginPackage["LSPServer`TypeWL`"]
 
 PreprocessIPWL
 
+ParametricRef  (* Head used to represent parametric type references, e.g. Blank[ParametricRef["in"]] *)
+
 Begin["`Private`"]
 
 (*
@@ -18,14 +20,14 @@ PreprocessIPWL[source_String]
         <| "kind" -> "IPWLSyntaxError", "message" -> str, "line" -> n |>
 
   Transformation rules:
-    f[args]: ret := body  ->  (* IPWLReturn: ret *)\nf[args] := body
-    f[args]: ret          ->  (* IPWLDeclare: f[args] / ret *)
-    var: pat = val        ->  unchanged (already valid WL)
-    f /: h[f[args]]: ret := body  ->  (* IPWLReturn: ret *)\nf /: h[f[args]] := body
+    f[args]: ret := body  ->  f[args] := body  (in-place, DeclaredType extracted)
+    f[args]: ret          ->  (* IPWLDeclare: f[args] / ret *)  (DeclaredType extracted)
+    var: pat = val        ->  unchanged (already valid WL, DeclaredType extracted)
+    f /: h[f[args]]: ret := body  ->  f /: h[f[args]] := body  (in-place, DeclaredType extracted)
 *)
 PreprocessIPWL[source_String] :=
 Module[{lines, outLines, annotations, lineIdx, lineStr, trimmed,
-        funcAnnotationRe, tagSetAnnotationRe, declOnlyRe,
+        funcAnnotationRe, tagSetAnnotationRe, varAnnotationRe, declOnlyRe,
         match, retStr, retExpr, symName, argsStr},
 
   lines = StringSplit[source, {"\r\n", "\n", "\r"}, All];
@@ -35,6 +37,7 @@ Module[{lines, outLines, annotations, lineIdx, lineStr, trimmed,
 
   funcAnnotationRe    = RegularExpression["^(\\w+\\[.*?\\])\\s*:\\s*(.+?)\\s*(:=|=)(.*)$"];
   tagSetAnnotationRe  = RegularExpression["^(\\w+\\s*/:\\s*.+?\\])\\s*:\\s*(.+?)\\s*(:=|=)(.*)$"];
+  varAnnotationRe     = RegularExpression["^(\\w+)\\s*:\\s*(.+?)\\s*=(.*)$"];
   declOnlyRe          = RegularExpression["^(\\w+(?:\\[.*?\\])?)\\s*:\\s*(.+)$"];
 
   Do[
@@ -53,7 +56,14 @@ Module[{lines, outLines, annotations, lineIdx, lineStr, trimmed,
         retExpr = parseAnnotationPattern[retStr, lineIdx];
         If[AssociationQ[retExpr],
           AppendTo[annotations, retExpr],
-          outLines[[lineIdx]] = "(* IPWLReturn: " <> retStr <> " *)\n" <> match[[1]] <> " " <> match[[3]] <> match[[4]];
+          (* Replace annotation with spaces to preserve column positions of := and body *)
+          Module[{lhsLen = StringLength[match[[1]]],
+                  suffixPos = StringLength[trimmed] - StringLength[match[[3]]] - StringLength[match[[4]]] + 1,
+                  indent = First[StringCases[lineStr, RegularExpression["^\\s*"]], ""]},
+            outLines[[lineIdx]] = indent <> StringTake[trimmed, lhsLen] <>
+                                  StringRepeat[" ", suffixPos - 1 - lhsLen] <>
+                                  StringDrop[trimmed, suffixPos - 1]
+          ];
           symName = StringCases[match[[1]], RegularExpression["^(\\w+)"] -> "$1"][[1]];
           AppendTo[annotations, <|"kind" -> "DeclaredType", "symbol" -> symName,
             "DeclaredType" -> retExpr, "DeclaredInputPatterns" -> {}, "lhsStr" -> match[[1]], "line" -> lineIdx|>]
@@ -66,11 +76,33 @@ Module[{lines, outLines, annotations, lineIdx, lineStr, trimmed,
         retExpr = parseAnnotationPattern[retStr, lineIdx];
         If[AssociationQ[retExpr],
           AppendTo[annotations, retExpr],
-          outLines[[lineIdx]] = "(* IPWLReturn: " <> retStr <> " *)\n" <> match[[1]] <> " " <> match[[3]] <> match[[4]];
+          (* Replace annotation with spaces to preserve column positions of := and body *)
+          Module[{lhsLen = StringLength[match[[1]]],
+                  suffixPos = StringLength[trimmed] - StringLength[match[[3]]] - StringLength[match[[4]]] + 1,
+                  indent = First[StringCases[lineStr, RegularExpression["^\\s*"]], ""]},
+            outLines[[lineIdx]] = indent <> StringTake[trimmed, lhsLen] <>
+                                  StringRepeat[" ", suffixPos - 1 - lhsLen] <>
+                                  StringDrop[trimmed, suffixPos - 1]
+          ];
           symName = StringCases[match[[1]], RegularExpression["^(\\w+)"] -> "$1"][[1]];
           AppendTo[annotations, <|"kind" -> "DeclaredType", "symbol" -> symName,
             "DeclaredType" -> retExpr, "DeclaredInputPatterns" -> {},
             "lhsStr" -> match[[1]], "line" -> lineIdx|>]
+        ],
+
+      (* Typed assignment: var: pat = val  - keep source unchanged, extract DeclaredType *)
+      StringMatchQ[trimmed, varAnnotationRe] &&
+          !StringContainsQ[trimmed, ":="] &&
+          !StringStartsQ[trimmed, "("],
+        match   = StringCases[trimmed, varAnnotationRe -> {"$1", "$2", "$3"}][[1]];
+        retStr  = StringTrim[match[[2]]];
+        retExpr = parseAnnotationPattern[retStr, lineIdx];
+        If[!AssociationQ[retExpr],
+          (* Source line unchanged - valid WL; just record the DeclaredType *)
+          symName = match[[1]];
+          AppendTo[annotations, <|"kind" -> "DeclaredType", "symbol" -> symName,
+            "DeclaredType" -> retExpr, "DeclaredInputPatterns" -> {},
+            "lhsStr" -> symName, "line" -> lineIdx|>]
         ],
 
       (* Declaration-only: f[args]: ret  (no := or = on this line) *)
@@ -102,6 +134,11 @@ Module[{lines, outLines, annotations, lineIdx, lineStr, trimmed,
 parseAnnotationPattern[str_String, lineNum_Integer] :=
 Module[{expr, pat},
   Which[
+    (* Parametric: _[n, m] - type of m-th part of n-th arg *)
+    StringMatchQ[str, RegularExpression["_\\[(\\d+),\\s*(\\d+)\\]"]],
+      With[{parts = StringCases[str, RegularExpression["_\\[(\\d+),\\s*(\\d+)\\]"] -> {"$1", "$2"}][[1]]},
+        Blank[ParametricRef[{ToExpression[parts[[1]]], ToExpression[parts[[2]]]}]]
+      ],
     (* Parametric: _[identifier] or _[integer] *)
     StringMatchQ[str, RegularExpression["_\\[(\\w+)\\]"]],
       With[{inner = StringCases[str, RegularExpression["_\\[(\\w+)\\]"] -> "$1"][[1]]},

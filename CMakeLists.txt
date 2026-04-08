@@ -35,7 +35,7 @@ set(LOCAL_BUILD OFF CACHE BOOL "Local build")
 #
 # Work-around for bug 349779 is to pause ~1 second
 # bug 349779 was fixed in version 12.0
-# 
+#
 # Related bugs: 349779
 #
 set(KERNEL_PAUSE 0 CACHE STRING "Kernel startup pause")
@@ -113,6 +113,10 @@ set(STATIC_WL_PACLET_KERNEL_SOURCES
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/StdIO.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Utils.wl
 	${PROJECT_SOURCE_DIR}/LSPServer/Kernel/Workspace.wl
+)
+
+set(STATIC_WL_PACLET_RESOURCE_SOURCES
+	${PROJECT_SOURCE_DIR}/LSPServer/Resources/BuiltinInputPatterns.wl
 )
 
 set(PROCESSED_DATA_FILES
@@ -246,6 +250,22 @@ foreach(SRC ${STATIC_WL_PACLET_KERNEL_SOURCES})
 			${PROJECT_SOURCE_DIR}/cmake/InspectFile.cmake
 	)
 	list(APPEND COPIED_WL_PACLET_SOURCES ${PROJECT_BINARY_DIR}/paclet/${PACLET}/Kernel/${REL})
+endforeach()
+
+#
+# static Resource sources
+#
+foreach(SRC ${STATIC_WL_PACLET_RESOURCE_SOURCES})
+	file(RELATIVE_PATH REL ${PROJECT_SOURCE_DIR}/${PACLET}/Resources/ ${SRC})
+	add_custom_command(
+		OUTPUT
+			${PROJECT_BINARY_DIR}/paclet/${PACLET}/Resources/${REL}
+		COMMAND
+			${CMAKE_COMMAND} -E copy ${SRC} ${PROJECT_BINARY_DIR}/paclet/${PACLET}/Resources/${REL}
+		DEPENDS
+			${SRC}
+	)
+	list(APPEND COPIED_WL_PACLET_SOURCES ${PROJECT_BINARY_DIR}/paclet/${PACLET}/Resources/${REL})
 endforeach()
 
 #

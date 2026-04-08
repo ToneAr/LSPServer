@@ -1,0 +1,9 @@
+(* Parametric return type test fixture *)
+
+(* Named parametric: return head = element head of in__ *)
+(* Line 4 (1-based) = LSP line 3 (0-based) *)
+g[{in__}]: _[in] := First[{in}]
+
+(* Positional parametric: return head = element head of first arg *)
+(* Line 8 (1-based) = LSP line 7 (0-based) *)
+h[lst_]: _[1, 1] := First[lst]

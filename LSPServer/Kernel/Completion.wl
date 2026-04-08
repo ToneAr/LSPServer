@@ -251,7 +251,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   For any completion whose label contains a backtick (context-qualified names and context
   strings), add an explicit textEdit that replaces the full typed prefix with the label.
   Without this, VSCode treats ` as a word separator and only replaces the text after the
-  last backtick — causing e.g. "Alias`" + insert "Alias`Symbol" = "Alias`Alias`Symbol`".
+  last backtick - causing e.g. "Alias`" + insert "Alias`Symbol" = "Alias`Alias`Symbol`".
   Items that already carry a textEdit (e.g. association key completions) are left alone.
   *)
   If[StringContainsQ[prefix, "`"],
@@ -554,7 +554,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
 
   (*
   Use Names[] to get all symbols in this context matching the prefix.
-  Names[] does not trigger loading or warnings — it only inspects existing symbols.
+  Names[] does not trigger loading or warnings - it only inspects existing symbols.
   *)
   allNames = Quiet[
     Names[ctxPart <> symbolPrefix <> "*"],
@@ -850,7 +850,7 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
 
       (* Not a quote. Could be integer, All, Span (;;), or the opening bracket *)
       If[chars[[scanPos]] === "[",
-        (* Opening bracket — done scanning keys *)
+        (* Opening bracket - done scanning keys *)
         scanPos--;
         If[scanPos >= 1 && chars[[scanPos]] === "[",
           scanPos--
@@ -974,7 +974,7 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
   (*
   Step 0: Try bracket-only detection first.
   If the last character (after trimming whitespace and any non-quote prefix) is [ or [[,
-  the user just typed the bracket — trigger with isStringKey=False.
+  the user just typed the bracket - trigger with isStringKey=False.
   Also handle the case where user typed some non-quote chars after [ as a prefix
   (e.g., data[ho for filtering).
   *)
@@ -989,17 +989,17 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
     barePrefixStart = bracketPos + 1
   ];
   If[bracketPos >= 1 && chars[[bracketPos]] === "[",
-    (* Check that this isn't inside a quote — no unmatched " between [ and cursor *)
+    (* Check that this isn't inside a quote - no unmatched " between [ and cursor *)
     Module[{quoteCount, qi},
       quoteCount = 0;
       Do[
         If[chars[[qi]] === "\"", quoteCount++],
         {qi, bracketPos + 1, Length[chars]}
       ];
-      (* If odd number of quotes, we're inside a string — don't use bracket-only path *)
+      (* If odd number of quotes, we're inside a string - don't use bracket-only path *)
       If[OddQ[quoteCount], Goto["QuotePath"]]
     ];
-    (* We're at [ or [[ without a quote — bracket-only trigger *)
+    (* We're at [ or [[ without a quote - bracket-only trigger *)
     isBracketOnly = True;
     Goto["BracketOnlyPath"]
   ];
@@ -1165,7 +1165,7 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
           Module[{exprEnd, exprStart, exprStr},
             exprEnd = endKey;
             exprStart = exprEnd;
-            (* Scan backwards to find [[ — collect chars that are digits, letters, ;, $, whitespace *)
+            (* Scan backwards to find [[ - collect chars that are digits, letters, ;, $, whitespace *)
             While[exprStart > 0 && !(exprStart >= 2 && scanChars[[exprStart - 1]] === "[" && scanChars[[exprStart]] === "["),
               exprStart--
             ];
@@ -1315,7 +1315,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
 
   (*
   Only show completions for variables that have known association/list definitions.
-  If the variable is not found in the extracted keys, return nothing — do not
+  If the variable is not found in the extracted keys, return nothing - do not
   fall back to showing keys from other variables.
   *)
 
@@ -2144,7 +2144,7 @@ Module[{merged = result, existing},
   ]
 ]
 
-(* No-op for None valueStructure — return result unchanged *)
+(* No-op for None valueStructure - return result unchanged *)
 mergeIntoResult[result_Association, variable_String, keyPath_List, None] := result
 
 (*
@@ -2160,7 +2160,7 @@ Module[{merged = existing, key, childrenNow, updatedChildren},
   key = First[keyPath];
 
   If[Length[keyPath] == 1,
-    (* Final key — merge valueStructure here *)
+    (* Final key - merge valueStructure here *)
     If[AssociationQ[valueStructure] && Length[valueStructure] > 0,
       (* Value has nested structure *)
       If[KeyExistsQ[merged, key] && AssociationQ[merged[key]] && KeyExistsQ[merged[key], "_children"],
@@ -2174,7 +2174,7 @@ Module[{merged = existing, key, childrenNow, updatedChildren},
     ];
     merged
     ,
-    (* Intermediate key — recurse deeper *)
+    (* Intermediate key - recurse deeper *)
     If[!KeyExistsQ[merged, key],
       merged[key] = <| "_children" -> <||> |>
     ];
@@ -2188,7 +2188,7 @@ Module[{merged = existing, key, childrenNow, updatedChildren},
   ]
 ]
 
-(* Fallback for empty keyPath — just merge at top level *)
+(* Fallback for empty keyPath - just merge at top level *)
 mergeAtKeyPath[existing_Association, {}, valueStructure_Association] :=
   mergeKeyStructure[existing, valueStructure]
 
@@ -2599,7 +2599,7 @@ Module[{result, chars, pos, len, varName, mutations},
               ]
             ]
           ],
-          (* Neither <| nor { — skip *)
+          (* Neither <| nor { - skip *)
           Continue[]
         ]
       ]
@@ -2697,7 +2697,7 @@ Module[{result, partKeys, funcKeys},
     ];
 
     (* For each AppendTo/PrependTo, just register the variable exists.
-       The value might be an association — try to extract keys from following text. *)
+       The value might be an association - try to extract keys from following text. *)
     Do[
       Module[{var},
         var = am[[1]];

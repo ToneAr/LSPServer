@@ -1,0 +1,8 @@
+(* IPWL hover test fixture *)
+(* Line numbers are 1-based; LSP positions are 0-based *)
+
+(* Line 4 (1-based) = LSP line 3 (0-based) *)
+computeSquare[x_Integer]: _Integer := x * x
+
+(* Line 7 (1-based) = LSP line 6 (0-based) *)
+myDeclaredVar: _String = "hello"
