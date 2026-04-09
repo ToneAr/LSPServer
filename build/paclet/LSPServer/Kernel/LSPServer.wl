@@ -2065,10 +2065,11 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
 
   (* Cancel any in-flight slow-tier diagnostics task — its content is now stale *)
   If[$DiagnosticsTask =!= None,
+    $DiagnosticsTask    = None;
+    $DiagnosticsTaskURI = None;
     Quiet[If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
       AbortKernels[$DiagnosticsKernel]
-    ]];
-    $DiagnosticsTask = None
+    ]]
   ];
 
   changes = params["contentChanges"];
