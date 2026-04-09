@@ -436,6 +436,15 @@ Module[{logFile, logFileStream,
 
   $kernelStartTime = Now;
 
+  If[$Notebooks,
+    (*
+    OK to return here without killing the kernel
+    This is in a notebook session
+    *)
+    Message[StartServer::notebooks];
+    Throw[$Failed]
+  ];
+
   (* Background kernel for async workspace diagnostics *)
   $DiagnosticsTask       = None;
   $DiagnosticsTaskURI    = None;
@@ -446,23 +455,15 @@ Module[{logFile, logFileStream,
     ParallelEvaluate[
       Needs["CodeParser`"];
       Needs["CodeInspector`"];
-      Needs["CodeFormatter`"];
+      Needs["CodeFormatter`"]
       ,
       $DiagnosticsKernel
     ];
-    DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`PacletIndex`",
-      "LSPServer`Diagnostics`"];
+    DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
+      "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
+      $DiagnosticsKernel];
     ,
     log[0, "WARNING: LaunchKernels failed — workspace diagnostics will run synchronously"]
-  ];
-
-  If[$Notebooks,
-    (*
-    OK to return here without killing the kernel
-    This is in a notebook session
-    *)
-    Message[StartServer::notebooks];
-    Throw[$Failed]
   ];
 
   (*
