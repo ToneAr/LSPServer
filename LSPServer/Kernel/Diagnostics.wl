@@ -199,10 +199,17 @@ Module[{scopingData, filtered, scopingLints, isActive},
 ]
 
 
-(* Stub — full implementation in Task 5 *)
+(* Stub — Task 5 will add ParallelSubmit for the async path.
+   Falls back to synchronous runWorkspaceDiagnostics when no kernel is available
+   so workspace lints (undefined symbols, context errors) still appear. *)
 dispatchWorkspaceDiagnostics[uri_String] :=
   If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    Null  (* placeholder — Task 5 will add ParallelSubmit here *)
+    Null,  (* async path — Task 5 *)
+    (* Synchronous fallback: run workspace diagnostics inline *)
+    handleContent[<|
+      "method" -> "textDocument/runWorkspaceDiagnostics",
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+    |>]
   ]
 
 
@@ -239,6 +246,11 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
     entry["CST"] = cst
   ];
 
+  If[FailureQ[cst],
+    log[2, "runFastDiagnostics: cst parse failed"];
+    Throw[{}]
+  ];
+
   agg = Lookup[entry, "Agg", Null];
   If[agg === Null,
     agg = CodeParser`Abstract`Aggregate[cst];
@@ -262,11 +274,15 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
   entry["IgnoreData"] = ignoreData;
 
   (* ── Lint passes ── *)
-  cstLints = Quiet[CodeInspectCST[cst, "SuppressedRegions" -> suppressedRegions]];
+  cstLints = Quiet[CodeInspectCST[cst,
+    "AggregateRules" -> <||>, "AbstractRules" -> <||>,
+    "SuppressedRegions" -> suppressedRegions]];
   If[!ListQ[cstLints], cstLints = {}];
   entry["CSTLints"] = cstLints;
 
-  aggLints = Quiet[CodeInspectAgg[agg, "SuppressedRegions" -> suppressedRegions]];
+  aggLints = Quiet[CodeInspectAgg[agg,
+    "AbstractRules" -> <||>,
+    "SuppressedRegions" -> suppressedRegions]];
   If[!ListQ[aggLints], aggLints = {}];
   entry["AggLints"] = aggLints;
 
