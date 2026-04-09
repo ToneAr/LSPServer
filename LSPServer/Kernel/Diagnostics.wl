@@ -128,6 +128,16 @@ Module[{params, doc, uri, res},
   res
 ]]
 
+(*
+Note: handleContent["textDocument/runFastDiagnostics"] is defined below.
+It runs concreteParse, aggregateParse, abstractParse, all lint passes and
+scopingLints synchronously in one event-loop iteration, publishes partial
+results, then dispatches runWorkspaceDiagnosticsWorker to $DiagnosticsKernel.
+The old per-step handlers (runConcreteDiagnostics, runScopingDiagnostics, etc.)
+are preserved — some remain reachable via CodeAction.wl; runScopingDiagnostics
+and runWorkspaceDiagnostics are orphaned pending Task 3's fast-tier handler.
+*)
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/suppressedRegions"]] :=
 Catch[
 Module[{params, doc, uri, entry, cst, suppressedRegions},
@@ -1125,7 +1135,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       localVarMap =
         Module[{rawEntries, convergenceEntries, condEntries, paramEntries,
                 iterEntries, mapParamEntries, allEntries,
-                closureVarRanges, findEnclosingClosureForVar},
+                closureVarRanges, sowedVarRanges, findEnclosingClosureForVar},
           (* Pre-scan: build closureVarRanges — maps each declared var name to the
              list of source ranges of closures (Module/Block/With) that declare it.
              Used to scope rawEntries and convergenceEntries to their closure. *)
