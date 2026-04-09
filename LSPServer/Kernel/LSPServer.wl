@@ -104,6 +104,14 @@ $ImplicitTokensDelayAfterLastChange
 
 $WorkspaceRootPath
 
+$DiagnosticsKernel
+
+$DiagnosticsTask
+
+$DiagnosticsTaskURI
+
+$DiagnosticsTaskResult
+
 $startupMessagesText
 
 
@@ -427,6 +435,26 @@ Module[{logFile, logFileStream,
   logFileName, logFileCounter, oldLogFiles, now, quantity30days, dateStr, readEvalWriteCycle},
 
   $kernelStartTime = Now;
+
+  (* Background kernel for async workspace diagnostics *)
+  $DiagnosticsTask       = None;
+  $DiagnosticsTaskURI    = None;
+  $DiagnosticsTaskResult = None;
+  $DiagnosticsKernel     = Quiet[Check[First[LaunchKernels[1]], $Failed]];
+  If[$DiagnosticsKernel =!= $Failed,
+    (* Load required packages on the worker kernel, then distribute LSPServer definitions *)
+    ParallelEvaluate[
+      Needs["CodeParser`"];
+      Needs["CodeInspector`"];
+      Needs["CodeFormatter`"];
+      ,
+      $DiagnosticsKernel
+    ];
+    DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`PacletIndex`",
+      "LSPServer`Diagnostics`"];
+    ,
+    log[0, "WARNING: LaunchKernels failed — workspace diagnostics will run synchronously"]
+  ];
 
   If[$Notebooks,
     (*
@@ -2114,6 +2142,10 @@ exitGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING GRACEFULLY"];
   log[0, "\n\n"];
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = None
+  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   Pause[1];
   (
@@ -2140,6 +2172,10 @@ exitSemiGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING SEMI-GRACEFULLY"];
   log[0, "\n\n"];
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = None
+  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   Pause[1];
   (
@@ -2166,6 +2202,10 @@ exitHard[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING HARD"];
   log[0, "\n\n"];
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = None
+  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   Pause[1];
   (
