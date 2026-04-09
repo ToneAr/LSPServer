@@ -41,3 +41,25 @@ VerificationTest[
   True,
   TestID -> "FastTierPublishesImmediately"
 ]
+
+VerificationTest[
+  Module[{fakeURI},
+    fakeURI = "file:///test.wl";
+    $DiagnosticsTask    = "fake-task-sentinel";
+    $DiagnosticsTaskURI = fakeURI;
+    $DiagnosticsKernel  = $Failed;
+    $ContentQueue = {};
+    $OpenFilesMap = <|fakeURI -> <|"PreviousAST" -> Null, "PreviousUserSymbols" -> {}|>|>;
+    $didChangeScheduledJobs = {};
+    handleContent[<|
+      "method" -> "textDocument/didChangeFencepost",
+      "params" -> <|
+        "textDocument" -> <|"uri" -> fakeURI|>,
+        "contentChanges" -> {<|"text" -> "x = 2"|>}
+      |>
+    |>];
+    $DiagnosticsTask === None
+  ],
+  True,
+  TestID -> "DidChangeFencepostCancelsStaleTask"
+]

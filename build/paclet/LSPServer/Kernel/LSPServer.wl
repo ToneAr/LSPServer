@@ -104,6 +104,14 @@ $ImplicitTokensDelayAfterLastChange
 
 $WorkspaceRootPath
 
+$DiagnosticsKernel
+
+$DiagnosticsTask
+
+$DiagnosticsTaskURI
+
+$DiagnosticsTaskResult
+
 $startupMessagesText
 
 
@@ -215,6 +223,7 @@ Get[FileNameJoin[{location, "Kernel", "Diagnostics.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "FoldingRange.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Formatting.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Hover.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "TypeWL.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "ImplicitTokens.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "InlayHints.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "References.wl"}]]
@@ -434,6 +443,27 @@ Module[{logFile, logFileStream,
     *)
     Message[StartServer::notebooks];
     Throw[$Failed]
+  ];
+
+  (* Background kernel for async workspace diagnostics *)
+  $DiagnosticsTask       = None;
+  $DiagnosticsTaskURI    = None;
+  $DiagnosticsTaskResult = None;
+  $DiagnosticsKernel     = Quiet[Check[First[LaunchKernels[1]], $Failed]];
+  If[$DiagnosticsKernel =!= $Failed,
+    (* Load required packages on the worker kernel, then distribute LSPServer definitions *)
+    ParallelEvaluate[
+      Needs["CodeParser`"];
+      Needs["CodeInspector`"];
+      Needs["CodeFormatter`"]
+      ,
+      $DiagnosticsKernel
+    ];
+    DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
+      "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
+      $DiagnosticsKernel];
+    ,
+    log[0, "WARNING: LaunchKernels failed — workspace diagnostics will run synchronously"]
   ];
 
   (*
@@ -1475,13 +1505,38 @@ Module[{params, doc, uri, text, entry},
     "LastChange" -> Now
   |>;
 
+  (* Pre-process .ipwl files so the parse handlers use annotation-free source *)
+  If[StringEndsQ[uri, ".ipwl"],
+    entry["PreprocessedText"] = LSPServer`TypeWL`PreprocessIPWL[text][[1]]
+  ];
+
   $OpenFilesMap[uri] = entry;
 
   (*
-  Update the paclet index for this file
+  Update the paclet index for this file, then cache the parsed artifacts into
+  the entry so textDocument/concreteParse, textDocument/aggregateParse, and
+  textDocument/abstractParse can skip their redundant re-parse steps.
   *)
   If[StringQ[$WorkspaceRootPath],
-    UpdateFileIndex[uri, text]
+    With[{parseResult = UpdateFileIndex[uri, text]},
+      If[ListQ[parseResult] && Length[parseResult] == 3,
+        Module[{e},
+          e = $OpenFilesMap[uri];
+          If[AssociationQ[e],
+            e["CST"] = parseResult[[1]];
+            If[!StringContainsQ[text, "\t"], e["CSTTabs"] = parseResult[[1]]];
+            e["Agg"] = parseResult[[2]];
+            e["AST"] = parseResult[[3]];
+            e["PreviousAST"] = parseResult[[3]];
+            With[{syms = findAllUserSymbols[parseResult[[3]]]},
+              e["UserSymbols"]         = syms;
+              e["PreviousUserSymbols"] = syms
+            ];
+            $OpenFilesMap[uri] = e
+          ]
+        ]
+      ]
+    ]
   ];
 
   log[1, "textDocument/didOpenFencepost: Exit"];
@@ -1521,7 +1576,7 @@ Module[{params, doc, uri, cst, text, entry, fileName, fileFormat},
     Throw[{}]
   ];
 
-  text = entry["Text"];
+  text = Lookup[entry, "PreprocessedText", entry["Text"]];
 
   If[$Debug2,
     log["text: ", stringLineTake[StringTake[ToString[text, InputForm], UpTo[1000]], UpTo[20]]];
@@ -1610,7 +1665,7 @@ Module[{params, doc, uri, text, entry, cstTabs, fileName, fileFormat},
     Throw[{}]
   ];
 
-  text = entry["Text"];
+  text = Lookup[entry, "PreprocessedText", entry["Text"]];
 
   (*
   Using "TabWidth" -> 4 here because the notification is rendered down to HTML and tabs need to be expanded in HTML
@@ -2008,6 +2063,14 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
     Throw[{}]
   ];
 
+  (* Cancel any in-flight slow-tier diagnostics task — its content is now stale *)
+  If[$DiagnosticsTask =!= None,
+    Quiet[If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+      AbortKernels[$DiagnosticsKernel]
+    ]];
+    $DiagnosticsTask = None
+  ];
+
   changes = params["contentChanges"];
 
   (*
@@ -2037,6 +2100,11 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
     "PreviousUserSymbols" -> entry["PreviousUserSymbols"]
   |>;
 
+  (* Pre-process .ipwl files so the parse handlers use annotation-free source *)
+  If[StringEndsQ[uri, ".ipwl"],
+    entry["PreprocessedText"] = LSPServer`TypeWL`PreprocessIPWL[text][[1]]
+  ];
+
   $OpenFilesMap[uri] = entry;
 
   (*
@@ -2045,7 +2113,27 @@ Module[{params, doc, uri, text, lastChange, entry, changes},
   If[StringQ[$WorkspaceRootPath],
     AppendTo[entry["ScheduledJobs"],
       Function[{e}, If[Now - e["LastChange"] > Quantity[$DiagnosticsDelayAfterLastChange, "Seconds"],
-        UpdateFileIndex[uri, e["Text"]];
+        (* Run index update, then cache parsed artifacts into $OpenFilesMap so the
+           diagnostics pipeline can skip its redundant concreteParse / aggregateParse /
+           abstractParse steps. *)
+        With[{parseResult = UpdateFileIndex[uri, e["Text"]]},
+          If[ListQ[parseResult] && Length[parseResult] == 3,
+            Module[{curEntry = $OpenFilesMap[uri]},
+              If[AssociationQ[curEntry],
+                curEntry["CST"] = parseResult[[1]];
+                If[!StringContainsQ[e["Text"], "\t"], curEntry["CSTTabs"] = parseResult[[1]]];
+                curEntry["Agg"] = parseResult[[2]];
+                curEntry["AST"] = parseResult[[3]];
+                curEntry["PreviousAST"] = parseResult[[3]];
+                With[{syms = findAllUserSymbols[parseResult[[3]]]},
+                  curEntry["UserSymbols"]         = syms;
+                  curEntry["PreviousUserSymbols"] = syms
+                ];
+                $OpenFilesMap[uri] = curEntry
+              ]
+            ]
+          ]
+        ];
         {{}, True},
         {{}, False}]
       ]
@@ -2063,6 +2151,10 @@ exitGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING GRACEFULLY"];
   log[0, "\n\n"];
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = None
+  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   Pause[1];
   (
@@ -2089,6 +2181,10 @@ exitSemiGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING SEMI-GRACEFULLY"];
   log[0, "\n\n"];
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = None
+  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   Pause[1];
   (
@@ -2115,6 +2211,10 @@ exitHard[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING HARD"];
   log[0, "\n\n"];
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = None
+  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   Pause[1];
   (
