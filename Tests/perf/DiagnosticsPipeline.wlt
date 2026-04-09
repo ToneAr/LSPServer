@@ -63,3 +63,18 @@ VerificationTest[
   True,
   TestID -> "DidChangeFencepostCancelsStaleTask"
 ]
+
+VerificationTest[
+  Module[{snap},
+    $PacletIndex = <|"Symbols" -> <||>, "Files" -> <||>,
+      "Contexts" -> <||>, "Dependencies" -> {}, "ContextAliases" -> <||>|>;
+    $BuiltinPatterns = <||>;
+    $WorkspaceRootPath = "/tmp/testws";
+    snap = buildWorkerSnapshot["file:///test.wl"];
+    KeyExistsQ[snap, "PacletIndex"] &&
+    KeyExistsQ[snap, "BuiltinPatterns"] &&
+    KeyExistsQ[snap, "WorkspaceRootPath"]
+  ],
+  True,
+  TestID -> "BuildWorkerSnapshotHasRequiredKeys"
+]

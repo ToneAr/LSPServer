@@ -199,18 +199,73 @@ Module[{scopingData, filtered, scopingLints, isActive},
 ]
 
 
-(* Stub — Task 5 will add ParallelSubmit for the async path.
-   Falls back to synchronous runWorkspaceDiagnostics when no kernel is available
-   so workspace lints (undefined symbols, context errors) still appear. *)
+(*
+Build a serialisable snapshot of mutable global state for the
+background diagnostics worker kernel. The worker sets these globals
+from the snapshot before running, so all helper functions work unchanged.
+*)
+buildWorkerSnapshot[uri_String] :=
+Module[{fileEntry},
+  fileEntry = Lookup[$PacletIndex["Files"], uri, <||>];
+  <|
+    "PacletIndex"       -> $PacletIndex,
+    "BuiltinPatterns"   -> $BuiltinPatterns,
+    "WorkspaceRootPath" -> $WorkspaceRootPath,
+    "ConfidenceLevel"   -> $ConfidenceLevel
+  |>
+]
+
+(*
+Submit runWorkspaceDiagnosticsWorker to the background kernel.
+No-op if the diagnostics kernel is unavailable ($Failed).
+Falls back to synchronous inline workspace diagnostics if no kernel.
+*)
 dispatchWorkspaceDiagnostics[uri_String] :=
-  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    Null,  (* async path — Task 5 *)
-    (* Synchronous fallback: run workspace diagnostics inline *)
-    handleContent[<|
-      "method" -> "textDocument/runWorkspaceDiagnostics",
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
-    |>]
+Module[{ast, snapshot},
+  If[$DiagnosticsKernel === $Failed || $DiagnosticsKernel === None,
+    (* No parallel kernel available — fall back to inline workspace diags.
+       Quiet suppresses package-load shadow messages that appear when
+       WolframLanguageSyntax`Generate` is first autoloaded in this context. *)
+    Quiet @ handleContent[<|"method" -> "textDocument/runWorkspaceDiagnostics",
+                    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>];
+    Return[Null]
+  ];
+  (* Cancel any in-flight task before submitting a new one *)
+  If[$DiagnosticsTask =!= None,
+    $DiagnosticsTask    = None;
+    $DiagnosticsTaskURI = None;
+    Quiet[AbortKernels[$DiagnosticsKernel]]
+  ];
+  ast      = $OpenFilesMap[uri]["AST"];
+  snapshot = buildWorkerSnapshot[uri];
+  $DiagnosticsTaskURI = uri;
+  $DiagnosticsTask    = Check[
+    ParallelSubmit[{$DiagnosticsKernel},
+      runWorkspaceDiagnosticsWorker[uri, ast, snapshot]
+    ],
+    $Failed
+  ];
+  If[$DiagnosticsTask === $Failed,
+    log[0, "WARNING: ParallelSubmit failed for workspace diagnostics"];
+    $DiagnosticsTask = None;
+    (* Relaunch kernel and retry once *)
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = Quiet[Check[First[LaunchKernels[1]], $Failed]];
+    If[$DiagnosticsKernel =!= $Failed,
+      ParallelEvaluate[
+        Needs["CodeParser`"]; Needs["CodeInspector`"]; Needs["CodeFormatter`"],
+        $DiagnosticsKernel
+      ];
+      DistributeDefinitions["LSPServer`", "LSPServer`Private`",
+        "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
+        $DiagnosticsKernel];
+      $DiagnosticsTask = Quiet[Check[
+        ParallelSubmit[{$DiagnosticsKernel},
+          runWorkspaceDiagnosticsWorker[uri, ast, snapshot]],
+        None]]
+    ]
   ]
+]
 
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/runFastDiagnostics"]] :=

@@ -29,6 +29,8 @@ handleContent
 
 handleContentAfterShutdown
 
+buildWorkerSnapshot
+
 
 
 
