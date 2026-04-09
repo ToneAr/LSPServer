@@ -138,6 +138,177 @@ are preserved — some remain reachable via CodeAction.wl; runScopingDiagnostics
 and runWorkspaceDiagnostics are orphaned pending Task 3's fast-tier handler.
 *)
 
+(* ── Helper: compute SuppressedRegions from CST ── *)
+getSuppressedRegions[cst_] := SuppressedRegions[cst]
+
+
+(* ── Helper: compute ignore data from CST ── *)
+getIgnoreDataFromCST[cst_, uri_] := UpdateIgnoreData[uri, cst]
+
+
+(* ── Helper: filter/sort/limit lints and build publishDiagnostics notification ── *)
+buildPublishNotification[uri_String, entry_?AssociationQ, lints_List] :=
+Module[{lintsWithConfidence, filtered, ignoreData, diagnostics},
+  lintsWithConfidence = Cases[lints,
+    InspectionObject[_, _, _, KeyValuePattern[ConfidenceLevel -> _]]];
+  filtered = Cases[lintsWithConfidence,
+    InspectionObject[_, _, _, KeyValuePattern[
+      ConfidenceLevel -> _?(GreaterEqualThan[$ConfidenceLevel])]]];
+  ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
+  filtered = Select[filtered, !ShouldIgnoreDiagnostic[#, ignoreData]&];
+  filtered = SortBy[filtered,
+    {-severityToInteger[#[[3]]]&, #[[4, Key[Source]]]&}];
+  filtered = Take[filtered, UpTo[CodeInspector`Summarize`$DefaultLintLimit]];
+  diagnostics = Flatten[lintToDiagnostics /@ filtered];
+  <|"jsonrpc" -> "2.0",
+    "method" -> "textDocument/publishDiagnostics",
+    "params" -> <|"uri" -> uri, "diagnostics" -> diagnostics|>|>
+]
+
+
+(* ── Helper: convert entry["ScopingData"] to InspectionObject lint entries ── *)
+convertScopingDataToLints[uri_String, entry_?AssociationQ, suppressedRegions_] :=
+Module[{scopingData, filtered, scopingLints, isActive},
+  scopingData = Lookup[entry, "ScopingData", {}];
+
+  (* Filter those that have non-empty modifiers *)
+  filtered = Cases[scopingData, scopingDataObject[_, _, {_, ___}, _]];
+
+  scopingLints = scopingDataObjectToLints /@ filtered;
+  scopingLints = Flatten[scopingLints];
+
+  (* Filter out suppressed *)
+  isActive = makeIsActiveFunc[suppressedRegions];
+  scopingLints = Select[scopingLints, isActive];
+
+  (*
+  If $SemanticTokens, then only keep: errors
+  If NOT $SemanticTokens, keep errors + unused variables
+  *)
+  If[$SemanticTokens,
+    scopingLints =
+      Cases[scopingLints, InspectionObject[_, _, "Warning" | "Error" | "Fatal", _]]
+    ,
+    scopingLints =
+      Cases[scopingLints,
+        InspectionObject[_, _, "Warning" | "Error" | "Fatal", _] |
+          InspectionObject["UnusedVariable", _, "Scoping", _]]
+  ];
+
+  scopingLints
+]
+
+
+(* Stub — full implementation in Task 5 *)
+dispatchWorkspaceDiagnostics[uri_String] :=
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Null  (* placeholder — Task 5 will add ParallelSubmit here *)
+  ]
+
+
+handleContent[content:KeyValuePattern["method" -> "textDocument/runFastDiagnostics"]] :=
+Catch[
+Module[{params, doc, uri, entry, text, cst, agg, ast,
+        suppressedRegions, ignoreData,
+        cstLints, aggLints, astLints, scopingData, scopingLints,
+        fastLints, notification},
+
+  log[1, "textDocument/runFastDiagnostics: enter"];
+
+  params = content["params"];
+  doc    = params["textDocument"];
+  uri    = doc["uri"];
+
+  If[isStale[$ContentQueue, uri],
+    log[2, "stale"];
+    Throw[{}]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[entry === Null,
+    Throw[Failure["URINotFound", <|"URI" -> uri|>]]
+  ];
+
+  (* ── Parse (use UpdateFileIndex-cached artifacts if present) ── *)
+  text = Lookup[entry, "PreprocessedText", entry["Text"]];
+
+  cst = Lookup[entry, "CST", Null];
+  If[cst === Null,
+    cst = Quiet[CodeConcreteParse[text,
+      "FileFormat" -> If[StringEndsQ[uri, ".wl"], "Package", "Script"]]];
+    entry["CST"] = cst
+  ];
+
+  agg = Lookup[entry, "Agg", Null];
+  If[agg === Null,
+    agg = CodeParser`Abstract`Aggregate[cst];
+    entry["Agg"] = agg
+  ];
+
+  ast = Lookup[entry, "AST", Null];
+  If[ast === Null,
+    ast = CodeParser`Abstract`Abstract[agg];
+    entry["AST"] = ast;
+    entry["PreviousAST"] = ast
+  ];
+
+  (* ── Suppressed regions + ignore comments ── *)
+  suppressedRegions = Lookup[entry, "SuppressedRegions",
+    getSuppressedRegions[cst]];
+  entry["SuppressedRegions"] = suppressedRegions;
+
+  ignoreData = Lookup[entry, "IgnoreData",
+    getIgnoreDataFromCST[cst, uri]];
+  entry["IgnoreData"] = ignoreData;
+
+  (* ── Lint passes ── *)
+  cstLints = Quiet[CodeInspectCST[cst, "SuppressedRegions" -> suppressedRegions]];
+  If[!ListQ[cstLints], cstLints = {}];
+  entry["CSTLints"] = cstLints;
+
+  aggLints = Quiet[CodeInspectAgg[agg, "SuppressedRegions" -> suppressedRegions]];
+  If[!ListQ[aggLints], aggLints = {}];
+  entry["AggLints"] = aggLints;
+
+  If[!FailureQ[ast],
+    astLints = Quiet[CodeInspectAST[ast, "SuppressedRegions" -> suppressedRegions]];
+    If[!ListQ[astLints], astLints = {}];
+    entry["ASTLints"] = astLints,
+    astLints = {}; entry["ASTLints"] = {}
+  ];
+
+  (* ── Scoping ── *)
+  scopingData = {};
+  scopingLints = {};
+  If[!FailureQ[ast],
+    scopingData = Quiet[ScopingData[ast]];
+    If[!ListQ[scopingData], scopingData = {}];
+    With[{mathData = Quiet[LSPServer`SemanticTokens`Private`extractMathScopingData[ast]]},
+      If[ListQ[mathData], scopingData = Join[scopingData, mathData]]];
+    entry["ScopingData"] = scopingData;
+    scopingLints = convertScopingDataToLints[uri, entry, suppressedRegions];
+    If[!ListQ[scopingLints], scopingLints = {}];
+    entry["ScopingLints"] = scopingLints
+  ];
+
+  (* Clear workspace lints — slow tier will repopulate *)
+  entry["WorkspaceLints"] = Null;
+
+  $OpenFilesMap[uri] = entry;
+
+  (* ── Publish partial results immediately ── *)
+  fastLints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints;
+  notification = buildPublishNotification[uri, entry, fastLints];
+
+  (* ── Fire slow tier ── *)
+  dispatchWorkspaceDiagnostics[uri];
+
+  log[1, "textDocument/runFastDiagnostics: exit"];
+
+  {notification}
+]]
+
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/suppressedRegions"]] :=
 Catch[
 Module[{params, doc, uri, entry, cst, suppressedRegions},

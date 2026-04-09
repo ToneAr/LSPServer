@@ -27,17 +27,25 @@ With[{builtinFile = FileNameJoin[{
 
 (*
   builtinSpecToPattern[s]
-  Convert a single input-spec string from $BuiltinPatterns into a WL pattern
+  Convert a single input spec from $BuiltinPatterns into a WL pattern
   expression suitable for MatchQ against a representative sample value.
 
-  Spec string vocabulary:
-    "Type..."  - BlankSequence[Symbol["Type"]]    (1+ expressions with head Type)
-    "Type*"    - BlankNullSequence[Symbol["Type"]] (0+ expressions with head Type)
-    "..."      - BlankSequence[]                   (1+ untyped)
-    "*"        - BlankNullSequence[]               (0+ untyped)
-    "_?Pred"   - ToExpression["_?Pred"]            (PatternTest -- starts with "_")
-    "Type"     - Blank[Symbol["Type"]]             (exactly one typed arg)
-    None       - Blank[]                            (exactly one untyped arg)
+  New format (WL patterns stored directly):
+    __Type  - BlankSequence[Type]      (1+ expressions with head Type)
+    ___Type - BlankNullSequence[Type]  (0+ expressions with head Type)
+    __      - BlankSequence[]          (1+ untyped)
+    ___     - BlankNullSequence[]      (0+ untyped)
+    _?Pred  - PatternTest[Blank[], Pred]
+    _Type   - Blank[Type]              (exactly one typed arg)
+    None    - Blank[]                  (exactly one untyped arg)
+
+  Legacy string format (still accepted for backward compatibility):
+    "Type..." - BlankSequence[Symbol["Type"]]
+    "Type*"   - BlankNullSequence[Symbol["Type"]]
+    "..."     - BlankSequence[]
+    "*"       - BlankNullSequence[]
+    "_?Pred"  - ToExpression["_?Pred"]
+    "Type"    - Blank[Symbol["Type"]]
 *)
 builtinSpecToPattern[s_String] :=
   Which[
@@ -49,46 +57,44 @@ builtinSpecToPattern[s_String] :=
     True, Blank[Symbol[s]]
   ]
 builtinSpecToPattern[None] := Blank[]
+builtinSpecToPattern[p_] := p  (* already a WL pattern — pass through *)
 
 (*
   overloadSpecMatchesArgs[specs, argSamples]
-  True when the overload described by specs (a List of spec strings) is
+  True when the overload described by specs (a List of WL patterns) is
   compatible with the given argument samples.
 
   For fixed-arity overloads: exact length match + element-wise MatchQ.
-  For variadic overloads (last spec ends with "..." or "*"):
+  For variadic overloads (last spec is BlankSequence or BlankNullSequence):
     - at least Length[specs]-1 args required
     - fixed prefix args matched normally
     - each tail arg matched against the element type (Blank[T])
   Missing["Unknown"] args always match (unresolvable types pass through).
 *)
 overloadSpecMatchesArgs[specs_List, argSamples_List] :=
-  Module[{n = Length[specs], m = Length[argSamples],
-          isVar, fixedN, varSpec, varElemPat},
-    isVar = n > 0 && StringQ[Last[specs]] &&
-              (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+  Module[{wlSpecs = builtinSpecToPattern /@ specs,
+          n, m, isVar, fixedN, varSpec, varElemPat},
+    n = Length[wlSpecs];
+    m = Length[argSamples];
+    isVar = n > 0 && MatchQ[Last[wlSpecs], _BlankSequence | _BlankNullSequence];
     If[!isVar,
       (* Fixed arity: exact length + element-wise match *)
       n === m && (n === 0 || AllTrue[
-        Transpose[{argSamples, builtinSpecToPattern /@ specs}],
+        Transpose[{argSamples, wlSpecs}],
         (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
       ]),
       (* Variadic: at least fixedN args; prefix match + tail element match *)
       fixedN  = n - 1;
-      varSpec = Last[specs];
+      varSpec = Last[wlSpecs];
       (* Element pattern for checking each tail arg individually *)
-      varElemPat = Which[
-        varSpec === "..." || varSpec === "*", Blank[],
-        StringEndsQ[varSpec, "..."],
-          Blank[Symbol[StringDrop[varSpec, -3]]],
-        StringEndsQ[varSpec, "*"],
-          Blank[Symbol[StringDrop[varSpec, -1]]],
-        True, Blank[]
-      ];
+      varElemPat = With[{lp = varSpec},
+        If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
+        If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
+        Blank[]]]];
       m >= fixedN &&
       (fixedN === 0 || AllTrue[
         Transpose[{Take[argSamples, fixedN],
-                   builtinSpecToPattern /@ Take[specs, fixedN]}],
+                   Take[wlSpecs, fixedN]}],
         (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
       ]) &&
       AllTrue[Drop[argSamples, fixedN],
@@ -115,24 +121,193 @@ Module[{params, doc, uri, res},
     Throw[{}]
   ];
 
-  res = <| "method" -> #, "params" -> params |>& /@ {
-    "textDocument/concreteParse",
-    "textDocument/suppressedRegions",
-    "textDocument/parseIgnoreComments",
-    "textDocument/runConcreteDiagnostics",
-    "textDocument/aggregateParse",
-    "textDocument/runAggregateDiagnostics",
-    "textDocument/abstractParse",
-    "textDocument/runAbstractDiagnostics",
-    "textDocument/runScopingData",
-    "textDocument/runScopingDiagnostics",
-    "textDocument/runWorkspaceDiagnostics"
-  };
+  res = {<| "method" -> "textDocument/runFastDiagnostics", "params" -> params |>};
 
   log[1, "textDocument/runDiagnostics: exit"];
 
   res
 ]]
+
+(*
+Note: handleContent["textDocument/runFastDiagnostics"] is defined below.
+It runs concreteParse, aggregateParse, abstractParse, all lint passes and
+scopingLints synchronously in one event-loop iteration, publishes partial
+results, then dispatches runWorkspaceDiagnosticsWorker to $DiagnosticsKernel.
+The old per-step handlers (runConcreteDiagnostics, runScopingDiagnostics, etc.)
+are preserved — some remain reachable via CodeAction.wl; runScopingDiagnostics
+and runWorkspaceDiagnostics are orphaned pending Task 3's fast-tier handler.
+*)
+
+(* ── Helper: compute SuppressedRegions from CST ── *)
+getSuppressedRegions[cst_] := SuppressedRegions[cst]
+
+
+(* ── Helper: compute ignore data from CST ── *)
+getIgnoreDataFromCST[cst_, uri_] := UpdateIgnoreData[uri, cst]
+
+
+(* ── Helper: filter/sort/limit lints and build publishDiagnostics notification ── *)
+buildPublishNotification[uri_String, entry_?AssociationQ, lints_List] :=
+Module[{lintsWithConfidence, filtered, ignoreData, diagnostics},
+  lintsWithConfidence = Cases[lints,
+    InspectionObject[_, _, _, KeyValuePattern[ConfidenceLevel -> _]]];
+  filtered = Cases[lintsWithConfidence,
+    InspectionObject[_, _, _, KeyValuePattern[
+      ConfidenceLevel -> _?(GreaterEqualThan[$ConfidenceLevel])]]];
+  ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
+  filtered = Select[filtered, !ShouldIgnoreDiagnostic[#, ignoreData]&];
+  filtered = SortBy[filtered,
+    {-severityToInteger[#[[3]]]&, #[[4, Key[Source]]]&}];
+  filtered = Take[filtered, UpTo[CodeInspector`Summarize`$DefaultLintLimit]];
+  diagnostics = Flatten[lintToDiagnostics /@ filtered];
+  <|"jsonrpc" -> "2.0",
+    "method" -> "textDocument/publishDiagnostics",
+    "params" -> <|"uri" -> uri, "diagnostics" -> diagnostics|>|>
+]
+
+
+(* ── Helper: convert entry["ScopingData"] to InspectionObject lint entries ── *)
+convertScopingDataToLints[uri_String, entry_?AssociationQ, suppressedRegions_] :=
+Module[{scopingData, filtered, scopingLints, isActive},
+  scopingData = Lookup[entry, "ScopingData", {}];
+
+  (* Filter those that have non-empty modifiers *)
+  filtered = Cases[scopingData, scopingDataObject[_, _, {_, ___}, _]];
+
+  scopingLints = scopingDataObjectToLints /@ filtered;
+  scopingLints = Flatten[scopingLints];
+
+  (* Filter out suppressed *)
+  isActive = makeIsActiveFunc[suppressedRegions];
+  scopingLints = Select[scopingLints, isActive];
+
+  (*
+  If $SemanticTokens, then only keep: errors
+  If NOT $SemanticTokens, keep errors + unused variables
+  *)
+  If[$SemanticTokens,
+    scopingLints =
+      Cases[scopingLints, InspectionObject[_, _, "Warning" | "Error" | "Fatal", _]]
+    ,
+    scopingLints =
+      Cases[scopingLints,
+        InspectionObject[_, _, "Warning" | "Error" | "Fatal", _] |
+          InspectionObject["UnusedVariable", _, "Scoping", _]]
+  ];
+
+  scopingLints
+]
+
+
+(* Stub — full implementation in Task 5 *)
+dispatchWorkspaceDiagnostics[uri_String] :=
+  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Null  (* placeholder — Task 5 will add ParallelSubmit here *)
+  ]
+
+
+handleContent[content:KeyValuePattern["method" -> "textDocument/runFastDiagnostics"]] :=
+Catch[
+Module[{params, doc, uri, entry, text, cst, agg, ast,
+        suppressedRegions, ignoreData,
+        cstLints, aggLints, astLints, scopingData, scopingLints,
+        fastLints, notification},
+
+  log[1, "textDocument/runFastDiagnostics: enter"];
+
+  params = content["params"];
+  doc    = params["textDocument"];
+  uri    = doc["uri"];
+
+  If[isStale[$ContentQueue, uri],
+    log[2, "stale"];
+    Throw[{}]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[entry === Null,
+    Throw[Failure["URINotFound", <|"URI" -> uri|>]]
+  ];
+
+  (* ── Parse (use UpdateFileIndex-cached artifacts if present) ── *)
+  text = Lookup[entry, "PreprocessedText", entry["Text"]];
+
+  cst = Lookup[entry, "CST", Null];
+  If[cst === Null,
+    cst = Quiet[CodeConcreteParse[text,
+      "FileFormat" -> If[StringEndsQ[uri, ".wl"], "Package", "Script"]]];
+    entry["CST"] = cst
+  ];
+
+  agg = Lookup[entry, "Agg", Null];
+  If[agg === Null,
+    agg = CodeParser`Abstract`Aggregate[cst];
+    entry["Agg"] = agg
+  ];
+
+  ast = Lookup[entry, "AST", Null];
+  If[ast === Null,
+    ast = CodeParser`Abstract`Abstract[agg];
+    entry["AST"] = ast;
+    entry["PreviousAST"] = ast
+  ];
+
+  (* ── Suppressed regions + ignore comments ── *)
+  suppressedRegions = Lookup[entry, "SuppressedRegions",
+    getSuppressedRegions[cst]];
+  entry["SuppressedRegions"] = suppressedRegions;
+
+  ignoreData = Lookup[entry, "IgnoreData",
+    getIgnoreDataFromCST[cst, uri]];
+  entry["IgnoreData"] = ignoreData;
+
+  (* ── Lint passes ── *)
+  cstLints = Quiet[CodeInspectCST[cst, "SuppressedRegions" -> suppressedRegions]];
+  If[!ListQ[cstLints], cstLints = {}];
+  entry["CSTLints"] = cstLints;
+
+  aggLints = Quiet[CodeInspectAgg[agg, "SuppressedRegions" -> suppressedRegions]];
+  If[!ListQ[aggLints], aggLints = {}];
+  entry["AggLints"] = aggLints;
+
+  If[!FailureQ[ast],
+    astLints = Quiet[CodeInspectAST[ast, "SuppressedRegions" -> suppressedRegions]];
+    If[!ListQ[astLints], astLints = {}];
+    entry["ASTLints"] = astLints,
+    astLints = {}; entry["ASTLints"] = {}
+  ];
+
+  (* ── Scoping ── *)
+  scopingData = {};
+  scopingLints = {};
+  If[!FailureQ[ast],
+    scopingData = Quiet[ScopingData[ast]];
+    If[!ListQ[scopingData], scopingData = {}];
+    With[{mathData = Quiet[LSPServer`SemanticTokens`Private`extractMathScopingData[ast]]},
+      If[ListQ[mathData], scopingData = Join[scopingData, mathData]]];
+    entry["ScopingData"] = scopingData;
+    scopingLints = convertScopingDataToLints[uri, entry, suppressedRegions];
+    If[!ListQ[scopingLints], scopingLints = {}];
+    entry["ScopingLints"] = scopingLints
+  ];
+
+  (* Clear workspace lints — slow tier will repopulate *)
+  entry["WorkspaceLints"] = Null;
+
+  $OpenFilesMap[uri] = entry;
+
+  (* ── Publish partial results immediately ── *)
+  fastLints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints;
+  notification = buildPublishNotification[uri, entry, fastLints];
+
+  (* ── Fire slow tier ── *)
+  dispatchWorkspaceDiagnostics[uri];
+
+  log[1, "textDocument/runFastDiagnostics: exit"];
+
+  {notification}
+]]
+
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/suppressedRegions"]] :=
 Catch[
@@ -522,7 +697,7 @@ Catch[
 Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   suppressedRegions, isActive, pacletSymbols, systemSymbols, localSymbols,
   scopingData, locallyDefinedSymbols, contextErrors, contextLints,
-  depSymbols, depSymbolsSet},
+  dependencySymbolSet},
 
   If[$Debug2,
     log["textDocument/runWorkspaceDiagnostics: enter"]
@@ -592,11 +767,24 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   pacletSymbols = GetPacletSymbols[];
 
   (*
-  Get symbols from dependency contexts (BeginPackage/Needs) that are loaded in the kernel.
-  These are NOT false-positive undefined — they're provided by a loaded package.
+  Build a set of short symbol names from all successfully-loaded dependency
+  contexts (loaded via BeginPackage[ctx, {deps}] or Needs[]).
+  Names[ctx<>"*"] returns non-empty only if the package was actually loaded;
+  if Needs failed the list is empty and symbols stay eligible for UndefinedSymbol.
   *)
-  depSymbols = LSPServer`PacletIndex`GetLoadedDependencySymbols[uri];
-  depSymbolsSet = Association[Thread[depSymbols -> True]];
+  dependencySymbolSet = Association[
+    Flatten[Map[
+      Function[{ctx},
+        Module[{names = Quiet[Names[ctx <> "*"]]},
+          If[ListQ[names] && Length[names] > 0,
+            Map[StringReplace[#, StartOfString ~~ ctx -> ""] -> True &, names],
+            {}
+          ]
+        ]
+      ],
+      GetDependencyContexts[]
+    ]]
+  ];
 
   (*
   Get locally defined symbols from scoping data
@@ -624,6 +812,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
           !MemberQ[pacletSymbols, name],
           !KeyExistsQ[depSymbolsSet, name],
           !MemberQ[locallyDefinedSymbols, name],
+          !KeyExistsQ[dependencySymbolSet, name],  (* loaded dependency packages *)
           !StringMatchQ[name, LetterCharacter],  (* Single letter variables *)
           !StringContainsQ[name, "`"],  (* Context paths *)
           !StringMatchQ[name, "$" ~~ LetterCharacter],  (* $ prefixed single letters *)
@@ -669,7 +858,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
     ],
     {err, Take[contextErrors, UpTo[20]]}
   ];
-  
+
   workspaceLints = Join[workspaceLints, contextLints];
 
   workspaceLints = Join[workspaceLints, contextLints]
@@ -818,8 +1007,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                     bestOv = SelectFirst[ovs,
                       Function[{ov},
                         With[{specs = ov[[1]], n = Length[ov[[1]]]},
-                          If[n > 0 && StringQ[Last[specs]] &&
-                               (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]),
+                          If[n > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence],
                             nArgs >= n - 1,   (* variadic: at least fixedN args *)
                             n === nArgs       (* fixed arity: exact match *)
                           ]
@@ -827,17 +1015,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                       ],
                       First[ovs]  (* fallback: first overload if nothing matches *)
                     ];
-                    Switch[bestOv[[2]],
-                      "_?BooleanQ",   True,
-                      "_Integer",     0,
-                      "_String",      "",
-                      "_Real",        0.,
-                      "_Rational",    1/2,
-                      "_List",        {},
-                      "_Association", <||>,
-                      None,           Missing["Unknown"],
-                      _String,        0
-                    ]
+                    patternToSampleValue[bestOv[[2]]]
                   ]
                 ],
               (* User-defined: use DocComment ReturnPattern first,
@@ -1128,48 +1306,48 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       localVarMap =
         Module[{rawEntries, convergenceEntries, condEntries, paramEntries,
                 iterEntries, mapParamEntries, allEntries,
-                closureVarRanges, findEnclosingClosureForVar},
+                closureVarRanges, sowedVarRanges, findEnclosingClosureForVar},
           (* Pre-scan: build closureVarRanges — maps each declared var name to the
              list of source ranges of closures (Module/Block/With) that declare it.
              Used to scope rawEntries and convergenceEntries to their closure. *)
-          closureVarRanges = Association[];
-          Scan[
-            Function[{mbwNode},
-              Catch[
-                Module[{varListNode, closureSrc, varList},
-                  If[Length[mbwNode[[2]]] < 1, Throw[Null, "next"]];
-                  varListNode = mbwNode[[2, 1]];
-                  If[!MatchQ[varListNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
-                    Throw[Null, "next"]
-                  ];
-                  closureSrc = Quiet[mbwNode[[3, Key[Source]]]];
-                  If[!MatchQ[closureSrc, {{_Integer, _Integer}, {_Integer, _Integer}}],
-                    Throw[Null, "next"]
-                  ];
-                  varList = varListNode[[2]];
-                  Scan[Function[vn,
-                    Catch[
-                      Module[{vName},
-                        Which[
-                          MatchQ[vn, LeafNode[Symbol, _, _]],
-                            vName = vn[[2]],
-                          MatchQ[vn, CallNode[LeafNode[Symbol, "Set", _],
-                                              {LeafNode[Symbol, _, _], _}, _]],
-                            vName = vn[[2, 1, 2]],
-                          True, Throw[Null, "next"]
-                        ];
-                        closureVarRanges[vName] = Append[
-                          Lookup[closureVarRanges, vName, {}], closureSrc
+          sowedVarRanges = Last@Reap[
+            Scan[
+              Function[{mbwNode},
+                Catch[
+                  Module[{varListNode, closureSrc, varList},
+                    If[Length[mbwNode[[2]]] < 1, Throw[Null, "next"]];
+                    varListNode = mbwNode[[2, 1]];
+                    If[!MatchQ[varListNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+                      Throw[Null, "next"]
+                    ];
+                    closureSrc = Quiet[mbwNode[[3, Key[Source]]]];
+                    If[!MatchQ[closureSrc, {{_Integer, _Integer}, {_Integer, _Integer}}],
+                      Throw[Null, "next"]
+                    ];
+                    varList = varListNode[[2]];
+                    Scan[Function[vn,
+                      Catch[
+                        Module[{vName},
+                          Which[
+                            MatchQ[vn, LeafNode[Symbol, _, _]],
+                              vName = vn[[2]],
+                            MatchQ[vn, CallNode[LeafNode[Symbol, "Set", _],
+                                                {LeafNode[Symbol, _, _], _}, _]],
+                              vName = vn[[2, 1, 2]],
+                            True, Throw[Null, "next"]
+                          ];
+                          Sow[{vName, closureSrc}]
                         ]
-                      ]
-                    , "next"]
-                  ], varList]
-                ]
-              , "next"]
-            ],
-            Cases[ast, CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
-                  Infinity]
+                      , "next"]
+                    ], varList]
+                  ]
+                , "next"]
+              ],
+              Cases[ast, CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
+                    Infinity]
+            ]
           ];
+          closureVarRanges = GroupBy[Join @@ sowedVarRanges, First -> Last];
           (* Returns the innermost closure range that declares varName and contains line.
              Returns None if line is not inside any closure that declares varName. *)
           findEnclosingClosureForVar = Function[{varName, line},
@@ -1731,8 +1909,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                     Map[
                       Function[{overload},
                         Module[{specs = overload[[1]], isVar},
-                          isVar = Length[specs] > 0 && StringQ[Last[specs]] &&
-                                    (StringEndsQ[Last[specs], "..."] || StringEndsQ[Last[specs], "*"]);
+                          isVar = Length[specs] > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence];
                           <|"InputPatterns" -> builtinSpecToPattern /@ specs,
                             "Variadic"      -> isVar|>
                         ]

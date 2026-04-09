@@ -20,3 +20,24 @@ VerificationTest[
   {"textDocument/runFastDiagnostics"},
   TestID -> "RunDiagnosticsExpandsToFastTierOnly"
 ]
+
+(* Fast tier produces an immediate publishDiagnostics notification *)
+VerificationTest[
+  Module[{fakeURI, result},
+    fakeURI = "file:///test.wl";
+    $OpenFilesMap = <||>;
+    $OpenFilesMap[fakeURI] = <|
+      "Text" -> "x = 1 + 1",
+      "LastChange" -> Now
+    |>;
+    $ContentQueue = {};
+    $DiagnosticsKernel = $Failed;  (* disable slow tier for this test *)
+    result = handleContent[<|
+      "method" -> "textDocument/runFastDiagnostics",
+      "params" -> <|"textDocument" -> <|"uri" -> fakeURI|>|>
+    |>];
+    AnyTrue[result, MatchQ[#, KeyValuePattern["method" -> "textDocument/publishDiagnostics"]]&]
+  ],
+  True,
+  TestID -> "FastTierPublishesImmediately"
+]
