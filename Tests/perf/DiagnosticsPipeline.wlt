@@ -73,7 +73,8 @@ VerificationTest[
     snap = buildWorkerSnapshot["file:///test.wl"];
     KeyExistsQ[snap, "PacletIndex"] &&
     KeyExistsQ[snap, "BuiltinPatterns"] &&
-    KeyExistsQ[snap, "WorkspaceRootPath"]
+    KeyExistsQ[snap, "WorkspaceRootPath"] &&
+    KeyExistsQ[snap, "ConfidenceLevel"]
   ],
   True,
   TestID -> "BuildWorkerSnapshotHasRequiredKeys"
