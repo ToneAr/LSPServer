@@ -204,16 +204,12 @@ Build a serialisable snapshot of mutable global state for the
 background diagnostics worker kernel. The worker sets these globals
 from the snapshot before running, so all helper functions work unchanged.
 *)
-buildWorkerSnapshot[uri_String] :=
-Module[{fileEntry},
-  fileEntry = Lookup[$PacletIndex["Files"], uri, <||>];
-  <|
-    "PacletIndex"       -> $PacletIndex,
-    "BuiltinPatterns"   -> $BuiltinPatterns,
-    "WorkspaceRootPath" -> $WorkspaceRootPath,
-    "ConfidenceLevel"   -> $ConfidenceLevel
-  |>
-]
+buildWorkerSnapshot[uri_String] := <|
+  "PacletIndex"       -> $PacletIndex,
+  "BuiltinPatterns"   -> $BuiltinPatterns,
+  "WorkspaceRootPath" -> $WorkspaceRootPath,
+  "ConfidenceLevel"   -> $ConfidenceLevel
+|>
 
 (*
 Submit runWorkspaceDiagnosticsWorker to the background kernel.
@@ -247,7 +243,8 @@ Module[{ast, snapshot},
   ];
   If[$DiagnosticsTask === $Failed,
     log[0, "WARNING: ParallelSubmit failed for workspace diagnostics"];
-    $DiagnosticsTask = None;
+    $DiagnosticsTask    = None;
+    $DiagnosticsTaskURI = None;
     (* Relaunch kernel and retry once *)
     Quiet[CloseKernels[$DiagnosticsKernel]];
     $DiagnosticsKernel = Quiet[Check[First[LaunchKernels[1]], $Failed]];
@@ -256,9 +253,10 @@ Module[{ast, snapshot},
         Needs["CodeParser`"]; Needs["CodeInspector`"]; Needs["CodeFormatter`"],
         $DiagnosticsKernel
       ];
-      DistributeDefinitions["LSPServer`", "LSPServer`Private`",
+      DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
         "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
         $DiagnosticsKernel];
+      $DiagnosticsTaskURI = uri;
       $DiagnosticsTask = Quiet[Check[
         ParallelSubmit[{$DiagnosticsKernel},
           runWorkspaceDiagnosticsWorker[uri, ast, snapshot]],
