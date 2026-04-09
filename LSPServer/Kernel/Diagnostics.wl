@@ -121,19 +121,7 @@ Module[{params, doc, uri, res},
     Throw[{}]
   ];
 
-  res = <| "method" -> #, "params" -> params |>& /@ {
-    "textDocument/concreteParse",
-    "textDocument/suppressedRegions",
-    "textDocument/parseIgnoreComments",
-    "textDocument/runConcreteDiagnostics",
-    "textDocument/aggregateParse",
-    "textDocument/runAggregateDiagnostics",
-    "textDocument/abstractParse",
-    "textDocument/runAbstractDiagnostics",
-    "textDocument/runScopingData",
-    "textDocument/runScopingDiagnostics",
-    "textDocument/runWorkspaceDiagnostics"
-  };
+  res = {<| "method" -> "textDocument/runFastDiagnostics", "params" -> params |>};
 
   log[1, "textDocument/runDiagnostics: exit"];
 
@@ -1141,44 +1129,44 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
           (* Pre-scan: build closureVarRanges — maps each declared var name to the
              list of source ranges of closures (Module/Block/With) that declare it.
              Used to scope rawEntries and convergenceEntries to their closure. *)
-          closureVarRanges = Association[];
-          Scan[
-            Function[{mbwNode},
-              Catch[
-                Module[{varListNode, closureSrc, varList},
-                  If[Length[mbwNode[[2]]] < 1, Throw[Null, "next"]];
-                  varListNode = mbwNode[[2, 1]];
-                  If[!MatchQ[varListNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
-                    Throw[Null, "next"]
-                  ];
-                  closureSrc = Quiet[mbwNode[[3, Key[Source]]]];
-                  If[!MatchQ[closureSrc, {{_Integer, _Integer}, {_Integer, _Integer}}],
-                    Throw[Null, "next"]
-                  ];
-                  varList = varListNode[[2]];
-                  Scan[Function[vn,
-                    Catch[
-                      Module[{vName},
-                        Which[
-                          MatchQ[vn, LeafNode[Symbol, _, _]],
-                            vName = vn[[2]],
-                          MatchQ[vn, CallNode[LeafNode[Symbol, "Set", _],
-                                              {LeafNode[Symbol, _, _], _}, _]],
-                            vName = vn[[2, 1, 2]],
-                          True, Throw[Null, "next"]
-                        ];
-                        closureVarRanges[vName] = Append[
-                          Lookup[closureVarRanges, vName, {}], closureSrc
+          sowedVarRanges = Last@Reap[
+            Scan[
+              Function[{mbwNode},
+                Catch[
+                  Module[{varListNode, closureSrc, varList},
+                    If[Length[mbwNode[[2]]] < 1, Throw[Null, "next"]];
+                    varListNode = mbwNode[[2, 1]];
+                    If[!MatchQ[varListNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+                      Throw[Null, "next"]
+                    ];
+                    closureSrc = Quiet[mbwNode[[3, Key[Source]]]];
+                    If[!MatchQ[closureSrc, {{_Integer, _Integer}, {_Integer, _Integer}}],
+                      Throw[Null, "next"]
+                    ];
+                    varList = varListNode[[2]];
+                    Scan[Function[vn,
+                      Catch[
+                        Module[{vName},
+                          Which[
+                            MatchQ[vn, LeafNode[Symbol, _, _]],
+                              vName = vn[[2]],
+                            MatchQ[vn, CallNode[LeafNode[Symbol, "Set", _],
+                                                {LeafNode[Symbol, _, _], _}, _]],
+                              vName = vn[[2, 1, 2]],
+                            True, Throw[Null, "next"]
+                          ];
+                          Sow[{vName, closureSrc}]
                         ]
-                      ]
-                    , "next"]
-                  ], varList]
-                ]
-              , "next"]
-            ],
-            Cases[ast, CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
-                  Infinity]
+                      , "next"]
+                    ], varList]
+                  ]
+                , "next"]
+              ],
+              Cases[ast, CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
+                    Infinity]
+            ]
           ];
+          closureVarRanges = GroupBy[Join @@ sowedVarRanges, First -> Last];
           (* Returns the innermost closure range that declares varName and contains line.
              Returns None if line is not inside any closure that declares varName. *)
           findEnclosingClosureForVar = Function[{varName, line},
@@ -1982,7 +1970,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                         overload[[1]]
                       ],
                       "DocComment" -> If[StringQ[overload[[2]]] &&
-                          !StringMatchQ[overload[[2]], "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
+                          !StringMatchQ[overload[[2]], "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
                         <|"ReturnPattern"       -> ToExpression[overload[[2]]],
                           "ReturnPatternString" -> overload[[2]]|>,
                         None
