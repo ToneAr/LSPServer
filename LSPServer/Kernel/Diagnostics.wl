@@ -1970,7 +1970,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                         overload[[1]]
                       ],
                       "DocComment" -> If[StringQ[overload[[2]]] &&
-                          !StringMatchQ[overload[[2]], "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
+                          !StringMatchQ[overload[[2]], "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
                         <|"ReturnPattern"       -> ToExpression[overload[[2]]],
                           "ReturnPatternString" -> overload[[2]]|>,
                         None
