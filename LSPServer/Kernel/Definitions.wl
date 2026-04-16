@@ -9,6 +9,33 @@ Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
 
 
+validDefinitionSourceQ[src_] :=
+  MatchQ[src, {{_Integer?Positive, _Integer?Positive}, {_Integer?Positive, _Integer?Positive}}]
+
+
+definitionLocation[uri_, src_] /; StringQ[uri] && validDefinitionSourceQ[src] :=
+Module[{adjustedSource},
+  adjustedSource = Map[Max[#, 0] &, src - 1, {2}];
+  <|
+    "uri" -> uri,
+    "range" -> <|
+      "start" -> <| "line" -> adjustedSource[[1, 1]], "character" -> adjustedSource[[1, 2]] |>,
+      "end" -> <| "line" -> adjustedSource[[2, 1]], "character" -> adjustedSource[[2, 2]] |>
+    |>
+  |>
+]
+
+
+definitionLocation[uri_, src_] := Nothing
+
+
+definitionLocation[def_Association] :=
+  definitionLocation[Lookup[def, "uri", None], Lookup[def, "source", None]]
+
+
+definitionLocation[_] := Nothing
+
+
 (*
 Find the definition location for an external symbol (from a loaded paclet).
 Returns a list of location associations, or {} if not found.
@@ -147,16 +174,10 @@ Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles,
     If[Length[defs] > 0,
       uri = "file://" <> file;
 
-      locations = Join[locations, Table[
-        <|
-          "uri" -> uri,
-          "range" -> <|
-            "start" -> <| "line" -> src[[1, 1]] - 1, "character" -> src[[1, 2]] - 1 |>,
-            "end" -> <| "line" -> src[[2, 1]] - 1, "character" -> src[[2, 2]] - 1 |>
-          |>
-        |>,
-        {src, defs}
-      ]]
+      locations = Join[
+        locations,
+        DeleteCases[definitionLocation[uri, #] & /@ defs, Nothing]
+      ]
     ],
     {file, kernelFiles}
   ];
@@ -291,12 +312,7 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
 
   srcs = #[[3, Key[Source]]]& /@ cases;
 
-  localLocations =
-    Function[{src},
-      <| "uri" -> uri,
-         "range" -> <| "start" -> <| "line" -> #[[1, 1]], "character" -> #[[1, 2]] |>,
-                       "end" -> <| "line" -> #[[2, 1]], "character" -> #[[2, 2]] |> |>
-      |>&[Map[Max[#, 0]&, src-1, {2}]]] /@ srcs;
+  localLocations = DeleteCases[definitionLocation[uri, #] & /@ srcs, Nothing];
 
   (*
   Then, look for definitions in the paclet index (cross-file definitions)
@@ -323,15 +339,9 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
     Convert paclet index definitions to LSP locations
     Exclude definitions from the current file (already in localLocations)
     *)
-    pacletLocations = Table[
-      <|
-        "uri" -> def["uri"],
-        "range" -> <|
-          "start" -> <| "line" -> def["source"][[1, 1]] - 1, "character" -> def["source"][[1, 2]] - 1 |>,
-          "end" -> <| "line" -> def["source"][[2, 1]] - 1, "character" -> def["source"][[2, 2]] - 1 |>
-        |>
-      |>,
-      {def, Select[pacletDefinitions, #["uri"] =!= uri &]}
+    pacletLocations = DeleteCases[
+      definitionLocation /@ Select[pacletDefinitions, Lookup[#, "uri", None] =!= uri &],
+      Nothing
     ]
   ];
 

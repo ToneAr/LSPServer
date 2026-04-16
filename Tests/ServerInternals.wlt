@@ -2088,6 +2088,72 @@ VerificationTest[
 
 
 VerificationTest[
+  Module[{uri, text, validUri, result, locations},
+    uri = "file:///tmp/test_definition_malformed_location.wl";
+    text = "use[] := target[]\n";
+    validUri = "file:///tmp/TargetDefinition.wl";
+
+    Block[{
+      LSPServer`$WorkspaceRootPath = "/tmp",
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$OpenFilesMap = <||>,
+      LSPServer`PacletIndex`GetVisibleSymbolDefinitions = Function[{args}, {
+        <|"uri" -> Missing["NotAvailable"], "source" -> Missing["NotAvailable"]|>,
+        <|"uri" -> validUri, "source" -> {{1, 1}, {1, 7}}|>
+      }]
+    },
+      LSPServer`handleContent[
+        <|
+          "method" -> "textDocument/didOpenFencepost",
+          "params" -> <|"textDocument" -> <|"uri" -> uri, "text" -> text|>|>
+        |>
+      ];
+
+      result = Check[
+        LSPServer`handleContent[
+          <|
+            "method" -> "textDocument/definitionFencepost",
+            "id" -> 1,
+            "params" -> <|
+              "textDocument" -> <|"uri" -> uri|>,
+              "position" -> <|"line" -> 0, "character" -> 9|>
+            |>
+          |>
+        ],
+        "MESSAGE"
+      ];
+
+      locations = If[result === "MESSAGE",
+        {},
+        Lookup[First[result], "result", {}]
+      ];
+
+      {
+        result =!= "MESSAGE",
+        locations,
+        Count[locations, KeyValuePattern["uri" -> validUri]]
+      }
+    ]
+  ],
+  {
+    True,
+    {
+      <|
+        "uri" -> "file:///tmp/TargetDefinition.wl",
+        "range" -> <|
+          "start" -> <|"line" -> 0, "character" -> 0|>,
+          "end" -> <|"line" -> 0, "character" -> 6|>
+        |>
+      |>
+    },
+    1
+  },
+  TestID -> "DefinitionFencepost-Skips-Malformed-Paclet-Locations"
+]
+
+
+VerificationTest[
   Module[{root, kernelDir, apiPath, result, def},
     root = CreateDirectory[FileNameJoin[{$TemporaryDirectory, "lsp-return-inference-local-bindings-" <> StringDelete[CreateUUID[], "-"]}]];
     kernelDir = CreateDirectory[FileNameJoin[{root, "Kernel"}]];
