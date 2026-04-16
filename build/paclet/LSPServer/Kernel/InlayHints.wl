@@ -226,7 +226,7 @@ Handles:
 - Symbols with explicit context prefix (e.g., Developer`ToPackedArray)
 - Symbols from loaded packages (checks actual Context[] at runtime)
 *)
-getSymbolContext[name_String] :=
+getSymbolContext[uri_String, name_String] :=
 Module[{explicitContext, symContext, deps},
 
   (*
@@ -243,19 +243,18 @@ Module[{explicitContext, symContext, deps},
   If[KeyExistsQ[$systemSymbolsSet, name],
     Return[None]
   ];
-  
+
   (*
   Check if symbol is defined in the paclet/workspace
   *)
   If[KeyExistsQ[$PacletIndex["Symbols"], name] &&
      Length[$PacletIndex["Symbols", name, "Definitions"]] > 0,
-    Module[{defs, ctx},
-      defs = $PacletIndex["Symbols", name, "Definitions"];
-      ctx = defs[[1]]["context"];
+    Module[{ctx},
+      ctx = GetSymbolContext[uri, name];
       Return[If[StringQ[ctx], ctx, None]]
     ]
   ];
-  
+
   (*
   Check if symbol is from a dependency package.
   Use Context[] to check the actual context of the symbol if it exists.
@@ -272,7 +271,7 @@ Module[{explicitContext, symContext, deps},
       ],
       {Context::notfound}
     ];
-    
+
     If[StringQ[symContext] && symContext =!= "Global`" && symContext =!= "System`",
       (* Check if symbol's context matches or is a subcontext of a dependency *)
       If[AnyTrue[deps, StringStartsQ[symContext, #] || symContext === # &],
@@ -280,14 +279,14 @@ Module[{explicitContext, symContext, deps},
       ]
     ]
   ];
-  
+
   (*
   Global variables starting with $ - no hint needed
   *)
   If[StringStartsQ[name, "$"],
     Return[None]
   ];
-  
+
   (* Unknown symbol - no hint *)
   None
 ]
@@ -462,12 +461,12 @@ Module[{id, params, doc, uri, entry, ast, cst, range, hints,
   (*
   2. Context hints for symbols
   *)
-  hints = Join[hints, getContextHints[cst, {startLine, endLine}]];
+  hints = Join[hints, getContextHints[uri, cst, {startLine, endLine}]];
 
   (*
   3. Return type hints for function calls
   *)
-  (* hints = Join[hints, getReturnTypeHints[ast, {startLine, endLine}]]; *)
+  hints = Join[hints, getReturnTypeHints[ast, uri, {startLine, endLine}]];
 
   If[$Debug2,
     log["inlayHint: returning ", Length[hints], " hints"]
@@ -552,7 +551,7 @@ Module[{calls, hints},
 (*
 Get context hints for symbols (show context prefix)
 *)
-getContextHints[cst_, {startLine_, endLine_}] :=
+getContextHints[uri_String, cst_, {startLine_, endLine_}] :=
 Module[{symbols, hints},
 
   If[cst === Null || FailureQ[cst],
@@ -573,7 +572,7 @@ Module[{symbols, hints},
     Module[{name, src, ctx},
       name = sym[[2]];
       src = sym[[3, Key[Source]]];
-      ctx = getSymbolContext[name];
+      ctx = getSymbolContext[uri, name];
 
       If[ctx === None || ctx === "Global`",
         Nothing
@@ -598,9 +597,10 @@ Module[{symbols, hints},
 
 (*
 Get return type hints for function calls.
-Uses inferReturnType to dynamically detect return types from naming conventions.
+Uses DocComment ReturnPattern from the PacletIndex as primary source,
+then falls back to inferReturnType (naming conventions).
 *)
-getReturnTypeHints[ast_, {startLine_, endLine_}] :=
+getReturnTypeHints[ast_, uri_String, {startLine_, endLine_}] :=
 Module[{calls, hints},
 
   (*
@@ -616,19 +616,78 @@ Module[{calls, hints},
   ];
 
   hints = Table[
-    Module[{name, src, retType},
+    Module[{name, src, retType, retStr},
       name = call[[1, 2]];
       src = call[[3, Key[Source]]];
-      retType = inferReturnType[name];
 
-      If[retType === None,
+      (*
+      Primary: look up DocComment ReturnPatternString in PacletIndex.
+      Try definitions in the current file first, then any file.
+      *)
+      retStr = Module[{allDefs, found},
+        found = None;
+        If[KeyExistsQ[$PacletIndex["Symbols"], name],
+          allDefs = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, name];
+          (* Prefer current-file definitions *)
+          Catch[
+            Scan[
+              Function[{def},
+                Module[{dc, rps},
+                  If[def["uri"] === uri,
+                    dc = Lookup[def, "DocComment", None];
+                    If[AssociationQ[dc],
+                      rps = Lookup[dc, "ReturnPatternString", None];
+                      If[StringQ[rps] && StringLength[rps] > 0, Throw[rps]]
+                    ]
+                  ]
+                ]
+              ],
+              allDefs
+            ];
+            (* No current-file hit: try all files *)
+            Scan[
+              Function[{def},
+                Module[{dc, rps},
+                  dc = Lookup[def, "DocComment", None];
+                  If[AssociationQ[dc],
+                    rps = Lookup[dc, "ReturnPatternString", None];
+                    If[StringQ[rps] && StringLength[rps] > 0, Throw[rps]]
+                  ]
+                ]
+              ],
+              allDefs
+            ];
+            None
+          ]
+        ,
+          None
+        ]
+      ];
+
+      (*
+      Secondary: naming-convention heuristic.
+      Convert the short label (e.g. "Bool", "List") to a pattern string.
+      *)
+      If[retStr === None,
+        retType = inferReturnType[name];
+        retStr = Switch[retType,
+          "Bool",   "_?(BooleanQ[#]&)",
+          "List",   "_List",
+          "String", "_String",
+          "Int",    "_Integer",
+          "Assoc",  "_Association",
+          _,        None
+        ]
+      ];
+
+      If[retStr === None,
         Nothing,
         <|
           "position" -> <|
             "line" -> src[[2, 1]] - 1,
             "character" -> src[[2, 2]] - 1
           |>,
-          "label" -> " -> " <> retType,
+          "label" -> " : " <> retStr,
           "kind" -> $InlayHintKind["Type"],
           "paddingLeft" -> True
         |>

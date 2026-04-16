@@ -75,7 +75,7 @@ Module[{bytes,
   log[2, "messages in queue: ", queueSize];
   log[2, "\n\n"];
 
-  bytessIn = {};
+  {bytessIn} = Last@Reap[
   Do[
 
     frontMessageSize = GetFrontMessageSize[];
@@ -93,17 +93,17 @@ Module[{bytes,
 
     bytes = PopQueue[frontMessageSize];
 
-    AppendTo[bytessIn, bytes]
+    Sow[bytes]
     ,
     queueSize
-  ];
+  ]];
 
   UnlockQueue[];
   (*
   END LOCK REGION
   *)
 
-  contentsIn = {};
+  {contentsIn} = Last@Reap[
   Do[
     If[FailureQ[bytesIn],
       log["\n\n"];
@@ -119,10 +119,10 @@ Module[{bytes,
 
     content = Developer`ReadRawJSONString[ByteArrayToString[bytesIn]];
 
-    AppendTo[contentsIn, content]
+    Sow[content]
     ,
     {bytesIn, bytessIn}
-  ];
+  ]];
 
   bytessIn = {};
 
@@ -173,7 +173,7 @@ Module[{str, bytes, res},
   *)
   Do[ (* content *)
 
-    
+
     str = Developer`WriteRawJSONString[content];
 
     If[FailureQ[str],
@@ -298,23 +298,22 @@ Module[{content, contents},
   *)
 
   While[True,
-    
+
     TryQueue["StdIO"];
 
     ProcessScheduledJobs[];
 
-    If[empty[$ContentQueue],
+    If[LSPServer`Private`contentQueueEmptyQ[],
       Pause[0.1];
       Continue[]
     ];
 
-    content = $ContentQueue[[1]];
-    $ContentQueue = Rest[$ContentQueue];
+    content = LSPServer`Private`takeFirstContentQueueItem[];
 
     log[2, "taking first from $ContentQueue: ", #["method"]&[content]];
-    log[2, "rest of $ContentQueue (up to 20): ", Take[#["method"]& /@ $ContentQueue, UpTo[20]]];
+    log[2, "rest of $ContentQueue (up to 20): ", Take[#["method"]& /@ LSPServer`$ContentQueue, UpTo[20]]];
     log[2, "..."];
-    
+
 
     contents = LSPEvaluate[content];
 

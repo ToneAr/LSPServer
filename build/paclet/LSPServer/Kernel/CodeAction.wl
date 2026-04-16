@@ -15,19 +15,19 @@ expandContent[content:KeyValuePattern["method" -> "textDocument/codeAction"], po
 Catch[
 Module[{params, id, doc, uri, res},
 
-  
+
   log[1, "textDocument/codeAction: enter expand"];
-  
+
 
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "method" -> "textDocument/codeActionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -35,7 +35,7 @@ Module[{params, id, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/codeActionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
@@ -63,10 +63,10 @@ Catch[
 Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit, diagnostics,
   command, label, actionData, actionSrc, replacementNode, insertionNode, replacementText, lintsWithConfidence,
   shadowing, insertionText, cursor, entry, text, cst, agg, ast, cstLints, aggLints, astLints},
-  
-  
+
+
   log[1, "textDocument/codeActionFencepost: enter"];
-  
+
 
   id = content["id"];
 
@@ -75,16 +75,16 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
@@ -101,12 +101,16 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
   log[2, "cursor: ", ToString[cursor]];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
-  cstLints = entry["CSTLints"];
+
+  cstLints = Lookup[entry, "CSTLints", Null];
+
+  If[cstLints === Null || MissingQ[cstLints],
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
+  ];
 
   (*
   Might get something like FileTooLarge
@@ -114,10 +118,18 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
   If[FailureQ[cstLints],
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
   ];
-  
-  aggLints = entry["AggLints"];
 
-  astLints = entry["ASTLints"];
+  aggLints = Lookup[entry, "AggLints", {}];
+
+  If[MissingQ[aggLints] || FailureQ[aggLints],
+    aggLints = {}
+  ];
+
+  astLints = Lookup[entry, "ASTLints", {}];
+
+  If[MissingQ[astLints] || FailureQ[astLints],
+    astLints = {}
+  ];
 
   lints = cstLints ~Join~ aggLints ~Join~ astLints;
 
@@ -143,7 +155,7 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
 
   lints = Complement[lints, shadowing];
   *)
-  
+
   (*
   Make sure to sort lints before taking
 
@@ -155,7 +167,7 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
 
   lints = Take[lints, UpTo[CodeInspector`Summarize`$DefaultLintLimit]];
 
-  
+
   lspActions = {};
 
   Do[
@@ -322,50 +334,50 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
   These offer to insert wl-disable-line or wl-disable-next-line comments.
   *)
   text = Lookup[entry, "Text", ""];
-  
-  Module[{textLines, lintTag, lintData, lintSrc, lintLine0, lineText, 
+
+  Module[{textLines, lintTag, lintData, lintSrc, lintLine0, lineText,
           disableLineEdit, disableNextLineEdit, disableLineText, disableNextLineText,
           lineEndChar, lintDiagnostics, ignoreData, tagStr},
-    
+
     textLines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
-    
+
     (* Get ignore data to skip already-suppressed lints *)
     ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
-    
+
     Do[
       lintTag = lint[[1]];
       tagStr = If[StringQ[lintTag], lintTag, SymbolName[lintTag]];
       lintData = lint[[4]];
       lintSrc = Lookup[lintData, Source, Lookup[lintData, CodeParser`Source, {{1, 1}, {1, 1}}]];
-      
+
       (* Check if this lint intersects the cursor (1-based) *)
       If[!SourceMemberIntersectingQ[lintSrc, cursor],
         Continue[]
       ];
-      
+
       (* Skip already-suppressed lints *)
       If[ShouldIgnoreDiagnostic[lint, ignoreData],
         Continue[]
       ];
-      
+
       (* 0-based line number for LSP *)
       lintLine0 = lintSrc[[1, 1]] - 1;
-      
+
       lintDiagnostics = lintToDiagnostics[lint];
-      
+
       (* --- Action 1: Disable for this line --- *)
       (* Insert " (* wl-disable-line RuleName *)" at end of the line *)
       If[lintLine0 < Length[textLines],
         lineText = textLines[[lintLine0 + 1]];
         lineEndChar = StringLength[lineText];
         disableLineText = " (* wl-disable-line " <> tagStr <> " *)";
-        
+
         disableLineEdit = <| "changes" -> <| uri -> {
           <| "range" -> <| "start" -> <| "line" -> lintLine0, "character" -> lineEndChar |>,
                            "end" -> <| "line" -> lintLine0, "character" -> lineEndChar |> |>,
              "newText" -> disableLineText |>
         } |> |>;
-        
+
         AppendTo[lspActions, <|
           "title" -> "Disable \"" <> tagStr <> "\" for this line",
           "kind" -> "quickfix",
@@ -373,24 +385,24 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
           "diagnostics" -> lintDiagnostics
         |>]
       ];
-      
+
       (* --- Action 2: Disable for next line --- *)
       (* Insert "(* wl-disable-next-line RuleName *)\n" before the diagnostic's line *)
       disableNextLineText = "(* wl-disable-next-line " <> tagStr <> " *)\n";
-      
+
       disableNextLineEdit = <| "changes" -> <| uri -> {
         <| "range" -> <| "start" -> <| "line" -> lintLine0, "character" -> 0 |>,
                          "end" -> <| "line" -> lintLine0, "character" -> 0 |> |>,
            "newText" -> disableNextLineText |>
       } |> |>;
-      
+
       AppendTo[lspActions, <|
         "title" -> "Disable \"" <> tagStr <> "\" for next line",
         "kind" -> "quickfix",
         "edit" -> disableNextLineEdit,
         "diagnostics" -> lintDiagnostics
       |>],
-      
+
       {lint, lints}
     ]
   ];

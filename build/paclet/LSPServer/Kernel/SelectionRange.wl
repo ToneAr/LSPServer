@@ -16,13 +16,13 @@ Module[{params, id, doc, uri, res},
 
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-  
+
     Throw[{<| "method" -> "textDocument/selectionRangeFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -30,7 +30,7 @@ Module[{params, id, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/selectionRangeFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
@@ -60,16 +60,16 @@ Module[{id, params, doc, uri, entry, cst, positions, cursor, cases, firstCase, f
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-  
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
@@ -78,19 +78,23 @@ Module[{id, params, doc, uri, entry, cst, positions, cursor, cases, firstCase, f
   positions = params["positions"];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
-  cst = entry["CST"];
+
+  cst = Lookup[entry, "CST", Null];
+
+  If[cst === Null || MissingQ[cst],
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
 
   If[FailureQ[cst],
     Throw[cst]
   ];
 
   selectionRanges = Function[{position},
-    
+
     cursor = { #["line"], #["character"] }&[position];
 
     (* convert from 0-based to 1-based *)

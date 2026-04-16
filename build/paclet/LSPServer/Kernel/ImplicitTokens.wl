@@ -20,7 +20,7 @@ Module[{params, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{}]
@@ -48,14 +48,14 @@ Module[{params, doc, uri, entry, cst, inspectedFileObj, implicitTokens, agg},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
@@ -66,9 +66,13 @@ Module[{params, doc, uri, entry, cst, inspectedFileObj, implicitTokens, agg},
     Throw[{}]
   ];
 
-  cst = entry["CST"];
+  cst = Lookup[entry, "CST", Null];
+  agg = Lookup[entry, "Agg", Null];
 
-  agg = entry["Agg"];
+  If[cst === Null || MissingQ[cst] || FailureQ[cst] ||
+     agg === Null || MissingQ[agg] || FailureQ[agg],
+    Throw[{}]
+  ];
 
   log[2, "before CodeStructuralSyntaxAggQ"];
 
@@ -128,18 +132,18 @@ Module[{params, doc, uri, entry},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
+
   entry["InspectedFileObject"] =.;
 
   $OpenFilesMap[uri] = entry;
@@ -161,12 +165,12 @@ Module[{params, doc, uri, entry, inspectedFileObj, tokens},
   uri = doc["uri"];
 
   If[isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{}]
   ];
-  
+
   entry = Lookup[$OpenFilesMap, uri, Null];
 
   (*

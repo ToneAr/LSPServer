@@ -83,7 +83,7 @@ Module[{numStrs, msgLength, headerPosition},
 
 queueEmptyQ["Socket"] :=
 Module[{getMethods},
-  getMethods = #["method"]& /@ $ContentQueue;
+  getMethods = #["method"]& /@ LSPServer`$ContentQueue;
   MatchQ[getMethods, {}]
 ]
 
@@ -202,7 +202,7 @@ Module[{bytess, line},
 
 
   (* ================= Read Write Loop =============================== *)
-readEvalWriteLoop["Socket", sock_]:= 
+readEvalWriteLoop["Socket", sock_]:=
 Module[{content, contents},
   While[True,
 
@@ -210,16 +210,15 @@ Module[{content, contents},
 
     ProcessScheduledJobs[];
 
-    If[empty[$ContentQueue],
+    If[LSPServer`Private`contentQueueEmptyQ[],
       Pause[0.1];
       Continue[]
     ];
 
-    content = $ContentQueue[[1]];
-    $ContentQueue = Rest[$ContentQueue];
+    content = LSPServer`Private`takeFirstContentQueueItem[];
 
       log[2, "taking first from $ContentQueue: ", #["method"]&[content]];
-      log[2, "rest of $ContentQueue (up to 20): ", Take[#["method"]& /@ $ContentQueue, UpTo[20]]];
+      log[2, "rest of $ContentQueue (up to 20): ", Take[#["method"]& /@ LSPServer`$ContentQueue, UpTo[20]]];
       log[2, "..."];
 
     contents = LSPEvaluate[content];

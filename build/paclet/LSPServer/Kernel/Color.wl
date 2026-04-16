@@ -29,13 +29,13 @@ Module[{params, id, doc, uri, res},
 
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "method" -> "textDocument/documentColorFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -43,7 +43,7 @@ Module[{params, id, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/documentColorFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
@@ -74,30 +74,30 @@ Module[{id, params, doc, uri, colorInformations, ast, colorNodes, entry},
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
-  ast = entry["AST"];
 
-  If[FailureQ[ast],
+  ast = Lookup[entry, "AST", Null];
+
+  If[ast === Null || MissingQ[ast] || FailureQ[ast],
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
@@ -173,7 +173,7 @@ colorNodeToColorInformation[CallNode[LeafNode[Symbol, "RGBColor", _], {
       r:LeafNode[Integer | Real, _, _],
       g:LeafNode[Integer | Real, _, _],
       b:LeafNode[Integer | Real, _, _]}, _]
-    , 
+    ,
     multiplier:CallNode[LeafNode[Symbol, "Power", _], {
       LeafNode[Integer | Real, _, _], LeafNode[Integer, "-1", _]}, _]}, _]}, data_]] :=
 Module[{rVal, gVal, bVal, src},
@@ -390,7 +390,7 @@ colorNodeToColorInformation[_] :=
 handleContent[content:KeyValuePattern["method" -> "textDocument/colorPresentation"]] :=
 Catch[
 Module[{id, params, doc, uri, color, range, rVal, gVal, bVal, aVal, label, colorPresentations},
-  
+
   log[1, "textDocument/documentColorPresentation: enter"];
 
   id = content["id"];
@@ -400,10 +400,10 @@ Module[{id, params, doc, uri, color, range, rVal, gVal, bVal, aVal, label, color
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   color = params["color"];
   doc = params["textDocument"];
@@ -411,7 +411,7 @@ Module[{id, params, doc, uri, color, range, rVal, gVal, bVal, aVal, label, color
   range = params["range"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]

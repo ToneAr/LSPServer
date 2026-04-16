@@ -43,9 +43,18 @@ $obsoleteSet := $obsoleteSet = Association[Thread[
 ]]
 
 
+hoverEntryReadyQ[entry_Association] :=
+Module[{ast, scheduledJobs},
+  ast = Lookup[entry, "AST", Null];
+  scheduledJobs = Lookup[entry, "ScheduledJobs", {}];
+
+  ast =!= Null && !FailureQ[ast] && scheduledJobs === {}
+]
+
+
 expandContent[content:KeyValuePattern["method" -> "textDocument/hover"], pos_] :=
 Catch[
-Module[{params, id, doc, uri, res},
+Module[{params, id, doc, uri, entry, res},
 
 
   log[1, "textDocument/hover: enter expand"];
@@ -71,6 +80,13 @@ Module[{params, id, doc, uri, res},
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/hoverFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+
+  If[AssociationQ[entry] && hoverEntryReadyQ[entry],
+    log[1, "textDocument/hover: fast-path exit"];
+    Throw[{<| "method" -> "textDocument/hoverFencepost", "id" -> id, "params" -> params, "priority" -> True |>}]
   ];
 
   res = <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
@@ -138,7 +154,12 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
   ];
 
   text = entry["Text"];
-  ast = entry["AST"];
+  ast = Lookup[entry, "AST", Null];
+
+  If[ast === Null || MissingQ[ast],
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
+
   cstTabs = Lookup[entry, "CSTTabs", Null];
 
   If[cstTabs === Null,
@@ -241,8 +262,6 @@ Module[{lines, lineMap, originalLineNumber, line,
 
       segment1 = segments[[1]];
 
-      rules = {};
-
       decoded = convertSegment[segment1];
 
       (*
@@ -256,7 +275,7 @@ Module[{lines, lineMap, originalLineNumber, line,
         Characters[decoded]
       ];
 
-      If[!FailureQ[decoded],
+      {rules} = Last@Reap[If[!FailureQ[decoded],
         index = 1;
         Function[{char},
           Switch[char,
@@ -267,12 +286,11 @@ Module[{lines, lineMap, originalLineNumber, line,
               index++
             ,
             _,
-              rule = index -> char;
-              AppendTo[rules, rule];
+              Sow[index -> char];
               index++
           ]
         ] /@ Characters[decoded]
-      ];
+      ]];
 
       If[rules != {},
 
@@ -290,8 +308,7 @@ Module[{lines, lineMap, originalLineNumber, line,
 
       MapIndexed[Function[{segment, segmentIndex},
 
-        rules = {};
-        Which[
+        {rules} = Last@Reap[Which[
           (positionLine == (originalLineNumber + segmentIndex[[1]] - 1)) && containsUnicodeCharacterQ[segment] && segmentIndex == {1},
             decoded = convertStartingSegment[segment];
             If[!FailureQ[decoded],
@@ -317,8 +334,7 @@ Module[{lines, lineMap, originalLineNumber, line,
                     index++
                   ,
                   _,
-                    rule = index -> char;
-                    AppendTo[rules, rule];
+                    Sow[index -> char];
                     index++
                 ];
               ] /@ Characters[decoded]
@@ -349,8 +365,7 @@ Module[{lines, lineMap, originalLineNumber, line,
                     index++
                   ,
                   _,
-                    rule = index -> char;
-                    AppendTo[rules, rule];
+                    Sow[index -> char];
                     index++
                 ];
               ] /@ Characters[decoded]
@@ -381,13 +396,12 @@ Module[{lines, lineMap, originalLineNumber, line,
                     index++
                   ,
                   _,
-                    rule = index -> char;
-                    AppendTo[rules, rule];
+                    Sow[index -> char];
                     index++
                 ];
               ] /@ Characters[decoded]
             ];
-        ];
+        ]];
 
         If[rules != {},
 
@@ -553,7 +567,7 @@ Module[{tokenSymbol, functionSource,
   This gives us the context (e.g. "MyPackage`" or "MyPackage`Private`")
   that the symbol is defined in.
   *)
-  symbolContext = GetSymbolContext[tokenSymbol];
+  symbolContext = GetSymbolContext[uri, tokenSymbol];
 
   (*
   Get all the usage messages that are defined in the file
@@ -716,9 +730,9 @@ Module[{tokenSymbol, functionSource,
   We look up InferredReturnPattern from the PacletIndex by matching definition source lines.
   *)
   Module[{pacletDefs, irpByLine},
-    pacletDefs = Lookup[
-      Lookup[LSPServer`PacletIndex`$PacletIndex["Symbols"], tokenSymbol, <||>],
-      "Definitions", {}
+    pacletDefs = Select[
+      LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, tokenSymbol],
+      Lookup[#, "uri", None] === uri &
     ];
     (* Map: def start line -> InferredReturnPattern *)
     irpByLine = Association[
@@ -750,7 +764,7 @@ Module[{tokenSymbol, functionSource,
                     "ReturnPatternString" -> irpStr|>,
                 (* DocComment exists but has no ReturnPattern: inject the inferred one *)
                 MatchQ[Lookup[dc, "ReturnPattern", None], None | _Missing],
-                  Append[dc, "ReturnPattern" -> irp, "ReturnPatternString" -> irpStr],
+                  Join[dc, <|"ReturnPattern" -> irp, "ReturnPatternString" -> irpStr|>],
                 (* DocComment already has an explicit ReturnPattern: leave it alone *)
                 True, dc
               ]
@@ -807,10 +821,7 @@ Module[{tokenSymbol, functionSource,
   companion .ipwl file.
   *)
   {declaredType, declaredTypeSource} = Module[{allDefs, dtEntry},
-    allDefs = Lookup[
-      Lookup[LSPServer`PacletIndex`$PacletIndex["Symbols"], tokenSymbol, <||>],
-      "Definitions", {}
-    ];
+    allDefs = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, tokenSymbol];
     dtEntry = SelectFirst[allDefs,
       !MatchQ[Lookup[#, "DeclaredType", None], None | _Missing] &,
       None
@@ -850,7 +861,7 @@ Module[{tokenSymbol, functionSource,
         ]
       ];
 
-      (* Infer WL pattern from a literal argument node *)
+      (* Infer WL pattern from a local RHS node. *)
       argNodePattern = Function[{n},
         Which[
           MatchQ[n, LeafNode[String,   _, _]], Blank[String],
@@ -875,7 +886,10 @@ Module[{tokenSymbol, functionSource,
                 True, None
               ]
             ],
-          True, None
+          True,
+            With[{pat = LSPServer`PacletIndex`Private`inferPatternFromRHS[n, <||>, uri]},
+              If[!MatchQ[pat, None | _Missing], pat, None]
+            ]
         ]
       ];
 
@@ -1349,19 +1363,25 @@ Handle symbols defined in other workspace files (cross-file hover).
 Uses the PacletIndex to find definitions and usage messages, then reads
 the definition file to extract function call patterns.
 *)
-handleCrossFileSymbols[symIn_] :=
+handleCrossFileSymbols[uri_, symIn_] :=
 Catch[
 Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
   defText, defAST, defCST, fileEntry, defFilePath,
   functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,
-  functionCallPatternCST, functionSource, functionCallPattern, aliasContext},
+  functionCallPatternCST, functionSource, functionCallPattern, aliasContext,
+  preferredContext, aliasMap},
 
   (* Strip explicit context prefix if present to get the bare name *)
   (* Also detect if the prefix is a known alias context *)
   aliasContext = None;
+  preferredContext = None;
   tokenSymbol = If[StringContainsQ[symIn, "`"],
     With[{parts = StringSplit[symIn, "`"], ctxPart = StringJoin[Riffle[Most[StringSplit[symIn, "`"]], "`"]] <> "`"},
-      If[KeyExistsQ[GetContextAliases[], ctxPart], aliasContext = ctxPart];
+      aliasMap = GetContextAliases[];
+      preferredContext = If[AssociationQ[aliasMap], Lookup[aliasMap, ctxPart, ctxPart], ctxPart];
+      If[StringQ[preferredContext] && preferredContext =!= ctxPart,
+        aliasContext = ctxPart
+      ];
       Last[parts]
     ],
     symIn
@@ -1382,7 +1402,7 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
     |>]
   ];
 
-  defs = Replace[symData["Definitions"], _Missing -> {}];
+  defs = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, tokenSymbol, preferredContext];
   usages = Replace[symData["Usages"], _Missing -> {}];
 
   If[Length[defs] === 0,
@@ -1548,10 +1568,21 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
 handleExternalSymbols[symIn_] :=
 Catch[
 Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentationLink,
-  defPatterns, downVals, upVals, subVals, symbol, foundContext, aliasContext},
+  defPatterns, foundContext, aliasContext, loadedContexts, symbolLoadedQ,
+  dependencyContextQ, invalid},
+
+  invalid[] := <|
+    "SymbolType" -> "INVALID",
+    "Usage" -> "INVALID",
+    "DocumentationLink" -> None,
+    "FunctionDefinitionPatterns" -> None,
+    "FunctionInformation" -> False,
+    "Context" -> None
+  |>;
 
   (* Get dependency contexts *)
   deps = GetDependencyContexts[];
+  loadedContexts = GetKernelContextsCached[];
 
   (* Handle both bare symbols and explicitly contexted symbols *)
   If[StringContainsQ[symIn, "`"],
@@ -1570,135 +1601,76 @@ Module[{usage, symContext, bareSymbol, deps, fullSymbol, pacletName, documentati
       ]
     ];
 
-    (* For explicit context, verify the symbol exists *)
-    If[!Quiet[NameQ[fullSymbol]],
-      Throw[<|
-        "SymbolType" -> "INVALID",
-        "Usage" -> "INVALID",
-        "DocumentationLink" -> None,
-        "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False,
-        "Context" -> None
-      |>]
+    (* For explicit contexts, accept either an indexed dependency prefix or an already-loaded context.
+       Do not call Needs[] here; hover must never run external package init code. *)
+    dependencyContextQ = AnyTrue[deps,
+      Function[{dep}, StringStartsQ[symContext, dep] || symContext === dep]
+    ];
+    symbolLoadedQ = Quiet[NameQ[fullSymbol]];
+
+    If[!dependencyContextQ && !symbolLoadedQ && !MemberQ[loadedContexts, symContext],
+      Throw[invalid[]]
     ],
 
     (* Bare symbol - try to find which dependency context it belongs to *)
     bareSymbol = symIn;
 
-    (* First, try to get context using proper evaluation *)
-    symContext = Quiet[
-      Check[
-        (* Use Evaluate + ToExpression to get the actual context *)
-        (* Try each dependency context to see if the symbol exists there *)
-        foundContext = None;
-        Scan[
-          Function[{dep},
-            If[foundContext === None,
-              If[Quiet[NameQ[dep <> bareSymbol]],
-                foundContext = dep
-              ]
-            ]
-          ],
-          deps
-        ];
-        (* If not found in deps, try Context with Evaluate *)
-        If[foundContext === None,
-          foundContext = Quiet[
-            Context[Evaluate[ToExpression[bareSymbol]]],
-            {Context::notfound, ToExpression::sntx}
-          ]
-        ];
-        foundContext,
-        None,
-        {Context::notfound}
-      ],
-      {Context::notfound, ToExpression::sntx}
-    ];
+    foundContext = SelectFirst[deps, Quiet[NameQ[# <> bareSymbol]] &, None];
+    symContext = foundContext;
 
     If[!StringQ[symContext] || symContext === "Global`" || symContext === "System`" || symContext === None,
       (* Symbol not found in any known context *)
-      Throw[<|
-        "SymbolType" -> "INVALID",
-        "Usage" -> "INVALID",
-        "DocumentationLink" -> None,
-        "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False,
-        "Context" -> None
-      |>]
+      Throw[invalid[]]
     ];
     fullSymbol = symContext <> bareSymbol;
+    symbolLoadedQ = Quiet[NameQ[fullSymbol]]
+  ];
 
-    (* For bare symbols, check if context is a dependency *)
-    If[Length[deps] > 0 && !AnyTrue[deps, StringStartsQ[symContext, #] || symContext === # &],
-      Throw[<|
-        "SymbolType" -> "INVALID",
-        "Usage" -> "INVALID",
-        "DocumentationLink" -> None,
-        "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False,
-        "Context" -> None
-      |>]
+  If[!TrueQ[symbolLoadedQ],
+    usage = "Symbol from " <> symContext <> " (context not loaded)";
+    defPatterns = {}
+    ,
+    (* Only introspect already-loaded symbols. Use HoldComplete to avoid evaluating OwnValues. *)
+    usage = Quiet[
+      Check[
+        Replace[
+          ToExpression[fullSymbol, InputForm, HoldComplete],
+          {
+            HoldComplete[sym_Symbol] :> Quiet[
+              Check[MessageName[sym, "usage"], None, {MessageName::noinfo}],
+              {MessageName::noinfo}
+            ],
+            _ :> None
+          }
+        ],
+        None,
+        {ToExpression::sntx}
+      ],
+      {MessageName::noinfo, ToExpression::notstrbox, ToExpression::sntx}
     ];
 
-    (* If no deps tracked but we found a non-System/Global context, still try to get info *)
-    If[Length[deps] == 0 && (symContext === "Global`" || symContext === "System`" || symContext === None),
-      Throw[<|
-        "SymbolType" -> "INVALID",
-        "Usage" -> "INVALID",
-        "DocumentationLink" -> None,
-        "FunctionDefinitionPatterns" -> None,
-        "FunctionInformation" -> False,
-        "Context" -> None
-      |>]
-    ]
-  ];
+    If[!StringQ[usage],
+      usage = "Symbol from " <> symContext
+    ];
 
-  (*
-  Ensure the context is loaded before trying to get usage.
-  This is important because usage messages may not be properly formatted
-  until the package is actually loaded.
-  *)
-  Quiet[
-    Check[Needs[symContext], Null, {Needs::nocont, Get::noopen}],
-    {Needs::nocont, Get::noopen, General::stop}
-  ];
-
-  (* Try to get usage message *)
-  usage = Quiet[
-    Check[
-      ToExpression[fullSymbol <> "::usage"],
-      None,
-      {MessageName::noinfo}
-    ],
-    {MessageName::noinfo, ToExpression::notstrbox}
-  ];
-
-  If[!StringQ[usage],
-    (* No usage message - provide basic info *)
-    usage = "Symbol from " <> symContext
-  ];
-
-  (* Extract definition patterns from DownValues, UpValues, SubValues *)
-  defPatterns = Quiet[
-    Check[
-      symbol = ToExpression[fullSymbol];
-      downVals = DownValues[symbol];
-      upVals = UpValues[symbol];
-      subVals = SubValues[symbol];
-
-      (* Extract the LHS patterns from definitions *)
-      Join[
-        (* DownValues: f[args] := ... *)
-        Cases[downVals, HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}],
-        (* UpValues: g[f[args]] ^:= ... - show the full pattern *)
-        Cases[upVals, HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}],
-        (* SubValues: f[x][y] := ... *)
-        Cases[subVals, HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}]
+    defPatterns = Quiet[
+      Check[
+        Replace[
+          ToExpression[fullSymbol, InputForm, HoldComplete],
+          {
+            HoldComplete[sym_Symbol] :> Join[
+              Cases[DownValues[sym], HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}],
+              Cases[UpValues[sym], HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}],
+              Cases[SubValues[sym], HoldPattern[RuleDelayed[HoldPattern[lhs_], _]] :> extractPatternString[lhs], {1}]
+            ],
+            _ :> {}
+          }
+        ],
+        {},
+        {DownValues::sym, UpValues::sym, SubValues::sym, ToExpression::sntx}
       ],
-      {},
-      {DownValues::sym, UpValues::sym, SubValues::sym}
-    ],
-    {DownValues::sym, UpValues::sym, SubValues::sym, ToExpression::sntx}
+      {DownValues::sym, UpValues::sym, SubValues::sym, ToExpression::sntx}
+    ]
   ];
 
   (* Remove duplicates and limit to reasonable number *)
@@ -1743,6 +1715,24 @@ Module[{str},
   str
 ]
 
+
+symbolHasOnlyCurrentFileDefinitions[uri_String, symIn_String] :=
+Module[{tokenSymbol, preferredContext, aliasMap, defs},
+  preferredContext = None;
+  tokenSymbol = If[StringContainsQ[symIn, "`"],
+    With[{parts = StringSplit[symIn, "`"], ctxPart = StringJoin[Riffle[Most[StringSplit[symIn, "`"]], "`"]] <> "`"},
+      aliasMap = GetContextAliases[];
+      preferredContext = If[AssociationQ[aliasMap], Lookup[aliasMap, ctxPart, ctxPart], ctxPart];
+      Last[parts]
+    ],
+    symIn
+  ];
+  defs = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, tokenSymbol, preferredContext];
+
+  Length[defs] > 0 &&
+    AllTrue[defs, Lookup[#, "uri", None] === uri &]
+]
+
 handleSymbols[id_, uri_, astIn_, cstIn_, symsIn_, cursorLine_] :=
 Catch[
 Module[{lines, result, syms, functionInformationAssoc},
@@ -1761,7 +1751,13 @@ Module[{lines, result, syms, functionInformationAssoc},
     If system symbol information is not available, try to find the user defined function information
     *)
     If[functionInformationAssoc["SymbolType"] == "INVALID",
-      functionInformationAssoc = handleUserSymbols[uri, astIn, cstIn, symsIn, cursorLine];
+      functionInformationAssoc = handleUserSymbols[
+        uri,
+        astIn,
+        cstIn,
+        Cases[symsIn, LeafNode[Symbol, sym, _], {1}],
+        cursorLine
+      ];
     ];
     (*
     If user symbol information is not available (INVALID or no function info found),
@@ -1770,8 +1766,10 @@ Module[{lines, result, syms, functionInformationAssoc},
     no definitions or usage messages are found in the current file.
     *)
     If[functionInformationAssoc["SymbolType"] == "INVALID" ||
-       (functionInformationAssoc["SymbolType"] == "UserDefined" && !TrueQ[functionInformationAssoc["FunctionInformation"]]),
-      functionInformationAssoc = handleCrossFileSymbols[sym];
+       (functionInformationAssoc["SymbolType"] == "UserDefined" &&
+         !TrueQ[functionInformationAssoc["FunctionInformation"]] &&
+         !symbolHasOnlyCurrentFileDefinitions[uri, sym]),
+      functionInformationAssoc = handleCrossFileSymbols[uri, sym];
     ];
     (*
     If cross-file information is not available, try to find external package symbol information

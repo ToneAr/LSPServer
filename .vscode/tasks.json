@@ -1,0 +1,123 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "inspect-handlecontent-contexts",
+			"type": "shell",
+			"command": "/usr/local/Wolfram/Wolfram/15.1/Executables/wolframscript",
+			"args": [
+				"-file",
+				"/tmp/inspect_handlecontent_contexts.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "testreport-server-internals-post-diagnostics-fix",
+			"type": "shell",
+			"command": "/usr/local/Wolfram/Wolfram/15.1/Executables/wolframscript",
+			"args": [
+				"-file",
+				"/tmp/run_server_internals_testreport.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-server-diagnostic-stage2",
+			"type": "shell",
+			"command": "/usr/local/Wolfram/Wolfram/15.1/Executables/wolframscript",
+			"args": [
+				"-file",
+				"/tmp/run_server_diagnostic_stage2.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "repro-exit-after-close-stdin",
+			"type": "shell",
+			"command": "python3",
+			"args": [
+				"/tmp/repro_exit_after_close_stdin.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-server-diagnostic-after-stdin-close-fix",
+			"type": "shell",
+			"command": "/usr/local/Wolfram/Wolfram/15.1/Executables/wolframscript",
+			"args": [
+				"-file",
+				"/tmp/run_server_diagnostic_stage2.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "server-internals-after-shared-state-fix",
+			"type": "shell",
+			"command": "/usr/local/Wolfram/Wolfram/15.1/Executables/wolframscript",
+			"args": [
+				"-file",
+				"/tmp/run_server_internals_testreport.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "diagnostics-pipeline-after-shared-state-fix",
+			"type": "shell",
+			"command": "/usr/local/Wolfram/Wolfram/15.1/Executables/wolframscript",
+			"args": [
+				"-file",
+				"/tmp/run_diagnostics_pipeline_testreport.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "repro-initialized-sequence",
+			"type": "shell",
+			"command": "python3",
+			"args": [
+				"/tmp/repro_initialized_sequence.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "server-internals-regression",
+			"type": "shell",
+			"command": "/home/tonya/Wolfram/Wolfram/15.1/Executables/WolframKernel",
+			"args": [
+				"-script",
+				"/tmp/run_server_internals_testreport.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "server-internals-regression-queue-fix",
+			"type": "shell",
+			"command": "/home/tonya/Wolfram/Wolfram/15.1/Executables/WolframKernel",
+			"args": [
+				"-script",
+				"/tmp/run_server_internals_testreport.wl"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "server-internals-regression-summary",
+			"type": "shell",
+			"command": "/home/tonya/Wolfram/Wolfram/15.1/Executables/wolframscript",
+			"args": [
+				"-code",
+				"PacletDirectoryLoad[AbsoluteFileName[\"/home/tonya/Working/forked-projects/forked-project-WOLFRAM-LSP/build/paclet\"]]; Needs[\"MUnit`\"]; report = TestReport[\"/home/tonya/Working/forked-projects/forked-project-WOLFRAM-LSP/Tests/ServerInternals.wlt\"]; Print[report[\"TestsSucceededCount\"]]; Print[report[\"TestsFailedCount\"]];"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "server-internals-regression-summary-kernel",
+			"type": "shell",
+			"command": "/home/tonya/Wolfram/Wolfram/15.1/Executables/WolframKernel",
+			"args": [
+				"-script",
+				"/tmp/server_internals_summary.wl"
+			],
+			"isBackground": false
+		}
+	]
+}

@@ -49,7 +49,7 @@ $CompletionItemKind = <|
 (*
 Handle textDocument/completion request
 *)
-expandContent[content:KeyValuePattern["method" -> "textDocument/completion"], pos_] :=
+LSPServer`expandContent[content:KeyValuePattern["method" -> "textDocument/completion"], pos_] :=
 Catch[
 Module[{params, id, doc, uri},
 
@@ -89,7 +89,7 @@ Module[{params, id, doc, uri},
 ]]
 
 
-handleContent[content:KeyValuePattern["method" -> "textDocument/completionFencepost"]] :=
+LSPServer`handleContent[content:KeyValuePattern["method" -> "textDocument/completionFencepost"]] :=
 Catch[
 Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   completions, systemCompletions, pacletCompletions, optionCompletions,
@@ -154,21 +154,23 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   (*
   Debug: log to file for diagnostics
   *)
-  Quiet[
-    Module[{debugStream, linesDbg, beforeCursorDbg},
-      debugStream = OpenAppend["/tmp/lsp-assoc-debug.log"];
-      linesDbg = StringSplit[text, {"\r\n", "\n", "\r"}, All];
-      beforeCursorDbg = If[line <= Length[linesDbg] && char - 1 <= StringLength[linesDbg[[line]]],
-        StringTake[linesDbg[[line]], char - 1], "OUT_OF_BOUNDS"];
-      WriteString[debugStream,
-        "--- completion ---\n" <>
-        "uri=" <> ToString[uri] <> "\n" <>
-        "line=" <> ToString[line] <> " char=" <> ToString[char] <>
-        " cst=" <> If[cst === Null, "Null", "ok"] <>
-        " before=" <> ToString[InputForm[beforeCursorDbg]] <>
-        " ctx=" <> ToString[keyContext] <> "\n"
-      ];
-      Close[debugStream];
+  If[TrueQ[$Debug2],
+    Quiet[
+      Module[{debugStream, linesDbg, beforeCursorDbg},
+        debugStream = OpenAppend["/tmp/lsp-assoc-debug.log"];
+        linesDbg = StringSplit[text, {"\r\n", "\n", "\r"}, All];
+        beforeCursorDbg = If[line <= Length[linesDbg] && char - 1 <= StringLength[linesDbg[[line]]],
+          StringTake[linesDbg[[line]], char - 1], "OUT_OF_BOUNDS"];
+        WriteString[debugStream,
+          "--- completion ---\n" <>
+          "uri=" <> ToString[uri] <> "\n" <>
+          "line=" <> ToString[line] <> " char=" <> ToString[char] <>
+          " cst=" <> If[cst === Null, "Null", "ok"] <>
+          " before=" <> ToString[InputForm[beforeCursorDbg]] <>
+          " ctx=" <> ToString[keyContext] <> "\n"
+        ];
+        Close[debugStream];
+      ]
     ]
   ];
 
@@ -184,23 +186,25 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
       linesForEdit = StringSplit[text, {"\r\n", "\n", "\r"}, All];
       fullLine = If[line <= Length[linesForEdit], linesForEdit[[line]], ""];
 
-      keyCompletions = getAssociationKeyCompletions[cst, text, keyContext, lspLine0, lspChar0, fullLine];
+      keyCompletions = getAssociationKeyCompletions[cst, text, keyContext, lspLine0, lspChar0, fullLine, uri];
     ];
 
     (*
     Debug: log completions
     *)
-    Quiet[
-      Module[{debugStream, keys},
-        debugStream = OpenAppend["/tmp/lsp-assoc-debug.log"];
-        keys = extractAssociationKeys[cst, text];
-        WriteString[debugStream,
-          "keyPath=" <> ToString[keyContext["keyPath"]] <> "\n" <>
-          "extractedKeys=" <> ToString[keys] <> "\n" <>
-          "completionCount=" <> ToString[Length[keyCompletions]] <> "\n" <>
-          "completionLabels=" <> ToString[Map[#["label"]&, keyCompletions]] <> "\n\n"
-        ];
-        Close[debugStream];
+    If[TrueQ[$Debug2],
+      Quiet[
+        Module[{debugStream, keys},
+          debugStream = OpenAppend["/tmp/lsp-assoc-debug.log"];
+          keys = extractAssociationKeys[cst, text];
+          WriteString[debugStream,
+            "keyPath=" <> ToString[keyContext["keyPath"]] <> "\n" <>
+            "extractedKeys=" <> ToString[keys] <> "\n" <>
+            "completionCount=" <> ToString[Length[keyCompletions]] <> "\n" <>
+            "completionLabels=" <> ToString[Map[#["label"]&, keyCompletions]] <> "\n\n"
+          ];
+          Close[debugStream];
+        ]
       ]
     ];
 
@@ -251,7 +255,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   For any completion whose label contains a backtick (context-qualified names and context
   strings), add an explicit textEdit that replaces the full typed prefix with the label.
   Without this, VSCode treats ` as a word separator and only replaces the text after the
-  last backtick — causing e.g. "Alias`" + insert "Alias`Symbol" = "Alias`Alias`Symbol`".
+  last backtick - causing e.g. "Alias`" + insert "Alias`Symbol" = "Alias`Alias`Symbol`".
   Items that already carry a textEdit (e.g. association key completions) are left alone.
   *)
   If[StringContainsQ[prefix, "`"],
@@ -280,7 +284,7 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   (*
   Limit the number of results
   *)
-	With[{ isIncomplete = Length[completions] > 100 },
+    With[{ isIncomplete = True },
 	completions = Take[completions, UpTo[100]];
 
 	result = <|
@@ -327,6 +331,200 @@ Module[{lines, currentLine, beforeCursor, prefix},
   ]
 ]
 
+
+getTextBeforeCursor[text_String, line_Integer, char_Integer] :=
+Module[{lines, currentLine},
+
+  lines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
+
+  If[line > Length[lines],
+    Return[text]
+  ];
+
+  currentLine = lines[[line]];
+
+  If[char > StringLength[currentLine] + 1,
+    Return[text]
+  ];
+
+  StringRiffle[
+    Join[Take[lines, line - 1], {StringTake[currentLine, char - 1]}],
+    "\n"
+  ]
+]
+
+
+getEnclosingCallHeadName[beforeCursor_String] :=
+Module[{chars, i, squareDepth = 0, parenDepth = 0, braceDepth = 0,
+  bracketPos = None, headPrefix, identifiers},
+
+  chars = Characters[beforeCursor];
+
+  For[i = Length[chars], i >= 1, i--,
+    Switch[chars[[i]],
+      "]",
+        squareDepth++,
+      "[",
+        If[squareDepth === 0 && parenDepth === 0 && braceDepth === 0,
+          If[i < Length[chars] && chars[[i + 1]] === "[",
+            Return[None]
+          ];
+          bracketPos = i;
+          Break[],
+          squareDepth--
+        ],
+      ")",
+        parenDepth++,
+      "(",
+        If[parenDepth > 0, parenDepth--],
+      "}",
+        braceDepth++,
+      "{",
+        If[braceDepth > 0, braceDepth--]
+    ]
+  ];
+
+  If[bracketPos === None,
+    Return[None]
+  ];
+
+  headPrefix = StringTrim[StringTake[beforeCursor, bracketPos - 1]];
+  identifiers = StringCases[headPrefix, RegularExpression["[a-zA-Z$`][a-zA-Z0-9$`]*"]];
+
+  If[identifiers === {},
+    None,
+    Last[identifiers]
+  ]
+]
+
+
+getContextualOptionNames[text_String, line_Integer, char_Integer] :=
+Module[{beforeCursor, headName, indexedOptions, bareHeadName},
+
+  beforeCursor = getTextBeforeCursor[text, line, char];
+  headName = getEnclosingCallHeadName[beforeCursor];
+  indexedOptions = {};
+
+  If[StringQ[headName],
+    indexedOptions = GetSymbolOptionNames[headName];
+
+    If[indexedOptions === {} && StringContainsQ[headName, "`"],
+      bareHeadName = Last[StringSplit[headName, "`", All]];
+      indexedOptions = GetSymbolOptionNames[bareHeadName]
+    ]
+  ];
+
+  If[indexedOptions === {},
+    If[ListQ[WolframLanguageSyntax`Generate`$options], WolframLanguageSyntax`Generate`$options, {}],
+    DeleteDuplicates[indexedOptions]
+  ]
+]
+
+
+(*
+Workspace-wide association/list key cache.
+Stores the extracted key structure for every file that has been seen during
+completion, keyed by URI.  Each entry is:
+  <| "LastChange" -> dateObject, "Keys" -> <| varName -> structure, ... |> |>
+The cache is invalidated automatically when a file's LastChange timestamp
+changes (i.e. after every textDocument/didChange round-trip).
+*)
+$WorkspaceAssocKeyCache = <||>
+
+$ClosedFileAssocKeyCache = <||>
+
+extractAssociationKeysSafe[cst_, text_String] :=
+  extractAssociationKeys[cst, text]
+
+extractAssociationKeysSafe[_, _] :=
+  <||>
+
+extractAssociationKeysFromTextSafe[text_String] :=
+  extractAssociationKeysFromText[text]
+
+extractAssociationKeysFromTextSafe[_] :=
+  <||>
+
+(*
+Return the cached association-key structure for an open-files entry, updating
+the cache when the entry has changed since the last extraction.
+  uri   - the file URI (used as cache key)
+  entry - the $OpenFilesMap entry (<| "Text"->.., "CST"->.., "LastChange"->.. |>)
+Returns: <| varName -> structure, ... |>
+*)
+getOrUpdateAssocKeyCache[uri_String, entry_Association] :=
+Module[{lastChange, cached, cst, text, keys},
+  lastChange = Lookup[entry, "LastChange", None];
+  cached = Lookup[$WorkspaceAssocKeyCache, uri, None];
+  If[AssociationQ[cached] && cached["LastChange"] === lastChange,
+    cached["Keys"],
+    cst  = Lookup[entry, "CST", Null];
+    text = Lookup[entry, "Text", ""];
+    keys = extractAssociationKeysSafe[cst, text];
+    $WorkspaceAssocKeyCache[uri] = <| "LastChange" -> lastChange, "Keys" -> keys |>;
+    keys
+  ]
+]
+
+
+getOrUpdateClosedFileAssocKeyCache[uri_String] :=
+Module[{filePath, modTime, cached, text, keys},
+  filePath = normalizeURI[uri];
+
+  If[!FileExistsQ[filePath],
+    Return[<||>]
+  ];
+
+  modTime = Quiet[
+    AbsoluteTime[FileDate[filePath, "Modification"]],
+    {FileDate::nffil, FileDate::fstr}
+  ];
+
+  cached = Lookup[$ClosedFileAssocKeyCache, uri, None];
+  If[AssociationQ[cached] && Lookup[cached, "ModTime", None] === modTime,
+    Return[Lookup[cached, "Keys", <||>]]
+  ];
+
+  text = Quiet[
+    ReadString[filePath],
+    {ReadString::noopen, ReadString::openx}
+  ];
+  keys = extractAssociationKeysFromTextSafe[text];
+
+  $ClosedFileAssocKeyCache[uri] = <| "ModTime" -> modTime, "Keys" -> keys |>;
+  keys
+]
+
+
+getIndexedVariableStructure[variable_String, currentUri_String:""] :=
+Module[{defs, uris, merged, entry, fileKeys, fileStruct},
+  defs = If[currentUri === "",
+    GetSymbolDefinitions[variable],
+    LSPServer`PacletIndex`GetVisibleSymbolDefinitions[currentUri, variable]
+  ];
+  uris = DeleteDuplicates[Select[Lookup[defs, "uri", {}], StringQ]];
+  merged = <||>;
+
+  Do[
+    If[uri === currentUri,
+      Continue[]
+    ];
+
+    entry = Lookup[$OpenFilesMap, uri, None];
+    fileKeys = If[AssociationQ[entry],
+      getOrUpdateAssocKeyCache[uri, entry],
+      getOrUpdateClosedFileAssocKeyCache[uri]
+    ];
+    fileStruct = Lookup[fileKeys, variable, <||>];
+
+    If[Length[fileStruct] > 0,
+      merged = mergeKeyStructure[merged, fileStruct]
+    ],
+    {uri, uris}
+  ];
+
+  merged
+]
 
 (*
 Cached set of constants for O(1) lookup
@@ -441,9 +639,11 @@ getOptionCompletions[text_String, line_Integer, char_Integer, prefix_String] :=
 Module[{options, matching, completions},
 
   (*
-  Get all known options from the loaded data
+  Prefer indexed option names for the enclosing call head. Fall back to the
+  global option list when the call head cannot be resolved or has no indexed
+  option metadata.
   *)
-  options = WolframLanguageSyntax`Generate`$options;
+  options = getContextualOptionNames[text, line, char];
 
   (*
   Filter by prefix
@@ -554,7 +754,7 @@ Module[{contexts, ctxPart, symbolPrefix, allNames, matching, completions},
 
   (*
   Use Names[] to get all symbols in this context matching the prefix.
-  Names[] does not trigger loading or warnings — it only inspects existing symbols.
+  Names[] does not trigger loading or warnings - it only inspects existing symbols.
   *)
   allNames = Quiet[
     Names[ctxPart <> symbolPrefix <> "*"],
@@ -850,7 +1050,7 @@ Module[{chars, scanPos, keysReversed, keyStr, startKey, endKey,
 
       (* Not a quote. Could be integer, All, Span (;;), or the opening bracket *)
       If[chars[[scanPos]] === "[",
-        (* Opening bracket — done scanning keys *)
+        (* Opening bracket - done scanning keys *)
         scanPos--;
         If[scanPos >= 1 && chars[[scanPos]] === "[",
           scanPos--
@@ -974,7 +1174,7 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
   (*
   Step 0: Try bracket-only detection first.
   If the last character (after trimming whitespace and any non-quote prefix) is [ or [[,
-  the user just typed the bracket — trigger with isStringKey=False.
+  the user just typed the bracket - trigger with isStringKey=False.
   Also handle the case where user typed some non-quote chars after [ as a prefix
   (e.g., data[ho for filtering).
   *)
@@ -989,17 +1189,17 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
     barePrefixStart = bracketPos + 1
   ];
   If[bracketPos >= 1 && chars[[bracketPos]] === "[",
-    (* Check that this isn't inside a quote — no unmatched " between [ and cursor *)
+    (* Check that this isn't inside a quote - no unmatched " between [ and cursor *)
     Module[{quoteCount, qi},
       quoteCount = 0;
       Do[
         If[chars[[qi]] === "\"", quoteCount++],
         {qi, bracketPos + 1, Length[chars]}
       ];
-      (* If odd number of quotes, we're inside a string — don't use bracket-only path *)
+      (* If odd number of quotes, we're inside a string - don't use bracket-only path *)
       If[OddQ[quoteCount], Goto["QuotePath"]]
     ];
-    (* We're at [ or [[ without a quote — bracket-only trigger *)
+    (* We're at [ or [[ without a quote - bracket-only trigger *)
     isBracketOnly = True;
     Goto["BracketOnlyPath"]
   ];
@@ -1165,7 +1365,7 @@ Module[{lines, currentLine, beforeCursor, chars, pos, inString, prefix = "",
           Module[{exprEnd, exprStart, exprStr},
             exprEnd = endKey;
             exprStart = exprEnd;
-            (* Scan backwards to find [[ — collect chars that are digits, letters, ;, $, whitespace *)
+            (* Scan backwards to find [[ - collect chars that are digits, letters, ;, $, whitespace *)
             While[exprStart > 0 && !(exprStart >= 2 && scanChars[[exprStart - 1]] === "[" && scanChars[[exprStart]] === "["),
               exprStart--
             ];
@@ -1287,7 +1487,8 @@ Arguments:
   fullLine - full text of the current line
 *)
 getAssociationKeyCompletions[cst_, text_String, keyContext_Association,
-                              lspLine0_Integer, lspChar0_Integer, fullLine_String] :=
+                              lspLine0_Integer, lspChar0_Integer, fullLine_String,
+                              currentUri_String:""] :=
 Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
         matchingKeys, completions, pathDescription, editStartChar, editEndChar,
         afterCursor, hasClosingQuote, isStringKey, isPart},
@@ -1299,14 +1500,54 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
   isPart = Lookup[keyContext, "isPart", False];
 
   (*
-  Extract hierarchical association keys defined in the file
+  Extract hierarchical association keys defined in the current file
   *)
   allKeys = extractAssociationKeys[cst, text];
 
   (*
-  Get the hierarchical structure for the specific variable
+  Update the workspace cache for the current file so other files can see it
+  *)
+  If[currentUri =!= "",
+    Module[{curEntry},
+      curEntry = Lookup[$OpenFilesMap, currentUri, None];
+      If[AssociationQ[curEntry],
+        $WorkspaceAssocKeyCache[currentUri] = <|
+          "LastChange" -> Lookup[curEntry, "LastChange", None],
+          "Keys" -> allKeys
+        |>
+      ]
+    ]
+  ];
+
+  (*
+  Get the hierarchical structure for the specific variable.
+  If not found in the current file, look across all other open files
+  (workspace-wide fallback).
   *)
   variableStructure = Lookup[allKeys, variable, <||>];
+
+  If[Length[variableStructure] == 0 && currentUri =!= "",
+    Module[{merged = <||>, otherUri, otherEntry, otherKeys, otherStruct},
+      KeyValueMap[
+        Function[{otherUri, otherEntry},
+          If[otherUri =!= currentUri && AssociationQ[otherEntry],
+            otherKeys = getOrUpdateAssocKeyCache[otherUri, otherEntry];
+            otherStruct = Lookup[otherKeys, variable, <||>];
+            If[Length[otherStruct] > 0,
+              merged = mergeKeyStructure[merged, otherStruct]
+            ]
+          ]
+        ],
+        $OpenFilesMap
+      ];
+      variableStructure = merged
+    ]
+  ];
+
+  variableStructure = mergeKeyStructure[
+    variableStructure,
+    getIndexedVariableStructure[variable, currentUri]
+  ];
 
   (*
   Navigate to the correct level based on keyPath
@@ -1315,7 +1556,7 @@ Module[{variable, prefix, keyPath, allKeys, variableStructure, keysAtLevel,
 
   (*
   Only show completions for variables that have known association/list definitions.
-  If the variable is not found in the extracted keys, return nothing — do not
+  If the variable is not found in the extracted keys, return nothing - do not
   fall back to showing keys from other variables.
   *)
 
@@ -1593,14 +1834,16 @@ Module[{result, assignments, textKeys, mutations},
   mutations = extractMutationsFromCST[cst];
 
   (* Debug: log CST extraction results *)
-  Quiet[
-    Module[{ds},
-      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
-      WriteString[ds, "--- extractAssociationKeys (CST path) ---\n"];
-      WriteString[ds, "directKeys=" <> ToString[Keys[result]] <> "\n"];
-      WriteString[ds, "cstMutationKeys=" <> ToString[Keys[mutations]] <> "\n"];
-      WriteString[ds, "cstMutations=" <> ToString[mutations] <> "\n"];
-      Close[ds];
+  If[TrueQ[$Debug2],
+    Quiet[
+      Module[{ds},
+        ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+        WriteString[ds, "--- extractAssociationKeys (CST path) ---\n"];
+        WriteString[ds, "directKeys=" <> ToString[Keys[result]] <> "\n"];
+        WriteString[ds, "cstMutationKeys=" <> ToString[Keys[mutations]] <> "\n"];
+        WriteString[ds, "cstMutations=" <> ToString[mutations] <> "\n"];
+        Close[ds];
+      ]
     ]
   ];
 
@@ -1862,12 +2105,11 @@ Module[{assocNodes, commaNodes, commaAssocs, mergedKeys, elementKeys},
   ];
 
   If[Length[assocNodes] > 0,
-    elementKeys = {};
     mergedKeys = <||>;
-    Do[
+    {elementKeys} = Last@Reap[Do[
       Module[{keys},
         keys = extractHierarchicalKeys[an];
-        AppendTo[elementKeys, keys];
+        Sow[keys];
         Do[
           If[!KeyExistsQ[mergedKeys, k],
             mergedKeys[k] = keys[k],
@@ -1883,7 +2125,7 @@ Module[{assocNodes, commaNodes, commaAssocs, mergedKeys, elementKeys},
         ]
       ],
       {an, assocNodes}
-    ];
+    ]];
     <| "_isList" -> True, "_listLength" -> Length[assocNodes],
        "_elements" -> elementKeys, "_children" -> mergedKeys |>,
 
@@ -2144,7 +2386,7 @@ Module[{merged = result, existing},
   ]
 ]
 
-(* No-op for None valueStructure — return result unchanged *)
+(* No-op for None valueStructure - return result unchanged *)
 mergeIntoResult[result_Association, variable_String, keyPath_List, None] := result
 
 (*
@@ -2160,7 +2402,7 @@ Module[{merged = existing, key, childrenNow, updatedChildren},
   key = First[keyPath];
 
   If[Length[keyPath] == 1,
-    (* Final key — merge valueStructure here *)
+    (* Final key - merge valueStructure here *)
     If[AssociationQ[valueStructure] && Length[valueStructure] > 0,
       (* Value has nested structure *)
       If[KeyExistsQ[merged, key] && AssociationQ[merged[key]] && KeyExistsQ[merged[key], "_children"],
@@ -2174,7 +2416,7 @@ Module[{merged = existing, key, childrenNow, updatedChildren},
     ];
     merged
     ,
-    (* Intermediate key — recurse deeper *)
+    (* Intermediate key - recurse deeper *)
     If[!KeyExistsQ[merged, key],
       merged[key] = <| "_children" -> <||> |>
     ];
@@ -2188,7 +2430,7 @@ Module[{merged = existing, key, childrenNow, updatedChildren},
   ]
 ]
 
-(* Fallback for empty keyPath — just merge at top level *)
+(* Fallback for empty keyPath - just merge at top level *)
 mergeAtKeyPath[existing_Association, {}, valueStructure_Association] :=
   mergeKeyStructure[existing, valueStructure]
 
@@ -2288,12 +2530,11 @@ Module[{varName, assocNode, listNode, structure},
       If[Length[assocNodes] > 0,
         (* Extract per-element keys and build merged keys *)
         Module[{elementKeys},
-          elementKeys = {};
           mergedKeys = <||>;
-          Do[
+          {elementKeys} = Last@Reap[Do[
             Module[{keys},
               keys = extractHierarchicalKeys[an];
-              AppendTo[elementKeys, keys];
+              Sow[keys];
               Do[
                 If[!KeyExistsQ[mergedKeys, k],
                   mergedKeys[k] = keys[k],
@@ -2310,7 +2551,7 @@ Module[{varName, assocNode, listNode, structure},
               ]
             ],
             {an, assocNodes}
-          ];
+          ]];
           structure = <| "_isList" -> True, "_listLength" -> Length[assocNodes],
                          "_elements" -> elementKeys,
                          "_children" -> mergedKeys |>;
@@ -2387,12 +2628,11 @@ Module[{result, rules, commaChildren},
               numAssocs = Length[assocNodes];
               If[numAssocs > 0,
                 Module[{elementKeys2},
-                  elementKeys2 = {};
                   mergedKeys = <||>;
-                  Do[
+                  {elementKeys2} = Last@Reap[Do[
                     Module[{akeys},
                       akeys = extractHierarchicalKeys[an];
-                      AppendTo[elementKeys2, akeys];
+                      Sow[akeys];
                       Do[
                         If[!KeyExistsQ[mergedKeys, k],
                           mergedKeys[k] = akeys[k],
@@ -2408,7 +2648,7 @@ Module[{result, rules, commaChildren},
                       ]
                     ],
                     {an, assocNodes}
-                  ];
+                  ]];
                   result[key] = <| "_isList" -> True, "_listLength" -> numAssocs,
                                     "_elements" -> elementKeys2,
                                     "_children" -> mergedKeys |>
@@ -2557,9 +2797,9 @@ Module[{result, chars, pos, len, varName, mutations},
 
             (* Now scan inside the list for <| ... |> associations *)
             mergedKeys = <||>;
-            Module[{scanPos, numAssocsText = 0, elementKeysText = {}},
+            Module[{scanPos, numAssocsText = 0, elementKeysText},
               scanPos = listStart;
-              While[scanPos <= listEnd,
+              {elementKeysText} = Last@Reap[While[scanPos <= listEnd,
                 (* Skip to next <| *)
                 While[scanPos < listEnd && !(chars[[scanPos]] === "<" && chars[[scanPos + 1]] === "|"),
                   scanPos++
@@ -2574,7 +2814,7 @@ Module[{result, chars, pos, len, varName, mutations},
                 (* Parse and merge keys *)
                 Module[{bodyKeys},
                   bodyKeys = parseAssociationBody[text, assocBodyStart, assocBodyEnd - 1];
-                  AppendTo[elementKeysText, bodyKeys];
+                  Sow[bodyKeys];
                   Do[
                     If[!KeyExistsQ[mergedKeys, k],
                       mergedKeys[k] = bodyKeys[k],
@@ -2590,7 +2830,7 @@ Module[{result, chars, pos, len, varName, mutations},
                   ]
                 ];
                 scanPos = assocBodyEnd + 2
-              ];
+              ]];
 
               If[Length[mergedKeys] > 0,
                 result[varName] = <| "_isList" -> True, "_listLength" -> numAssocsText,
@@ -2599,7 +2839,7 @@ Module[{result, chars, pos, len, varName, mutations},
               ]
             ]
           ],
-          (* Neither <| nor { — skip *)
+          (* Neither <| nor { - skip *)
           Continue[]
         ]
       ]
@@ -2612,13 +2852,15 @@ Module[{result, chars, pos, len, varName, mutations},
   mutations = extractMutationsFromText[text];
 
   (* Debug: log text extraction results before merge *)
-  Quiet[
-    Module[{ds},
-      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
-      WriteString[ds, "--- extractAssociationKeysFromText ---\n"];
-      WriteString[ds, "directKeys=" <> ToString[Keys[result]] <> "\n"];
-      WriteString[ds, "mutationKeys=" <> ToString[Keys[mutations]] <> "\n"];
-      Close[ds];
+  If[TrueQ[$Debug2],
+    Quiet[
+      Module[{ds},
+        ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+        WriteString[ds, "--- extractAssociationKeysFromText ---\n"];
+        WriteString[ds, "directKeys=" <> ToString[Keys[result]] <> "\n"];
+        WriteString[ds, "mutationKeys=" <> ToString[Keys[mutations]] <> "\n"];
+        Close[ds];
+      ]
     ]
   ];
 
@@ -2648,12 +2890,14 @@ Module[{result, partKeys, funcKeys},
   result = <||>;
 
   (* Debug: log that we entered extractMutationsFromText *)
-  Quiet[
-    Module[{ds},
-      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
-      WriteString[ds, "--- extractMutationsFromText entered ---\n"];
-      WriteString[ds, "textLength=" <> ToString[StringLength[text]] <> "\n"];
-      Close[ds];
+  If[TrueQ[$Debug2],
+    Quiet[
+      Module[{ds},
+        ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+        WriteString[ds, "--- extractMutationsFromText entered ---\n"];
+        WriteString[ds, "textLength=" <> ToString[StringLength[text]] <> "\n"];
+        Close[ds];
+      ]
     ]
   ];
 
@@ -2666,11 +2910,13 @@ Module[{result, partKeys, funcKeys},
       {"$1", "$2"}
   ];
 
-  Quiet[
-    Module[{ds},
-      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
-      WriteString[ds, "partKeys=" <> ToString[partKeys] <> "\n"];
-      Close[ds];
+  If[TrueQ[$Debug2],
+    Quiet[
+      Module[{ds},
+        ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+        WriteString[ds, "partKeys=" <> ToString[partKeys] <> "\n"];
+        Close[ds];
+      ]
     ]
   ];
 
@@ -2697,7 +2943,7 @@ Module[{result, partKeys, funcKeys},
     ];
 
     (* For each AppendTo/PrependTo, just register the variable exists.
-       The value might be an association — try to extract keys from following text. *)
+       The value might be an association - try to extract keys from following text. *)
     Do[
       Module[{var},
         var = am[[1]];
@@ -2838,12 +3084,14 @@ Module[{result, partKeys, funcKeys},
   ];
 
   (* Debug: log final mutation result *)
-  Quiet[
-    Module[{ds},
-      ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
-      WriteString[ds, "mutationsFromText=" <> ToString[result] <> "\n"];
-      WriteString[ds, "--- extractMutationsFromText done ---\n"];
-      Close[ds];
+  If[TrueQ[$Debug2],
+    Quiet[
+      Module[{ds},
+        ds = OpenAppend["/tmp/lsp-assoc-debug.log"];
+        WriteString[ds, "mutationsFromText=" <> ToString[result] <> "\n"];
+        WriteString[ds, "--- extractMutationsFromText done ---\n"];
+        Close[ds];
+      ]
     ]
   ];
 
@@ -2970,7 +3218,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
       (* Check for list value: { ... } which may contain associations *)
       If[pos <= endPos && chars[[pos]] === "{",
         Module[{listStart, listEnd2, listDepth2, listInStr2, listCh2,
-                mergedKeys2, assocBodyStart2, assocBodyEnd2, numAssocs2, elementKeys3 = {}},
+                mergedKeys2, assocBodyStart2, assocBodyEnd2, numAssocs2, elementKeys3},
           pos++;
           listStart = pos;
           listDepth2 = 1;
@@ -2992,7 +3240,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
           If[listEnd2 >= listStart,
             mergedKeys2 = <||>;
             numAssocs2 = 0;
-            Module[{scanPos2},
+            {elementKeys3} = Last@Reap[Module[{scanPos2},
               scanPos2 = listStart;
               While[scanPos2 <= listEnd2,
                 While[scanPos2 < listEnd2 && !(chars[[scanPos2]] === "<" && chars[[scanPos2 + 1]] === "|"),
@@ -3006,7 +3254,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
                 numAssocs2++;
                 Module[{bodyKeys2},
                   bodyKeys2 = parseAssociationBody[text, assocBodyStart2, assocBodyEnd2 - 1];
-                  AppendTo[elementKeys3, bodyKeys2];
+                  Sow[bodyKeys2];
                   Do[
                     If[!KeyExistsQ[mergedKeys2, k],
                       mergedKeys2[k] = bodyKeys2[k],
@@ -3023,7 +3271,7 @@ Module[{result, chars, pos, key, valueStart, valueEnd, depth, inStr, ch},
                 ];
                 scanPos2 = assocBodyEnd2 + 2
               ]
-            ];
+            ]];
             If[Length[mergedKeys2] > 0,
               result[key] = <| "_isList" -> True, "_listLength" -> numAssocs2,
                                "_elements" -> elementKeys3,

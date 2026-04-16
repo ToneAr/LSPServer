@@ -65,13 +65,13 @@ Module[{params, id, doc, uri, res},
 
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "method" -> "textDocument/documentSymbolFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -79,7 +79,7 @@ Module[{params, id, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/documentSymbolFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
@@ -112,7 +112,7 @@ Module[{id, params, doc, uri, cst, ast, entry, flatBag, comments,
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
@@ -121,35 +121,35 @@ Module[{id, params, doc, uri, cst, ast, entry, flatBag, comments,
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-    
+
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
 
-  cst = entry["CST"];
+  cst = Lookup[entry, "CST", Null];
 
-  If[FailureQ[cst],
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  If[cst === Null || MissingQ[cst] || FailureQ[cst],
+    Throw[{}]
   ];
 
-  ast = entry["AST"];
+  ast = Lookup[entry, "AST", Null];
 
-  If[FailureQ[ast],
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  If[ast === Null || MissingQ[ast] || FailureQ[ast],
+    Throw[{}]
   ];
 
   (*
   populate flatBag
   *)
   comments = Cases[cst[[2]], LeafNode[Token`Comment, _, _]];
-  
+
   lastLine = cst[[3, Key[Source], 2, 1]];
 
   Block[{$FlatBag},
@@ -193,7 +193,7 @@ Module[{id, params, doc, uri, entry, symbolInfo, documentSymbols,
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
@@ -202,18 +202,18 @@ Module[{id, params, doc, uri, entry, symbolInfo, documentSymbols,
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-    
+
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
+
   nodeList = entry["NodeList"];
 
   nodeList = Lookup[entry, "NodeList", Null];
@@ -221,7 +221,7 @@ Module[{id, params, doc, uri, entry, symbolInfo, documentSymbols,
   If[nodeList === Null,
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   documentSymbols = Flatten[walkOutline /@ nodeList];
 
   log[2, "documentSymbols (up to 20): ", Replace[Take[documentSymbols, UpTo[20]], {
@@ -259,7 +259,7 @@ flattenDocumentSymbolToSymbolInfo[documentSymbol_] :=
 walkCommentPair[{LeafNode[Token`Comment, "(* ::Package:: *)", data_], _}] :=
   Internal`StuffBag[$FlatBag, packageComment[Null, "", KeyTake[data, {Source}]]]
 
-walkCommentPair[{LeafNode[Token`Comment, "(* ::Title:: *)", _], LeafNode[Token`Comment, com_, data_]}] := 
+walkCommentPair[{LeafNode[Token`Comment, "(* ::Title:: *)", _], LeafNode[Token`Comment, com_, data_]}] :=
   Internal`StuffBag[$FlatBag, titleComment[StringTrim[StringTake[com, {3, -3}]], "", KeyTake[data, {Source}]]]
 
 walkCommentPair[{LeafNode[Token`Comment, "(* ::Section:: *)", _], LeafNode[Token`Comment, com_, data_]}] :=
@@ -540,7 +540,7 @@ Module[{walkedChildren, src},
     "range" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
-    |>, 
+    |>,
     "selectionRange" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
@@ -574,14 +574,14 @@ Module[{walkedChildren, src},
 
   src = data[Source];
   src--;
-  
+
   {<|
     "name" -> name,
     "kind" -> $SymbolKind["File"],
     "range" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
-    |>, 
+    |>,
     "selectionRange" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
@@ -615,14 +615,14 @@ Module[{walkedChildren, src},
 
   src = data[Source];
   src--;
-  
+
   {<|
     "name" -> name,
     "kind" -> $SymbolKind["File"],
     "range" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
-    |>, 
+    |>,
     "selectionRange" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
@@ -663,7 +663,7 @@ Module[{walkedChildren, src},
     "range" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
-    |>, 
+    |>,
     "selectionRange" -> <|
       "start" -> <| "line" -> src[[1, 1]], "character" -> src[[1, 2]] |>,
       "end" -> <| "line" -> src[[2, 1]], "character" -> src[[2, 2]] |>
