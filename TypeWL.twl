@@ -1,0 +1,46 @@
+
+(* Typed Wolfram Syntax wishlist *)
+(* Typescript like Typed Wolfram Language syntax parser and LSP *)
+(* Complete builtin function input to output pattern map for type inference *)
+
+(* Syntax: *)
+(*
+	var: pattern_ = value
+	var: pattern_ := value
+	function[ args_ ]: return_ = body
+	function[ args_ ]: return_ := body
+	function /: Head[ function[ args_ ] ]: return_ := body
+
+	Where the return hint ": return_" is optional, inferred if not provided,
+	and warning the user if provided and function return is not matching.
+
+	Examples:
+*)
+
+var: { ___Integer };
+
+(* Patterns inferred down to the Atoms *)
+var: { ___Integer } = {1, 2, 3}
+var: { ___Integer | ___Real } = {1, 2., 3}
+var: <|
+	"a" -> _Integer,
+	"b" -> <| "c" -> { ___Integer } |>
+|> = <|
+	"a" -> 1,
+	"b" -> <|
+		"c" -> {1, 2, 3}
+	|>
+|>
+var: { _String | { ___Integer | ___Real } | <| "a" -> _Integer |> } = {
+	"String",
+	{ 1, 2. },
+	<| "a" -> 1 |>
+}
+
+f[ x_String ]: _Integer := StringLength[ x ]
+
+(* Parametric patterns *)
+(* Matching inferred head of in argument *)
+g[ { in__ } ]: _[in] := First[{in}]
+(* Matching inferred head of first argument *)
+g[ { in__ } ]: _[1] := First[{in}]
