@@ -3,7 +3,6 @@
 BeginPackage["LSPServer`Workspace`"]
 
 Begin["`Private`"]
-
 Needs["LSPServer`"]
 Needs["LSPServer`Utils`"]
 Needs["CodeParser`"]
@@ -26,7 +25,7 @@ Module[{params, id, command, res},
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   command = params["command"];
 
@@ -38,11 +37,11 @@ Module[{params, id, command, res},
     *)
     "toggle_inlay_hints",
       $InlayHints = !TrueQ[$InlayHints];
-      
+
       If[$Debug,
         log["toggle_inlay_hints: $InlayHints -> ", $InlayHints]
       ];
-      
+
       (*
       Send workspace/inlayHint/refresh to notify the client that
       inlay hints have changed and should be re-requested.
@@ -118,7 +117,7 @@ Module[{params, id, command, res},
 
             log[1, "ping_pong_responsiveness_test:> \n\n"];
 
-            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>, <| "method" -> "pingPongTest" |>}    
+            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>, <| "method" -> "pingPongTest" |>}
           ,
           (*
           payload_responsiveness_test is an undocumented, debug command
@@ -130,9 +129,9 @@ Module[{params, id, command, res},
             {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>, <| "method" -> "payloadTest", "payload" -> StringJoin@Flatten@Table[CharacterRange["a", "z"], 100000] |>}
           ,
           _,
-            
+
             log[1, "UNSUPPORTED COMMAND: ", command];
-            
+
             {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}
         ];
 
@@ -159,7 +158,7 @@ Module[{params, settings},
 
   params = content["params"];
   settings = Lookup[params, "settings", Null];
-  
+
   If[AssociationQ[settings],
     (*
     Handle wolfram/wolframLSP settings section
@@ -170,10 +169,10 @@ Module[{params, settings},
       KeyValuePattern["wolframLSP" -> s_Association] :> s,
       other_ :> other
     }];
-    
+
     If[KeyExistsQ[settings, "inlayHints"],
       $InlayHints = TrueQ[settings["inlayHints"]];
-      
+
       If[$Debug2,
         log["didChangeConfiguration: $InlayHints -> ", $InlayHints]
       ]
@@ -207,7 +206,7 @@ Module[{id, params, query, symbols, results, symbolKindMap},
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
   ];
-  
+
   params = content["params"];
   query = Lookup[params, "query", ""];
 
@@ -293,8 +292,9 @@ Module[{params, event, added, removed},
         (*
         Index files in the new folder
         *)
-        files = FileNames[{"*.wl", "*.m", "*.wls", "*.ipwl"}, folderPath, Infinity];
-        Scan[indexFile, files]
+        files = FileNames[LSPServer`Private`workspaceSourceFilePatterns[], folderPath, Infinity];
+        Scan[indexFile, files];
+        LSPServer`Private`queueWorkspaceDiagnosticsSweep[]
       ]
     ],
     added

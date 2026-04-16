@@ -166,6 +166,16 @@ Module[{lintsWithConfidence, filtered, ignoreData, diagnostics},
 ]
 
 
+allEntryDiagnosticsLints[entry_?AssociationQ] :=
+Join[
+  Replace[Lookup[entry, "CSTLints", {}], Except[_List] -> {}],
+  Replace[Lookup[entry, "AggLints", {}], Except[_List] -> {}],
+  Replace[Lookup[entry, "ASTLints", {}], Except[_List] -> {}],
+  Replace[Lookup[entry, "ScopingLints", {}], Except[_List] -> {}],
+  Replace[Lookup[entry, "WorkspaceLints", {}], Except[_List] -> {}]
+]
+
+
 (* ── Helper: convert entry["ScopingData"] to InspectionObject lint entries ── *)
 convertScopingDataToLints[uri_String, entry_?AssociationQ, suppressedRegions_] :=
 Module[{scopingData, filtered, scopingLints, isActive},
@@ -212,57 +222,53 @@ buildWorkerSnapshot[uri_String] := <|
 |>
 
 (*
-Submit runWorkspaceDiagnosticsWorker to the background kernel.
-No-op if the diagnostics kernel is unavailable ($Failed).
-Falls back to synchronous inline workspace diagnostics if no kernel.
+Queue synchronous workspace diagnostics work.
+Deduplicate identical queued requests so repeated refresh triggers do not
+inflate the queue.
 *)
 dispatchWorkspaceDiagnostics[uri_String] :=
-Module[{ast, snapshot},
-  If[$DiagnosticsKernel === $Failed || $DiagnosticsKernel === None,
-    (* No parallel kernel available — fall back to inline workspace diags.
-       Quiet suppresses package-load shadow messages that appear when
-       WolframLanguageSyntax`Generate` is first autoloaded in this context. *)
-    Quiet @ handleContent[<|"method" -> "textDocument/runWorkspaceDiagnostics",
-                    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>];
-    Return[Null]
+Module[{content, queuedQ},
+  content = <|
+    "method" -> "textDocument/runWorkspaceDiagnostics",
+    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+  |>;
+
+  queuedQ = AnyTrue[
+    $ContentQueue,
+    MatchQ[#, KeyValuePattern[{
+      "method" -> "textDocument/runWorkspaceDiagnostics",
+      "params" -> KeyValuePattern["textDocument" -> KeyValuePattern["uri" -> uri]]
+    }]] &
   ];
-  (* Cancel any in-flight task before submitting a new one *)
-  If[$DiagnosticsTask =!= None,
-    $DiagnosticsTask    = None;
-    $DiagnosticsTaskURI = None;
-    Quiet[AbortKernels[$DiagnosticsKernel]]
+
+  If[!queuedQ,
+    AppendTo[$ContentQueue, content]
   ];
-  ast      = $OpenFilesMap[uri]["AST"];
-  snapshot = buildWorkerSnapshot[uri];
-  $DiagnosticsTaskURI = uri;
-  $DiagnosticsTask    = Check[
-    ParallelSubmit[{$DiagnosticsKernel},
-      runWorkspaceDiagnosticsWorker[uri, ast, snapshot]
-    ],
-    $Failed
+
+  Null
+]
+
+
+dispatchClosedFileDiagnostics[uri_String] :=
+Module[{content, queuedQ},
+  content = <|
+    "method" -> "textDocument/runClosedFileDiagnostics",
+    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+  |>;
+
+  queuedQ = AnyTrue[
+    $ContentQueue,
+    MatchQ[#, KeyValuePattern[{
+      "method" -> "textDocument/runClosedFileDiagnostics",
+      "params" -> KeyValuePattern["textDocument" -> KeyValuePattern["uri" -> uri]]
+    }]] &
   ];
-  If[$DiagnosticsTask === $Failed,
-    log[0, "WARNING: ParallelSubmit failed for workspace diagnostics"];
-    $DiagnosticsTask    = None;
-    $DiagnosticsTaskURI = None;
-    (* Relaunch kernel and retry once *)
-    Quiet[CloseKernels[$DiagnosticsKernel]];
-    $DiagnosticsKernel = Quiet[Check[First[LaunchKernels[1]], $Failed]];
-    If[$DiagnosticsKernel =!= $Failed,
-      ParallelEvaluate[
-        Needs["CodeParser`"]; Needs["CodeInspector`"]; Needs["CodeFormatter`"],
-        $DiagnosticsKernel
-      ];
-      DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
-        "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
-        $DiagnosticsKernel];
-      $DiagnosticsTaskURI = uri;
-      $DiagnosticsTask = Quiet[Check[
-        ParallelSubmit[{$DiagnosticsKernel},
-          runWorkspaceDiagnosticsWorker[uri, ast, snapshot]],
-        None]]
-    ]
-  ]
+
+  If[!queuedQ,
+    AppendTo[$ContentQueue, content]
+  ];
+
+  Null
 ]
 
 
@@ -378,6 +384,138 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
 ]]
 
 
+handleContent[content:KeyValuePattern["method" -> "textDocument/runClosedFileDiagnostics"]] :=
+Catch[
+Module[{params, doc, uri, path, text, entry, parseResult,
+  cst, agg, ast, suppressedRegions, ignoreData,
+  cstLints, aggLints, astLints, scopingData, scopingLints,
+  notification, mathData},
+
+  log[1, "textDocument/runClosedFileDiagnostics: enter"];
+
+  params = content["params"];
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  If[KeyExistsQ[$OpenFilesMap, uri],
+    Throw[{}]
+  ];
+
+  path = normalizeURI[uri];
+
+  If[!FileExistsQ[path],
+    If[AssociationQ[$ClosedFileDiagnosticsNotifications],
+      $ClosedFileDiagnosticsNotifications = KeyDrop[$ClosedFileDiagnosticsNotifications, uri]
+    ];
+    Throw[{}]
+  ];
+
+  text = Quiet[ReadString[path]];
+
+  If[!StringQ[text],
+    Throw[{}]
+  ];
+
+  entry = <|
+    "Text" -> text,
+    "LastChange" -> Now
+  |>;
+
+  If[StringEndsQ[uri, ".ipwl"] && NameQ["LSPServer`TypeWL`PreprocessIPWL"],
+    entry["PreprocessedText"] = LSPServer`TypeWL`PreprocessIPWL[text][[1]]
+  ];
+
+  parseResult = Quiet[Check[UpdateFileIndex[uri, text], $Failed]];
+
+  If[ListQ[parseResult] && Length[parseResult] == 3,
+    cst = parseResult[[1]];
+    agg = parseResult[[2]];
+    ast = parseResult[[3]],
+    cst = Quiet[CodeConcreteParse[
+      Lookup[entry, "PreprocessedText", text],
+      "FileFormat" -> LSPServer`SourceFileFormat[uri]
+    ]];
+    If[FailureQ[cst],
+      Throw[{}]
+    ];
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]]
+  ];
+
+  entry["CST"] = cst;
+  If[!StringContainsQ[text, "\t"],
+    entry["CSTTabs"] = cst
+  ];
+  entry["Agg"] = agg;
+  entry["AST"] = ast;
+
+  suppressedRegions = getSuppressedRegions[cst];
+  entry["SuppressedRegions"] = suppressedRegions;
+
+  ignoreData = getIgnoreDataFromCST[cst, uri];
+  entry["IgnoreData"] = ignoreData;
+
+  cstLints = Quiet[CodeInspectCST[cst,
+    "AggregateRules" -> <||>, "AbstractRules" -> <||>,
+    "SuppressedRegions" -> suppressedRegions]];
+  If[!ListQ[cstLints], cstLints = {}];
+  entry["CSTLints"] = cstLints;
+
+  aggLints = Quiet[CodeInspectAgg[agg,
+    "AbstractRules" -> <||>,
+    "SuppressedRegions" -> suppressedRegions]];
+  If[!ListQ[aggLints], aggLints = {}];
+  entry["AggLints"] = aggLints;
+
+  If[!FailureQ[ast],
+    astLints = Quiet[CodeInspectAST[ast, "SuppressedRegions" -> suppressedRegions]];
+    If[!ListQ[astLints], astLints = {}];
+    entry["ASTLints"] = astLints,
+    astLints = {};
+    entry["ASTLints"] = {}
+  ];
+
+  scopingData = {};
+  scopingLints = {};
+  If[!FailureQ[ast],
+    scopingData = Quiet[ScopingData[ast]];
+    If[!ListQ[scopingData], scopingData = {}];
+    mathData = Quiet[LSPServer`SemanticTokens`Private`extractMathScopingData[ast]];
+    If[ListQ[mathData],
+      scopingData = Join[scopingData, mathData]
+    ];
+    entry["ScopingData"] = scopingData;
+    scopingLints = convertScopingDataToLints[uri, entry, suppressedRegions];
+    If[!ListQ[scopingLints], scopingLints = {}];
+    entry["ScopingLints"] = scopingLints
+  ];
+
+  entry["WorkspaceLints"] = Null;
+
+  $OpenFilesMap[uri] = entry;
+
+  Quiet[handleContent[<|
+    "method" -> "textDocument/runWorkspaceDiagnostics",
+    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+  |>]];
+
+  entry = Lookup[$OpenFilesMap, uri, entry];
+  notification = buildPublishNotification[uri, entry, allEntryDiagnosticsLints[entry]];
+
+  If[!AssociationQ[$ClosedFileDiagnosticsNotifications],
+    $ClosedFileDiagnosticsNotifications = <||>
+  ];
+  $ClosedFileDiagnosticsNotifications[uri] = notification;
+
+  $OpenFilesMap[uri] = .;
+  ClearIgnoreData[uri];
+
+  log[1, "textDocument/runClosedFileDiagnostics: exit"];
+
+  {notification}
+]]
+
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/suppressedRegions"]] :=
 Catch[
 Module[{params, doc, uri, entry, cst, suppressedRegions},
@@ -407,7 +545,11 @@ Module[{params, doc, uri, entry, cst, suppressedRegions},
     Throw[{}]
   ];
 
-  cst = entry["CST"];
+  cst = Lookup[entry, "CST", Null];
+
+  If[cst === Null || MissingQ[cst] || FailureQ[cst],
+    Throw[{}]
+  ];
 
   log[2, "before SuppressedRegions"];
 
@@ -459,7 +601,11 @@ Module[{params, doc, uri, entry, cst, ignoreData},
     Throw[{}]
   ];
 
-  cst = entry["CST"];
+  cst = Lookup[entry, "CST", Null];
+
+  If[cst === Null || MissingQ[cst] || FailureQ[cst],
+    Throw[{}]
+  ];
 
   If[$Debug2,
     log["before ParseIgnoreComments"]
@@ -508,7 +654,11 @@ Module[{params, doc, uri, entry, cst, cstLints, suppressedRegions},
     Throw[{}]
   ];
 
-  cst = entry["CST"];
+  cst = Lookup[entry, "CST", Null];
+
+  If[cst === Null || MissingQ[cst] || FailureQ[cst],
+    Throw[{}]
+  ];
 
 
   suppressedRegions = Lookup[entry, "SuppressedRegions", Null];
@@ -569,9 +719,24 @@ Module[{params, doc, uri, entry, agg, aggLints, suppressedRegions},
     Throw[{}]
   ];
 
-  agg = entry["Agg"];
+  agg = Lookup[entry, "Agg", Null];
 
-  suppressedRegions = entry["SuppressedRegions"];
+  If[agg === Null || MissingQ[agg] || FailureQ[agg],
+    Throw[{}]
+  ];
+
+  suppressedRegions = Lookup[entry, "SuppressedRegions", Null];
+
+  If[suppressedRegions === Null || MissingQ[suppressedRegions],
+    cst = Lookup[entry, "CST", Null];
+
+    If[cst === Null || MissingQ[cst] || FailureQ[cst],
+      Throw[{}]
+    ];
+
+    suppressedRegions = SuppressedRegions[cst];
+    entry["SuppressedRegions"] = suppressedRegions;
+  ];
 
   log[2, "before CodeInspectAgg"];
 
@@ -624,16 +789,21 @@ Module[{params, doc, uri, entry, ast, cst, astLints, suppressedRegions},
     Throw[{}]
   ];
 
-  ast = entry["AST"];
+  ast = Lookup[entry, "AST", Null];
 
-  If[FailureQ[ast],
+  If[ast === Null || MissingQ[ast] || FailureQ[ast],
     Throw[{}]
   ];
 
   suppressedRegions = Lookup[entry, "SuppressedRegions", Null];
 
   If[suppressedRegions == Null,
-    cst = entry["CST"];
+    cst = Lookup[entry, "CST", Null];
+
+    If[cst === Null || MissingQ[cst] || FailureQ[cst],
+      Throw[{}]
+    ];
+
     suppressedRegions = SuppressedRegions[cst];
     entry["SuppressedRegions"] = suppressedRegions;
   ];
@@ -690,7 +860,11 @@ Module[{params, doc, uri, entry, cst, scopingLints, scopingData, filtered, suppr
     Throw[{}]
   ];
 
-  scopingData = entry["ScopingData"];
+  scopingData = Lookup[entry, "ScopingData", Null];
+
+  If[scopingData === Null || MissingQ[scopingData] || FailureQ[scopingData],
+    Throw[{}]
+  ];
 
   log[2, "scopingData (up to 20): ", Take[scopingData, UpTo[20]]];
 
@@ -710,7 +884,12 @@ Module[{params, doc, uri, entry, cst, scopingLints, scopingData, filtered, suppr
   suppressedRegions = Lookup[entry, "SuppressedRegions", Null];
 
   If[suppressedRegions == Null,
-    cst = entry["CST"];
+    cst = Lookup[entry, "CST", Null];
+
+    If[cst === Null || MissingQ[cst] || FailureQ[cst],
+      Throw[{}]
+    ];
+
     suppressedRegions = SuppressedRegions[cst];
     entry["SuppressedRegions"] = suppressedRegions;
   ];
@@ -766,7 +945,8 @@ Catch[
 Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   suppressedRegions, isActive, pacletSymbols, systemSymbols, localSymbols,
   scopingData, locallyDefinedSymbols, contextErrors, contextLints,
-  dependencySymbolSet},
+  dependencySymbolSet, accessibleWorkspaceSymbolSet, bareNameContextSet,
+  classifiedRefs, unimported, classifySymbolRef, findImportableContextForSymbol},
 
   If[$Debug2,
     log["textDocument/runWorkspaceDiagnostics: enter"]
@@ -805,7 +985,11 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   *)
   workspaceLints = {};
 
-  cst = entry["CST"];
+  cst = Lookup[entry, "CST", Null];
+
+  If[cst === Null || MissingQ[cst],
+    Throw[{}]
+  ];
 
   (*
   Workspace-wide checks: undefined symbols and context loading errors.
@@ -836,24 +1020,23 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   pacletSymbols = GetPacletSymbols[];
 
   (*
-  Build a set of short symbol names from all successfully-loaded dependency
-  contexts (loaded via BeginPackage[ctx, {deps}] or Needs[]).
-  Names[ctx<>"*"] returns non-empty only if the package was actually loaded;
-  if Needs failed the list is empty and symbols stay eligible for UndefinedSymbol.
+  Build the short-name symbol sets that are actually available in this file.
+  GetLoadedDependencySymbols respects structured PackageImport records, including
+  import-by-name, while GetFileBareNameContexts covers workspace contexts that
+  are visible without qualification in the current file.
   *)
-  dependencySymbolSet = Association[
-    Flatten[Map[
-      Function[{ctx},
-        Module[{names = Quiet[Names[ctx <> "*"]]},
-          If[ListQ[names] && Length[names] > 0,
-            Map[StringReplace[#, StartOfString ~~ ctx -> ""] -> True &, names],
-            {}
-          ]
-        ]
-      ],
-      GetDependencyContexts[]
-    ]]
+  dependencySymbolSet = Association[Thread[GetLoadedDependencySymbols[uri] -> True]];
+  accessibleWorkspaceSymbolSet = Association[
+    Flatten[
+      Map[
+        Function[{ctx},
+          Map[# -> True &, GetContextSymbols[ctx]]
+        ],
+        GetFileBareNameContexts[uri]
+      ]
+    ]
   ];
+  bareNameContextSet = Association[Thread[GetFileBareNameContexts[uri] -> True]];
 
   (*
   Get locally defined symbols from scoping data
@@ -861,35 +1044,74 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   scopingData = Lookup[entry, "ScopingData", {}];
   locallyDefinedSymbols = DeleteDuplicates[#[[4]]& /@ scopingData];
 
-  (*
-  Find undefined symbols - those not in system, paclet, or local scope
-  *)
-  undefined = Select[symbolRefs,
-    Function[{ref},
-      Module[{name},
-        name = ref["name"];
-        (*
-        Symbol is undefined if:
-        - Not a system symbol
-        - Not defined in the paclet
-        - Not locally scoped in this file
-        - Not a common pattern variable (single letters, or ending in _)
-        - Not a context path (contains `)
-        *)
-        And[
-          !MemberQ[systemSymbols, name],
-          !MemberQ[pacletSymbols, name],
-          !KeyExistsQ[depSymbolsSet, name],
-          !MemberQ[locallyDefinedSymbols, name],
-          !KeyExistsQ[dependencySymbolSet, name],  (* loaded dependency packages *)
-          !StringMatchQ[name, LetterCharacter],  (* Single letter variables *)
-          !StringContainsQ[name, "`"],  (* Context paths *)
-          !StringMatchQ[name, "$" ~~ LetterCharacter],  (* $ prefixed single letters *)
-          StringLength[name] > 1  (* Multi-character symbols *)
-        ]
+  findImportableContextForSymbol[name_String] :=
+    Module[{defs, candidateContexts},
+      defs = GetSymbolDefinitions[name];
+      candidateContexts = DeleteDuplicates @ Cases[Lookup[defs, "context", {}], _String];
+      SelectFirst[
+        candidateContexts,
+        Function[{ctx},
+          !KeyExistsQ[bareNameContextSet, ctx] &&
+          (Length[GetContextSymbols[ctx]] > 0 || IsDependencyContext[ctx])
+        ],
+        None
       ]
-    ]
-  ];
+    ];
+
+  structuredPackageDirectiveSymbols = {
+    "PackageInitialize",
+    "PackageExported",
+    "PackageScoped",
+    "PackageImport"
+  };
+
+  classifySymbolRef[ref_] :=
+    Module[{name, importableContext},
+      name = ref["name"];
+      If[
+        Or[
+          MemberQ[systemSymbols, name],
+          MemberQ[structuredPackageDirectiveSymbols, name],
+          MemberQ[locallyDefinedSymbols, name],
+          KeyExistsQ[accessibleWorkspaceSymbolSet, name],
+          KeyExistsQ[dependencySymbolSet, name],
+          StringMatchQ[name, LetterCharacter],
+          StringContainsQ[name, "`"],
+          StringMatchQ[name, "$" ~~ LetterCharacter],
+          StringLength[name] <= 1
+        ],
+        Return[None]
+      ];
+
+      importableContext = findImportableContextForSymbol[name];
+      If[StringQ[importableContext],
+        Join[ref, <|"kind" -> "unimported", "context" -> importableContext|>],
+        Join[ref, <|"kind" -> "undefined"|>]
+      ]
+    ];
+
+  classifiedRefs = DeleteCases[classifySymbolRef /@ symbolRefs, None];
+  undefined = Select[classifiedRefs, Lookup[#, "kind", ""] === "undefined" &];
+  unimported = Select[classifiedRefs, Lookup[#, "kind", ""] === "unimported" &];
+
+  (*
+  Create lints for symbols that exist but are not imported into this file.
+  *)
+  workspaceLints = Join[workspaceLints, Table[
+    InspectionObject[
+      "UnimportedSymbol",
+      "Symbol \"" <> ref["name"] <> "\" is defined in context \"" <> ref["context"] <>
+        "\" but is not imported into this file.",
+      "Warning",
+      <|
+        Source -> ref["source"],
+        ConfidenceLevel -> 0.8,
+        "Argument" -> ref["name"],
+        "Context" -> ref["context"]
+      |>
+    ],
+    {ref, Take[unimported, UpTo[50]]}
+  ]];
 
   (*
   Create lints for undefined symbols
@@ -930,8 +1152,6 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
 
   workspaceLints = Join[workspaceLints, contextLints];
 
-  workspaceLints = Join[workspaceLints, contextLints]
-
   ]; (* end If[$WorkspaceRootPath =!= None] *)
 
   (*
@@ -948,15 +1168,16 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   can accept the arguments; if any overload lacks InputPatterns we assume it is a
   general catch-all and suppress the warning.
   *)
-  Module[{ast, defLHSSources, callNodes, inputMismatchLints, localDefMap, localVarMap,
-          branchBodyRanges, findEnclosingBranch,
+    Module[{ast, defLHSSources, callNodes, inputMismatchLints, localDefMap, localVarMap,
+      splitTrailingRuleArgs, extractCallOptionName, getDefinitionOptionNames,
+      branchBodyRanges, findEnclosingBranch,
           extractVarConstraintsFromCond, switchPatternToSample,
           condEntriesForBranch, condEntriesForBranchFalse,
           returnMismatchLints, patternToSampleValue, inferRHSSample, defRHSByLine},
 
-    ast = entry["AST"];
+    ast = Lookup[entry, "AST", Null];
 
-    If[!FailureQ[ast],
+    If[ast =!= Null && !MissingQ[ast] && !FailureQ[ast],
 
       (*
       Collect source ranges of all definition LHS call nodes so we can exclude
@@ -983,23 +1204,56 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
         Cases[ast,
           CallNode[
             LeafNode[Symbol, "Set" | "SetDelayed", _],
-            {lhs:CallNode[LeafNode[Symbol, funcName_String, _], args_List, _], _},
-            _] :> <|
-              "name" -> funcName,
-              "InputPatterns" -> LSPServer`PacletIndex`ExtractLHSInputPatterns[lhs],
-              (* Flag variadic overloads so arity checking skips them *)
-              "Variadic" -> AnyTrue[args,
-                MatchQ[#,
-                  CallNode[LeafNode[Symbol, "Pattern", _],
-                    {_, CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _], _, _]}, _] |
-                  CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _], _, _] |
-                  CallNode[LeafNode[Symbol, "Optional", _], _, _]
-                ] &
-              ]
-            |>,
+            {lhs:CallNode[LeafNode[Symbol, funcName_String, _], _, _], _},
+            _] :>
+              Module[{signatureInfo},
+                signatureInfo = LSPServer`PacletIndex`ExtractFunctionSignatureInfo[funcName, lhs];
+                <|
+                  "name" -> funcName,
+                  "InputPatterns" -> signatureInfo["InputPatterns"],
+                  "Variadic" -> signatureInfo["Variadic"],
+                  "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
+                  "OptionTargets" -> signatureInfo["OptionTargets"]
+                |>
+              ],
           Infinity
         ],
         #["name"] &
+      ];
+
+      splitTrailingRuleArgs = Function[{args},
+        Module[{splitPos = Length[args]},
+          While[
+            splitPos >= 1 &&
+            MatchQ[args[[splitPos]], CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], _, _]],
+            splitPos--
+          ];
+          {Take[args, splitPos], Drop[args, splitPos]}
+        ]
+      ];
+
+      extractCallOptionName = Function[{arg},
+        Which[
+          MatchQ[arg,
+            CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _],
+              {LeafNode[Symbol, _String, _], _}, _]
+          ],
+            arg[[2, 1, 2]],
+          MatchQ[arg,
+            CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _],
+              {LeafNode[String, _String, _], _}, _]
+          ],
+            StringTake[arg[[2, 1, 2]], {2, -2}],
+          True,
+            None
+        ]
+      ];
+
+      getDefinitionOptionNames = Function[{funcName, def},
+        Module[{targets},
+          targets = Replace[Lookup[def, "OptionTargets", {}], {} :> {funcName}];
+          DeleteDuplicates[Flatten[GetSymbolOptionNames /@ Cases[targets, _String]]]
+        ]
       ];
 
       (*
@@ -1858,7 +2112,8 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       inputMismatchLints = Flatten[
         Function[{callNode},
           Catch[
-          Module[{funcName, callArgs, callSrc, allDefs, localEntries,
+          Module[{funcName, callArgs, callSrc, allDefs, localEntries, candidateDefs,
+            rawCallArgs, optionArgs, optionValidationLints,
             argSamples, mismatchIdx, badArg, badArgSrc, symptomatic},
 
             funcName = callNode[[1, 2]];
@@ -1991,6 +2246,54 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
               ]
             ];
 
+            rawCallArgs = callArgs;
+            {callArgs, optionArgs} = splitTrailingRuleArgs[rawCallArgs];
+
+            optionValidationLints = Module[{optionAwareDefs, allowedOptionNames},
+              optionAwareDefs = Select[allDefs, TrueQ[Lookup[#, "HasOptionsPattern", False]] &];
+
+              If[Length[optionAwareDefs] === 0 || Length[optionArgs] === 0,
+                {},
+                allowedOptionNames = DeleteDuplicates[
+                  Flatten[getDefinitionOptionNames[funcName, #] & /@ optionAwareDefs]
+                ];
+
+                If[Length[allowedOptionNames] === 0,
+                  {},
+                  Flatten[
+                    Map[
+                      Function[{optArg},
+                        Module[{optName, optSrc},
+                          optName = extractCallOptionName[optArg];
+                          optSrc = If[
+                            AssociationQ[optArg[[3]]] && KeyExistsQ[optArg[[3]], Source],
+                            optArg[[3, Key[Source]]],
+                            callSrc
+                          ];
+
+                          If[StringQ[optName] && !MemberQ[allowedOptionNames, optName],
+                            {InspectionObject[
+                              "UnknownOption",
+                              "Unknown option \"" <> optName <> "\" for \"" <> funcName <> "\".",
+                              "Warning",
+                              <|
+                                Source -> optSrc,
+                                ConfidenceLevel -> 0.9,
+                                "Argument" -> funcName
+                              |>
+                            ]},
+                            {}
+                          ]
+                        ]
+                      ],
+                      optionArgs
+                    ],
+                    1
+                  ]
+                ]
+              ]
+            ];
+
             (*
             Only check functions that have at least one typed parameter across
             their definitions.  Functions with only untyped catch-alls (x_) can
@@ -1998,26 +2301,23 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
             *)
             If[!AnyTrue[allDefs,
               AnyTrue[Lookup[#, "InputPatterns", {}], (# =!= Blank[]) &] &],
-              Throw[{}]
+              Throw[optionValidationLints]
             ];
-
-            (* Strip Rule/RuleDelayed option arguments — they do not count toward
-               positional arity and should not be matched against typed parameters. *)
-            callArgs = Select[callArgs,
-              !MatchQ[#, CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], _, _]] &];
 
             (*
             Check arity: warn when no overload accepts the call\'s argument count.
-            Variadic overloads (BlankSequence / BlankNullSequence / Optional) are
-            exempt because their accepted arity is not fixed.
-            Arity checking is only performed for locally-defined functions since
-            PacletIndex and builtin entries lack variadic metadata.
+            Trailing Rule/RuleDelayed arguments are stripped above so they do not
+            count toward positional arity.
             *)
             If[!AnyTrue[allDefs,
-              Lookup[#, "Variadic", False] ||
-              Length[Lookup[#, "InputPatterns", {}]] === Length[callArgs] &],
+              LSPServer`PacletIndex`DefinitionAcceptsCallArgsQ[
+                funcName,
+                #,
+                callArgs,
+                ConstantArray[Missing["Unknown"], Length[callArgs]]
+              ] &],
               If[Length[localEntries] > 0,
-                Throw[{InspectionObject[
+                Throw[Join[optionValidationLints, {InspectionObject[
                   "DocCommentArityMismatch",
                   "\"" <> funcName <> "\" called with " <> ToString[Length[callArgs]] <>
                     If[Length[callArgs] === 1, " argument", " arguments"] <>
@@ -2028,9 +2328,18 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                     ConfidenceLevel -> 0.85,
                     "Argument" -> funcName
                   |>
-                ]}],
-                Throw[{}]
+                ]}]],
+                Throw[optionValidationLints]
               ]
+            ];
+
+            candidateDefs = Select[allDefs,
+              LSPServer`PacletIndex`DefinitionAcceptsCallArgsQ[
+                funcName,
+                #,
+                callArgs,
+                ConstantArray[Missing["Unknown"], Length[callArgs]]
+              ] &
             ];
 
             (*
@@ -2040,43 +2349,14 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
 
             (*
             Determine if at least one definition is compatible with the call.
-            An overload is compatible when:
-              - its InputPatterns length matches the number of arguments, AND
-              - every argument satisfies the corresponding pattern string
-                (None patterns always match - they are untyped or complex).
+            Trailing options are ignored for positional type checking and are
+            validated separately above.
             *)
-            symptomatic = !AnyTrue[allDefs,
-              Function[{d},
-                Module[{pats  = Lookup[d, "InputPatterns", {}],
-                        isVar = Lookup[d, "Variadic", False],
-                        fixedN, varElemPat},
-                  If[isVar && Length[pats] > 0,
-                    (* Variadic: check prefix + tail *)
-                    fixedN = Length[pats] - 1;
-                    varElemPat = With[{lp = Last[pats]},
-                      If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
-                      If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
-                      Blank[]]]];
-                    Length[argSamples] >= fixedN &&
-                    (fixedN === 0 || AllTrue[
-                      Transpose[{Take[argSamples, fixedN], Take[pats, fixedN]}],
-                      argMatchesPattern[#[[1]], #[[2]]] &
-                    ]) &&
-                    AllTrue[Drop[argSamples, fixedN],
-                      argMatchesPattern[#, varElemPat] &
-                    ],
-                    (* Fixed arity *)
-                    Length[pats] === Length[callArgs] &&
-                    AllTrue[
-                      Transpose[{argSamples, pats}],
-                      argMatchesPattern[#[[1]], #[[2]]] &
-                    ]
-                  ]
-                ]
-              ]
+            symptomatic = !AnyTrue[candidateDefs,
+              LSPServer`PacletIndex`DefinitionAcceptsCallArgsQ[funcName, #, callArgs, argSamples] &
             ];
 
-            If[!symptomatic, Throw[{}]];
+            If[!symptomatic, Throw[optionValidationLints]];
 
             (*
             Find the first argument position rejected by ALL definitions
@@ -2086,7 +2366,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
               Do[
                 Module[{s = argSamples[[i]]},
                   If[s =!= Missing["Unknown"] &&
-                    AllTrue[allDefs,
+                    AllTrue[candidateDefs,
                       Function[{d},
                         Module[{pats = Lookup[d, "InputPatterns", {}]},
                           Length[pats] >= i && !argMatchesPattern[s, pats[[i]]]
@@ -2123,7 +2403,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                         ],
                         Nothing
                       ]
-                    ] /@ allDefs,
+                    ] /@ candidateDefs,
                     _String
                   ]
                 ],
@@ -2133,7 +2413,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                 SymbolName[Head[argSamples[[mismatchIdx]]]],
                 "unknown"
               ];
-              {
+              Join[optionValidationLints, {
                 InspectionObject[
                   "DocCommentInputMismatch",
                   "Argument " <> If[IntegerQ[mismatchIdx], ToString[mismatchIdx], ""] <>
@@ -2149,7 +2429,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                     "Argument" -> funcName
                   |>
                 ]
-              }
+              }]
             ]
           ]
           ]  (* end Catch *)

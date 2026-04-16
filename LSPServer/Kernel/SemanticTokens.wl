@@ -4,6 +4,8 @@ $SemanticTokenTypes
 
 $SemanticTokenModifiers
 
+computeAndCacheSemanticTokens
+
 Begin["`Private`"]
 
 Needs["LSPServer`"]
@@ -85,8 +87,7 @@ $badSymbolsSet := $badSymbolsSet = Association[Thread[
 Check if a symbol is defined in the paclet
 *)
 isPacletSymbol[name_String] :=
-  KeyExistsQ[$PacletIndex["Symbols"], name] &&
-  Length[$PacletIndex["Symbols", name, "Definitions"]] > 0
+  TrueQ[LSPServer`PacletIndex`IsWorkspaceSymbol[name]]
 
 (*
 Check if a symbol is a system symbol
@@ -138,19 +139,27 @@ Performance: This is called for every non-system symbol during semantic token
 classification. The dependency list and set are cached to avoid repeated lookups.
 *)
 
-(* Cached dependency set - invalidated when $PacletIndex changes.
-   We store the list length as a cheap staleness check. *)
-$depsCacheLen = -1;
+(* Cached dependency data - invalidated when dependency contexts, aliases, or
+   indexed dependency symbol names change. *)
+$depsCacheKey = None;
 $depsSet = <||>;
 $depsList = {};
+$indexedDependencySymbolSet = <||>;
 
 refreshDepsCache[] :=
-Module[{deps},
-  deps = GetDependencyContexts[];
-  If[Length[deps] =!= $depsCacheLen,
-    $depsCacheLen = Length[deps];
+Module[{deps, indexedSymbols, cacheKey},
+  deps = LSPServer`PacletIndex`GetDependencyContexts[];
+  indexedSymbols = LSPServer`PacletIndex`GetIndexedDependencySymbols[];
+  cacheKey = {
+    Sort[deps],
+    Sort[indexedSymbols],
+    Sort[Keys[LSPServer`PacletIndex`GetContextAliases[]]]
+  };
+  If[cacheKey =!= $depsCacheKey,
+    $depsCacheKey = cacheKey;
     $depsList = deps;
-    $depsSet = Association[Thread[deps -> True]]
+    $depsSet = Association[Thread[deps -> True]];
+    $indexedDependencySymbolSet = Association[Thread[indexedSymbols -> True]]
   ]
 ]
 
@@ -159,8 +168,12 @@ Module[{symContext, explicitContext},
 
   refreshDepsCache[];
 
-  If[$depsCacheLen == 0,
+  If[Length[$depsList] == 0 && Length[$indexedDependencySymbolSet] == 0,
     Return[False]
+  ];
+
+  If[!StringContainsQ[name, "`"] && KeyExistsQ[$indexedDependencySymbolSet, name],
+    Return[True]
   ];
 
   (* Check if symbol has explicit context *)
@@ -175,7 +188,7 @@ Module[{symContext, explicitContext},
     ];
 
     (* Resolve alias context (e.g. Alias` -> Full`) and re-check *)
-    With[{aliasMap = GetContextAliases[]},
+    With[{aliasMap = LSPServer`PacletIndex`GetContextAliases[]},
       If[KeyExistsQ[aliasMap, explicitContext],
         With[{fullCtx = aliasMap[explicitContext]},
           Return[KeyExistsQ[$depsSet, fullCtx] ||
@@ -268,14 +281,66 @@ Module[{bareSymbol},
 ]
 
 
+semanticTokensURIMayOpenQ[uri_String] :=
+  AnyTrue[
+    Join[
+      Replace[$PreExpandContentQueue, Except[_List] -> {}],
+      Replace[$ContentQueue, Except[_List] -> {}]
+    ],
+    AssociationQ[#] &&
+    MemberQ[{"textDocument/didOpen", "textDocument/didOpenFencepost"}, Lookup[#, "method", None]] &&
+    Lookup[Lookup[Lookup[#, "params", <||>], "textDocument", <||>], "uri", None] === uri &
+  ]
+
+
+semanticTokensEntryReadyQ[entry_Association] :=
+Module[{cst, ast},
+  cst = Lookup[entry, "CST", Null];
+  ast = Lookup[entry, "AST", Null];
+
+  cst =!= Null && !FailureQ[cst] && ast =!= Null && !FailureQ[ast]
+]
+
+
+semanticTokensEntryWaitingForReindexQ[entry_] :=
+  AssociationQ[entry] &&
+  !semanticTokensEntryReadyQ[entry] &&
+  Lookup[entry, "ScheduledJobs", {}] =!= {}
+
+
 expandContent[content:KeyValuePattern["method" -> "textDocument/semanticTokens/full"], pos_] :=
 Catch[
-Module[{params, id, doc, uri, res},
+Module[{params, id, doc, uri, entry, res, supersededIDs, supersededFenceposts},
 
   log[1, "textDocument/semanticTokens/full: enter"];
 
   id = content["id"];
   params = content["params"];
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  entry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+
+  If[!AssociationQ[entry] && !semanticTokensURIMayOpenQ[uri],
+    log[0, "DBG-ST expand: CLOSED id=", id, " uri=", uri];
+    Throw[{<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "closed" -> True |>}]
+  ];
+
+  supersededIDs = LSPServer`Private`rememberPendingSemanticTokenRequest[uri, id];
+  LSPServer`Private`dropQueuedSemanticTokenFenceposts[uri, supersededIDs];
+  supersededFenceposts = LSPServer`Private`supersededSemanticTokenFencepostContents[uri, supersededIDs];
+
+  If[!AssociationQ[entry],
+    log[0, "DBG-ST expand: WAITING FOR DIDOPEN id=", id, " uri=", uri];
+    log[1, "textDocument/semanticTokens/full: exit"];
+    Throw[supersededFenceposts]
+  ];
+
+  If[semanticTokensEntryWaitingForReindexQ[entry],
+    log[0, "DBG-ST expand: WAITING FOR REINDEX id=", id, " uri=", uri];
+    log[1, "textDocument/semanticTokens/full: exit"];
+    Throw[supersededFenceposts]
+  ];
 
   If[Lookup[$CancelMap, id, False],
 
@@ -285,11 +350,11 @@ Module[{params, id, doc, uri, res},
       log["canceled"]
     ];
 
-    Throw[{<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
+    log[0, "DBG-ST expand: CANCELED id=", id];
+    Throw[Join[supersededFenceposts, {<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "stale" -> True |>}] ]
   ];
 
-  doc = params["textDocument"];
-  uri = doc["uri"];
+  log[0, "DBG-ST expand: id=", id, " uri=", uri];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
 
@@ -297,17 +362,13 @@ Module[{params, id, doc, uri, res},
       log["stale"]
     ];
 
-    Throw[{<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
+    log[0, "DBG-ST expand: STALE id=", id, " uri=", uri];
+    Throw[Join[supersededFenceposts, {<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "stale" -> True |>}] ]
   ];
 
-  res = <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
-    "textDocument/concreteParse",
-    "textDocument/aggregateParse",
-    "textDocument/abstractParse",
-    "textDocument/runScopingData",
-    "textDocument/semanticTokens/fullFencepost"
-  };
+  res = Join[supersededFenceposts, {<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params |> }];
 
+  log[0, "DBG-ST expand: QUEUED FENCEPOST id=", id, " uri=", uri];
   log[1, "textDocument/semanticTokens/full: exit"];
 
   res
@@ -439,6 +500,110 @@ Module[{templateStrings},
 ]
 
 
+(*
+Compute and cache semantic tokens for uri synchronously.
+Reads entry from $OpenFilesMap; requires entry["CST"] and entry["AST"] to be present.
+If ScopingData is not yet cached it is computed now.
+Returns True if tokens were computed, False if the entry or parse data was missing.
+Used by workspace/semanticTokens/refresh to pre-compute tokens for files whose
+initial semanticTokens/full pipeline was cancelled before it completed.
+*)
+computeAndCacheSemanticTokens[uri_String] :=
+Module[{entry, cst, ast, scopingData, localTokens,
+  scopedSources, allSymbols, globalSymbolTokens, stringTemplateTokens,
+  transformed, line, char, oldLine, oldChar, semanticTokens},
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[!AssociationQ[entry], Return[False]];
+
+  cst = Lookup[entry, "CST", Null];
+  ast = Lookup[entry, "AST", Null];
+
+  If[cst === Null || FailureQ[cst] || ast === Null || FailureQ[ast],
+    Return[False]
+  ];
+
+  (* Compute ScopingData if not yet cached *)
+  scopingData = Lookup[entry, "ScopingData", Null];
+  If[scopingData === Null || FailureQ[scopingData],
+    scopingData = Join[ScopingData[ast], extractMathScopingData[ast]];
+    entry["ScopingData"] = scopingData;
+  ];
+
+  localTokens =
+    Function[{source, scope, modifiers},
+      {#[[1, 1]], #[[1, 2]], #[[2, 2]] - #[[1, 2]],
+        $SemanticTokenTypes[
+          Switch[scope,
+            {___, "Module" | "Block" | "DynamicModule" | "Internal`InheritedBlock"},
+              "variable",
+            {___, "With"},
+              "constant",
+            {___, "Defined"},
+              "function",
+            _,
+              "parameter"
+          ]
+        ],
+        BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers ~Join~ (
+            Replace[scope,
+              {"Module" | "DynamicModule" -> "Module",
+               "Block" | "Internal`InheritedBlock" -> "Block",
+               "With" -> "With",
+               _ :> Sequence @@ {}},
+              {1}]
+          ), 0]]}&[source - 1]
+    ] @@@ scopingData;
+
+  scopedSources = Association[
+    Table[{data[[1, 1, 1]], data[[1, 1, 2]]} -> True, {data, scopingData}]
+  ];
+
+  allSymbols = Cases[cst,
+    LeafNode[Symbol, name_String, KeyValuePattern[Source -> src_]] :> {name, src},
+    Infinity
+  ];
+
+  globalSymbolTokens = DeleteCases[
+    Table[
+      Module[{name, src, tokenType, modifiers, classification, startPos},
+        {name, src} = sym;
+        startPos = {src[[1, 1]], src[[1, 2]]};
+        If[KeyExistsQ[scopedSources, startPos], Nothing,
+          classification = classifyGlobalSymbol[name];
+          tokenType = classification[[1]];
+          modifiers = classification[[2]];
+          {src[[1, 1]] - 1, src[[1, 2]] - 1, src[[2, 2]] - src[[1, 2]],
+           $SemanticTokenTypes[tokenType],
+           If[modifiers === {}, 0,
+              BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers, 0]]]}
+        ]
+      ],
+      {sym, allSymbols}
+    ],
+    Nothing
+  ];
+
+  stringTemplateTokens = stringTemplateEmbeddedTokens[cst, scopedSources];
+
+  transformed = Sort[Join[localTokens, globalSymbolTokens, stringTemplateTokens]];
+  line = 0; char = 0;
+  transformed = Function[{t},
+    oldLine = line; oldChar = char;
+    line = t[[1]]; char = t[[2]];
+    {line - oldLine, If[oldLine == line, char - oldChar, char], t[[3]], t[[4]], t[[5]]}
+  ] /@ transformed;
+  transformed = Flatten[transformed];
+
+  semanticTokens = transformed;
+  entry["SemanticTokens"] = semanticTokens;
+  $OpenFilesMap[uri] = entry;
+
+  log[0, "DBG-ST computeAndCacheSemanticTokens: COMPUTED tokens=", Length[semanticTokens], " uri=", uri];
+  True
+]
+
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/semanticTokens/fullFencepost"]] :=
 Catch[
 Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbols,
@@ -449,40 +614,88 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
 
   id = content["id"];
 
+  (*
+  Even if VS Code cancelled the request (startup burst), we compute and return real tokens.
+  VS Code ignores the cancellation and applies the response if it arrives before it moves on.
+  Just clear the stale cancel entry so handleContent["$/cancelRequest"] doesn't warn.
+  *)
   If[Lookup[$CancelMap, id, False],
-
     $CancelMap[id] =.;
-
     If[$Debug2,
-      log["canceled"]
-    ];
-
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+      log["cancel cleared; computing tokens anyway"]
+    ]
   ];
 
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
-  If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
+  clearPending[] := LSPServer`Private`forgetPendingSemanticTokenRequest[uri, id];
+
+  log[0, "DBG-ST fencepost: enter id=", id, " stale=", Lookup[content, "stale", False], " uri=", uri];
+
+  If[TrueQ[Lookup[content, "superseded", False]],
+    log[0, "DBG-ST fencepost: SUPERSEDED id=", id, " uri=", uri];
+    clearPending[];
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
+
+  If[TrueQ[Lookup[content, "closed", False]],
+    log[0, "DBG-ST fencepost: CLOSED id=", id, " uri=", uri];
+    clearPending[];
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
+
+  (*
+  Only abort on real document-change staleness (a didChange/didClose for the same URI is
+  already queued). The content["stale"] flag comes from expand-time cancel detection and
+  skips runScopingData, but CST/AST are still available from didOpenFencepost, so we can
+  still compute at least global-symbol tokens.
+  *)
+  If[isStale[$ContentQueue, uri],
 
     If[$Debug2,
       log["stale"]
     ];
 
+    log[0, "DBG-ST fencepost: DIDCHANGE-STALE id=", id, " uri=", uri];
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
 
   If[entry === Null,
-    Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
+    If[!semanticTokensURIMayOpenQ[uri],
+      log[0, "DBG-ST fencepost: NOT OPEN, returning null id=", id, " uri=", uri];
+      clearPending[];
+      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+    ];
+
+    log[0, "DBG-ST fencepost: WAITING FOR DIDOPEN id=", id, " uri=", uri];
+    Throw[{}]
   ];
 
   semanticTokens = Lookup[entry, "SemanticTokens", Null];
 
   If[semanticTokens =!= Null,
+    clearPending[];
+    log[0, "DBG-ST fencepost: CACHE HIT id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
+  ];
+
+  If[semanticTokensEntryWaitingForReindexQ[entry],
+    log[0, "DBG-ST fencepost: WAITING FOR REINDEX id=", id, " uri=", uri];
+    Throw[{}]
+  ];
+
+  If[LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri],
+    entry = Lookup[$OpenFilesMap, uri, Null];
+    semanticTokens = Lookup[entry, "SemanticTokens", Null];
+    If[semanticTokens =!= Null,
+      clearPending[];
+      log[0, "DBG-ST fencepost: COMPUTED FROM ENTRY id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
+      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
+    ]
   ];
 
   scopingData = Lookup[entry, "ScopingData", Null];
@@ -637,6 +850,8 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
 
   $OpenFilesMap[uri] = entry;
 
+  clearPending[];
+  log[0, "DBG-ST fencepost: COMPUTED id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
   log[1, "textDocument/semanticTokens/fullFencepost: exit"];
 
   {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}
@@ -738,6 +953,8 @@ Module[{params, doc, uri, entry, ast, scopingData},
   doc = params["textDocument"];
   uri = doc["uri"];
 
+  log[0, "DBG-ST runScopingData: uri=", uri];
+
   If[isStale[$ContentQueue, uri],
 
     If[$Debug2,
@@ -756,6 +973,7 @@ Module[{params, doc, uri, entry, ast, scopingData},
   scopingData = Lookup[entry, "ScopingData", Null];
 
   If[scopingData =!= Null,
+    log[0, "DBG-ST runScopingData: ALREADY CACHED uri=", uri];
     Throw[{}]
   ];
 
@@ -780,6 +998,7 @@ Module[{params, doc, uri, entry, ast, scopingData},
 
   $OpenFilesMap[uri] = entry;
 
+  log[0, "DBG-ST runScopingData: COMPUTED entries=", Length[scopingData], " uri=", uri];
   log[1, "textDocument/runScopingData: exit"];
 
   {}

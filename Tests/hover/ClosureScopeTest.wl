@@ -40,3 +40,10 @@ needsStr[x]
 Module[{x = 5},
   needsStr[x]
 ]
+
+(*  Case E: call-shaped local assignment.
+    sources is assigned from Map[...] inside Block, so hover should infer _List. *)
+Block[{sources},
+  sources = Map[StringLength, {"a", "bb"}];
+  sources
+]

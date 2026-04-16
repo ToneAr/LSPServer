@@ -18,7 +18,7 @@ LSPServer`handleContent[
 
 (* ── Test 8: computeSquare[5.] triggers a DocCommentInputMismatch warning ── *)
 (*
-computeSquare[ 5. ] is on line 62 (1-based) = line 61 (0-based).
+computeSquare[ 5. ] is on line 97 (1-based) = line 96 (0-based).
 5. starts at column 16 (1-based) = character 15 (0-based), ends at character 17.
 The param pattern _Integer is inferred from the definition LHS x_Integer.
 No doc comment is required - the warning fires based on the typed definition alone.
@@ -31,10 +31,10 @@ VerificationTest[
       |>
     ];
     diags = result[[1, "params", "diagnostics"]];
-    (* Filter for the DocCommentInputMismatch on line 75 (0-based) *)
+    (* Filter for the DocCommentInputMismatch on line 96 (0-based) *)
     Select[diags,
       StringStartsQ[Lookup[#, "code", ""], "DocCommentInputMismatch"] &&
-        #["range"]["start"]["line"] === 75 &]
+        #["range"]["start"]["line"] === 96 &]
   ]
   ,
   {
@@ -43,8 +43,8 @@ VerificationTest[
       "message" -> "Argument 1 of \"computeSquare\" does not match any declared input pattern. Expected _Integer, got a Real.",
       "severity" -> 2,
       "range" -> <|
-        "start" -> <|"line" -> 75, "character" -> 15|>,
-        "end"   -> <|"line" -> 75, "character" -> 17|>
+        "start" -> <|"line" -> 96, "character" -> 15|>,
+        "end"   -> <|"line" -> 96, "character" -> 17|>
       |>,
       "source" -> "wolfram lint"
     |>
@@ -79,10 +79,10 @@ VerificationTest[
 
 (* ── Test 10: StringLength[3] triggers a builtin-pattern mismatch warning ── *)
 (*
-builtinStrLen = StringLength[ 3 ] is on line 66 (1-based) = line 65 (0-based).
+builtinStrLen = StringLength[ 3 ] is on line 101 (1-based) = line 100 (0-based).
 3 starts at character 30 (0-based), ends at character 31.
-StringLength expects a String; passing an Integer should warn even though
-StringLength is a System` builtin (defined via $BuiltinPatterns fallback).
+StringLength expects a String- or List-like first argument per the current
+builtin pattern table; passing an Integer should warn.
 *)
 VerificationTest[
   Module[{result, diags},
@@ -94,17 +94,17 @@ VerificationTest[
     diags = result[[1, "params", "diagnostics"]];
     Select[diags,
       StringStartsQ[Lookup[#, "code", ""], "DocCommentInputMismatch"] &&
-        #["range"]["start"]["line"] === 79 &]
+        #["range"]["start"]["line"] === 100 &]
   ]
   ,
   {
     <|
       "code" -> "DocCommentInputMismatch\[VeryThinSpace]\:25bb\[VeryThinSpace]StringLength",
-      "message" -> "Argument 1 of \"StringLength\" does not match any declared input pattern. Expected _String, got a Integer.",
+      "message" -> "Argument 1 of \"StringLength\" does not match any declared input pattern. Expected _String | _List, got a Integer.",
       "severity" -> 2,
       "range" -> <|
-        "start" -> <|"line" -> 79, "character" -> 30|>,
-        "end"   -> <|"line" -> 79, "character" -> 31|>
+        "start" -> <|"line" -> 100, "character" -> 30|>,
+        "end"   -> <|"line" -> 100, "character" -> 31|>
       |>,
       "source" -> "wolfram lint"
     |>
@@ -143,7 +143,7 @@ VerificationTest[
     diags = result[[1, "params", "diagnostics"]];
     Select[diags,
       StringStartsQ[Lookup[#, "code", ""], "DocCommentInputMismatch"] &&
-        #["range"]["start"]["line"] === 87 &]
+        #["range"]["start"]["line"] === 112 &]
   ]
   ,
   {
@@ -152,8 +152,8 @@ VerificationTest[
       "message"  -> "Argument 1 of \"computeSquare\" does not match any declared input pattern. Expected _Integer, got a String.",
       "severity" -> 2,
       "range"    -> <|
-        "start" -> <|"line" -> 87, "character" -> 15|>,
-        "end"   -> <|"line" -> 87, "character" -> 21|>
+        "start" -> <|"line" -> 112, "character" -> 15|>,
+        "end"   -> <|"line" -> 112, "character" -> 21|>
       |>,
       "source"   -> "wolfram lint"
     |>
@@ -164,7 +164,7 @@ VerificationTest[
 
 (* ── Test R1: returnsMismatch - literal String body declared Return: _Integer -> WARN ── *)
 (*
-returnsMismatch[x_] := "wrong type"  is on line 92 (1-based) = line 91 (0-based).
+returnsMismatch[x_] := "wrong type"  is on line 117 (1-based) = line 116 (0-based).
 The RHS "wrong type" is a String literal; declared Return: _Integer -> mismatch.
 *)
 VerificationTest[
@@ -177,7 +177,7 @@ VerificationTest[
     diags = result[[1, "params", "diagnostics"]];
     Length[Select[diags,
       StringStartsQ[Lookup[#, "code", ""], "DocCommentReturnMismatch"] &&
-        #["range"]["start"]["line"] === 91 &]] > 0
+        #["range"]["start"]["line"] === 116 &]] > 0
   ]
   ,
   True,
@@ -209,7 +209,7 @@ VerificationTest[
 
 (* ── Test R3: returnsStrFromCall - greet[x] returns _String, declared Return: _Integer -> WARN ── *)
 (*
-returnsStrFromCall[x_] := greet[x]  is on line 100 (1-based) = line 99 (0-based).
+returnsStrFromCall[x_] := greet[x]  is on line 146 (1-based) = line 145 (0-based).
 greet's ReturnPattern is _String; declared Return: _Integer -> mismatch.
 *)
 VerificationTest[
@@ -222,7 +222,7 @@ VerificationTest[
     diags = result[[1, "params", "diagnostics"]];
     Length[Select[diags,
       StringStartsQ[Lookup[#, "code", ""], "DocCommentReturnMismatch"] &&
-        #["range"]["start"]["line"] === 99 &]] > 0
+        #["range"]["start"]["line"] === 145 &]] > 0
   ]
   ,
   True,

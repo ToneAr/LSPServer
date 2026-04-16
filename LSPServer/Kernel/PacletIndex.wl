@@ -2,6 +2,7 @@
 
 BeginPackage["LSPServer`PacletIndex`"]
 
+
 (*
 Paclet-wide Symbol Index
 
@@ -17,6 +18,8 @@ enabling features like:
 InitializePacletIndex
 GetPacletSymbols
 GetSymbolDefinitions
+GetVisibleSymbolDefinitions
+GetSymbolOptionNames
 GetSymbolReferences
 GetSymbolsForCompletion
 UpdateFileIndex
@@ -34,12 +37,17 @@ GetFileExplicitContextRefs
 IsContextLoadedInFile
 GetContextLoadErrors
 GetFileLoadedContexts
+GetFileBareNameContexts
 GetKernelContextsCached
 GetSymbolUsages
 GetContextAliases
+IsWorkspaceSymbol
+GetIndexedDependencySymbols
 ProcessPendingIndexFiles
 ExtractDocComments
 ExtractLHSInputPatterns
+ExtractFunctionSignatureInfo
+DefinitionAcceptsCallArgsQ
 GetSymbolInferredPattern
 InferVariablePattern
 GetLoadedDependencySymbols
@@ -100,53 +108,13 @@ builtinSpecToPattern[s_String] :=
     True, Blank[Symbol[s]]
   ]
 builtinSpecToPattern[None] := Blank[]
-builtinSpecToPattern[p_] := p  (* already a WL pattern — pass through *)
+builtinSpecToPattern[p_] := p  (* already a WL pattern - pass through *)
 
 
 (*
-$PacletIndex structure:
-<|
-  "Symbols" -> <|
-    "symbolName" -> <|
-      "Definitions" -> {
-        <| "uri" -> "file:///...", "source" -> {{line, col}, {line, col}}, "kind" -> "function"|"constant"|"option"|"attribute", "context" -> "Context`",
-           "DocComment" -> <| "Description" -> "...", "ReturnPattern" -> patternExpr |> | None,
-           "InferredPattern" -> patternExpr | None  (* for constant/variable assignments *) |>,
-        ...
-      },
-      "References" -> {
-        <| "uri" -> "file:///...", "source" -> {{line, col}, {line, col}} |>,
-        ...
-      },
-      "Usages" -> { ... usage strings from ::usage ... }
-    |>,
-    ...
-  |>,
-  "Files" -> <|
-    "file:///path/to/file.wl" -> <|
-      "LastIndexed" -> DateObject[...],
-      "Symbols" -> {"sym1", "sym2", ...},
-      "Dependencies" -> {"Dep1`", "Dep2`", ...},  (* Contexts loaded via BeginPackage deps *)
-      "ContextLoads" -> {  (* Ordered list of context loading statements *)
-        <| "context" -> "Developer`", "source" -> {{line, col}, {line, col}}, "method" -> "Needs"|"Get"|"BeginPackage" |>,
-        ...
-      },
-      "ExplicitContextRefs" -> {  (* References to symbols with explicit context like Developer`ToPackedArray *)
-        <| "symbol" -> "ToPackedArray", "context" -> "Developer`", "fullName" -> "Developer`ToPackedArray", "source" -> {{line, col}, {line, col}} |>,
-        ...
-      },
-      "PackageContext" -> "MyPackage`" | None  (* The main package context if this is a package file *)
-    |>,
-    ...
-  |>,
-  "Contexts" -> <|
-    "MyPackage`" -> {"symbol1", "symbol2", ...},
-    "MyPackage`Private`" -> {...},
-    ...
-  |>,
-  "Dependencies" -> {"Developer`", "GeneralUtilities`", ...},  (* All dependency contexts used in workspace *)
-  "ContextAliases" -> <| "Alias`" -> "FullContext`", ... |>  (* alias context -> full context, from Needs["Full`" -> "Alias`"] *)
-|>
+$PacletIndex stores workspace symbols, per-file metadata, known contexts,
+dependency contexts, and alias mappings used by completion, diagnostics,
+hover, and cross-file navigation.
 *)
 
 $PacletIndex = <|
@@ -165,6 +133,8 @@ consumed by ProcessPendingIndexFiles during idle loop iterations)
 *)
 $PendingIndexFiles = {}
 $PendingReferenceFiles = {}
+$PendingExternalDepFiles = {}
+$StructuredPackageLoaderCache = <||>
 
 (*
 ==============================================================================
@@ -192,9 +162,10 @@ The cache is flushed to disk whenever the background parsing queue empties.
 ==============================================================================
 *)
 
-$WorkspaceIndexCache = <||>        (* In-memory workspace cache *)
-$WorkspaceIndexCacheDirty = False  (* True iff cache has unsaved changes *)
-$WorkspaceCacheRoot = None         (* workspaceRoot for which the cache is valid *)
+$WorkspaceIndexCache = <||>
+$WorkspaceIndexCacheDirty = False
+$WorkspaceCacheRoot = None
+$WorkspaceCacheSchemaVersion = 3
 
 $WorkspaceCacheDir := FileNameJoin[{
   $UserBaseDirectory, "ApplicationData", "LSPServer", "WorkspaceCache"}]
@@ -273,10 +244,12 @@ filePath is the local filesystem path (used for mtime check).
 *)
 readWorkspaceCacheEntry[uri_String, filePath_String] :=
 Catch[
-Module[{entry, cachedModTime, currentModTime},
+Module[{entry, cachedModTime, currentModTime, schemaVersion},
   If[!KeyExistsQ[$WorkspaceIndexCache, uri], Throw[Missing["NoCacheEntry"]]];
   entry = $WorkspaceIndexCache[uri];
   If[!AssociationQ[entry], Throw[Missing["InvalidEntry"]]];
+  schemaVersion = Lookup[entry, "SchemaVersion", Missing[]];
+  If[schemaVersion =!= $WorkspaceCacheSchemaVersion, Throw[Missing["SchemaVersionMismatch"]]];
   cachedModTime = Lookup[entry, "ModTime", Missing[]];
   If[MissingQ[cachedModTime], Throw[Missing["NoModTime"]]];
   currentModTime = Quiet[AbsoluteTime[FileDate[filePath, "Modification"]]];
@@ -291,18 +264,13 @@ Call saveWorkspaceCache[] to flush to disk.
 *)
 writeWorkspaceCacheEntry[uri_String, modTime_?NumberQ, data_Association] :=
 (
-  $WorkspaceIndexCache[uri] = <| "ModTime" -> modTime, "Data" -> data |>;
+  $WorkspaceIndexCache[uri] = <|
+    "SchemaVersion" -> $WorkspaceCacheSchemaVersion,
+    "ModTime" -> modTime,
+    "Data" -> data
+  |>;
   $WorkspaceIndexCacheDirty = True
 )
-
-(*
-Remove a file's entry from $WorkspaceIndexCache (e.g., on file deletion).
-*)
-removeWorkspaceCacheEntry[uri_String] :=
-If[KeyExistsQ[$WorkspaceIndexCache, uri],
-  $WorkspaceIndexCache[uri] =.;
-  $WorkspaceIndexCacheDirty = True
-]
 
 
 (*
@@ -328,21 +296,28 @@ $ExcludedDirectoryPatterns = {"build*", "node_modules", ".git", "__pycache__", "
 Check if a file path should be excluded based on directory patterns
 *)
 shouldExcludeFile[filePath_String] :=
-Module[{pathParts},
+Module[{pathParts },
   pathParts = FileNameSplit[filePath];
   AnyTrue[pathParts, Function[{part},
     AnyTrue[$ExcludedDirectoryPatterns, StringMatchQ[part, #]&]
   ]]
 ]
 
+uriPath[uri_String] := StringReplace[uri, "file://" -> ""]
+
+isWorkspaceURI[uri_String] :=
+  StringQ[$WorkspaceRoot] && StringStartsQ[uriPath[uri], $WorkspaceRoot]
+
 InitializePacletIndex[workspaceRoot_String] :=
-Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd},
+Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd, reaped},
 
   If[$Debug2,
     log["InitializePacletIndex: starting for ", workspaceRoot]
   ];
 
   $WorkspaceRoot = workspaceRoot;
+  $LoadedExternalDependencies = <||>;
+  $StructuredPackageLoaderCache = <||>;
 
   (*
   Reset the index
@@ -364,7 +339,7 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd}
   (*
   Find all Wolfram Language files in the workspace
   *)
-  files = FileNames[{"*.wl", "*.m", "*.wls"}, workspaceRoot, Infinity];
+  files = FileNames[LSPServer`Private`workspaceSourceFilePatterns[], workspaceRoot, Infinity];
 
   (*
   Filter out files in excluded directories (build*, node_modules, .git, etc.)
@@ -379,23 +354,28 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd}
   Partition files into cache hits (valid, up-to-date entry in $WorkspaceIndexCache)
   and cache misses (no entry or stale mtime).
   *)
-  cacheHits        = {};
-  cacheMisses      = {};
   allDepsFromCache = {};
 
-  Scan[
-    Function[{fp},
-      uri = "file://" <> fp;
-      cd  = readWorkspaceCacheEntry[uri, fp];
-      If[AssociationQ[cd],
-        AppendTo[cacheHits, {fp, uri, cd}];
-        allDepsFromCache = Join[allDepsFromCache, Lookup[cd, "Dependencies", {}]],
-        (* else - stale or missing *)
-        AppendTo[cacheMisses, fp]
-      ]
+  reaped = Association @ Reap[
+    Scan[
+      Function[{fp},
+        uri = "file://" <> fp;
+        cd  = readWorkspaceCacheEntry[uri, fp];
+        If[AssociationQ[cd],
+          Sow[{fp, uri, cd}, "hit"];
+          allDepsFromCache = Join[allDepsFromCache, Lookup[cd, "Dependencies", {}]],
+          (* else - stale or missing *)
+          Sow[fp, "miss"]
+        ]
+      ],
+      filteredFiles
     ],
-    filteredFiles
-  ];
+    _,
+    Rule
+  ][[2]];
+
+  cacheHits = Lookup[reaped, "hit", {}];
+  cacheMisses = Lookup[reaped, "miss", {}];
 
   If[$Debug2,
     log["InitializePacletIndex: ", Length[cacheHits], " cache hits, ",
@@ -423,6 +403,8 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd}
           Lookup[data, "ContextLoads",       {}],
           Lookup[data, "ExplicitContextRefs",{}],
           Lookup[data, "PackageContext",     None],
+          Lookup[data, "PackageScopeContext", None],
+          Lookup[data, "PrivateContext",     None],
           Lookup[data, "ContextAliases",     {}]
         ]
       ]
@@ -431,29 +413,49 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd}
   ];
 
   (*
-  Update the global dependencies list and load all external packages once,
-  using the union of every cached file's dependencies.  Deduplicated before
-  calling loadExternalDependencies so that Needs[dep] is fired at most once
-  per unique package context.
+  Update the global dependencies list and queue external package source files
+  once, using the union of every cached file's dependencies. Deduplicated
+  before calling loadExternalDependencies so that each unique package context
+  is resolved at most once.
   *)
   allDepsFromCache = DeleteDuplicates[allDepsFromCache];
   If[Length[allDepsFromCache] > 0,
     $PacletIndex["Dependencies"] = DeleteDuplicates[
       Join[$PacletIndex["Dependencies"], allDepsFromCache]
-    ];
-    loadExternalDependencies[allDepsFromCache]
+    ]
   ];
 
-  (*
-  Queue cache-miss files for full background indexing (they need a full parse).
-  Queue cache-hit files for background reference extraction only.
-  *)
-  $PendingIndexFiles    = cacheMisses;
+  (* Initialize background queues BEFORE loading external deps so that
+     queueExternalPackageFiles can AppendTo $PendingIndexFiles safely *)
+  $PendingIndexFiles = cacheMisses;
   $PendingReferenceFiles = Map[#[[1]]&, cacheHits];  (* file paths only *)
+  $PendingExternalDepFiles = {};
+
+  If[Length[allDepsFromCache] > 0,
+    loadExternalDependencies[allDepsFromCache]
+  ];
 
   If[$Debug2,
     log["InitializePacletIndex: queued ", Length[$PendingIndexFiles], " full-parse + ",
       Length[$PendingReferenceFiles], " ref-only files for background indexing"]
+  ];
+
+  (*
+  Ingest the full workspace during initialization so cross-file references,
+  workspace symbols, and diagnostics are ready immediately after startup.
+  External dependency files can continue in the background once the workspace
+  itself has been fully indexed.
+  *)
+  While[
+    Length[$PendingIndexFiles] > 0 ||
+    Length[$PendingReferenceFiles] > 0 ||
+    Length[$PendingExternalDepFiles] > 0,
+    ProcessPendingIndexFiles[]
+  ];
+
+  If[$Debug2,
+    log["InitializePacletIndex: fully ingested workspace on init; remaining ext-dep files=",
+      Length[$PendingExternalDepFiles]]
   ];
 
   $PacletIndex
@@ -469,7 +471,7 @@ Returns True if there are still files remaining to index.
 ProcessPendingIndexFiles[] :=
 Module[{n, batch},
 
-  (* Priority 1: full-parse queue (cache misses need parse+abstract+extract+cache write) *)
+  (* Priority 0: full-parse queue (cache misses need parse+abstract+extract+cache write) *)
   If[Length[$PendingIndexFiles] > 0,
     (* Parse+abstract is expensive; 20 per batch balances responsiveness vs. throughput. *)
     n = Min[20, Length[$PendingIndexFiles]];
@@ -480,10 +482,14 @@ Module[{n, batch},
       log["ProcessPendingIndexFiles: full-indexed batch of ", n, ", ",
         Length[$PendingIndexFiles], " full + ", Length[$PendingReferenceFiles], " ref files remaining"]
     ];
-    Return[Length[$PendingIndexFiles] > 0 || Length[$PendingReferenceFiles] > 0]
+    Return[
+      Length[$PendingIndexFiles] > 0 ||
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[$PendingExternalDepFiles] > 0
+    ]
   ];
 
-  (* Priority 2: reference-extraction queue (cache hits need only CST parse for refs) *)
+  (* Priority 1: reference-extraction queue (cache hits need only CST parse for refs) *)
   If[Length[$PendingReferenceFiles] > 0,
     n = Min[20, Length[$PendingReferenceFiles]];
     batch = $PendingReferenceFiles[[;;n]];
@@ -493,7 +499,28 @@ Module[{n, batch},
       log["ProcessPendingIndexFiles: extracted refs batch of ", n, ", ",
         Length[$PendingReferenceFiles], " ref files remaining"]
     ];
-    Return[Length[$PendingReferenceFiles] > 0]
+    Return[
+      Length[$PendingIndexFiles] > 0 ||
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[$PendingExternalDepFiles] > 0
+    ]
+  ];
+
+  (* Priority 2: external dependency files. These are lower priority so a large
+     dependency graph cannot starve workspace indexing and refresh. *)
+  If[Length[$PendingExternalDepFiles] > 0,
+    n = Min[20, Length[$PendingExternalDepFiles]];
+    batch = $PendingExternalDepFiles[[;;n]];
+    $PendingExternalDepFiles = $PendingExternalDepFiles[[n + 1 ;;]];
+    Scan[indexFile, batch];
+    log[0, "DBG-TBDU ProcessPendingIndexFiles: indexed ext-dep batch of ", n, ", ",
+      Length[$PendingExternalDepFiles], " ext-dep + ", Length[$PendingIndexFiles],
+      " full + ", Length[$PendingReferenceFiles], " ref files remaining"];
+    Return[
+      Length[$PendingIndexFiles] > 0 ||
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[$PendingExternalDepFiles] > 0
+    ]
   ];
 
   (* Both queues empty - flush any pending cache changes to disk. *)
@@ -558,8 +585,9 @@ Index a single file
 *)
 indexFile[filePath_String] :=
 Catch[
-Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps,
-  contextLoads, explicitContextRefs, packageContext, fileAliases, cacheData, modTime},
+Module[{text, cst, ast, uri, symbols, definitions, usages, fileDeps,
+  contextLoads, explicitContextRefs, structuredMetadata, mergedStructuredData, packageContext,
+  packageScopeContext, privateContext, fileAliases, cacheData, modTime},
 
   If[$Debug2,
     log["indexFile: ", filePath]
@@ -568,8 +596,8 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
   uri = "file://" <> filePath;
 
   (*
-  Check the workspace cache.  For files in $PendingIndexFiles this will be a
-  fast miss (KeyExistsQ returns False).  For files added via workspace-folder
+  Check the workspace cache. For files in $PendingIndexFiles this will be a
+  fast miss (KeyExistsQ returns False). For files added via workspace-folder
   events (not screened by InitializePacletIndex) this may be a valid hit.
   *)
   cacheData = readWorkspaceCacheEntry[uri, filePath];
@@ -580,100 +608,60 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
         $PacletIndex["Dependencies"] = DeleteDuplicates[
           Join[$PacletIndex["Dependencies"], deps]
         ];
-        loadExternalDependencies[deps]
+        If[isWorkspaceURI[uri],
+          loadExternalDependencies[deps]
+        ]
       ]
     ];
     addFileToIndex[
       uri,
-      Lookup[cacheData, "Definitions",        {}],
-      Lookup[cacheData, "Usages",             {}],
-      Lookup[cacheData, "Symbols",            {}],
-      Lookup[cacheData, "Dependencies",       {}],
-      Lookup[cacheData, "ContextLoads",       {}],
+      Lookup[cacheData, "Definitions", {}],
+      Lookup[cacheData, "Usages", {}],
+      Lookup[cacheData, "Symbols", {}],
+      Lookup[cacheData, "Dependencies", {}],
+      Lookup[cacheData, "ContextLoads", {}],
       Lookup[cacheData, "ExplicitContextRefs", {}],
-      Lookup[cacheData, "PackageContext",     None],
-      Lookup[cacheData, "ContextAliases",     {}]
+      Lookup[cacheData, "PackageContext", None],
+      Lookup[cacheData, "PackageScopeContext", None],
+      Lookup[cacheData, "PrivateContext", None],
+      Lookup[cacheData, "ContextAliases", {}]
     ];
     Throw[Null]
   ];
 
-  (*
-  Cache miss - read and parse the file from disk.
-  *)
-
-  (*
-  Read the file
-  *)
   text = Quiet[Import[filePath, "Text"]];
-
   If[!StringQ[text],
     If[$Debug2, log["indexFile: failed to read file"]];
     Throw[Null]
   ];
 
-  (*
-  Parse the file
-  *)
   cst = Quiet[CodeConcreteParse[text]];
-
   If[FailureQ[cst],
     If[$Debug2, log["indexFile: failed to parse file"]];
     Throw[Null]
   ];
 
-  (*
-  Abstract the CST to get definitions
-  *)
   ast = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[cst]]];
-
   If[FailureQ[ast],
     If[$Debug2, log["indexFile: failed to abstract file"]];
     Throw[Null]
   ];
 
-  (*
-  Extract definitions from the AST, using the CST for doc-comment association
-  *)
   definitions = extractDefinitions[ast, cst, uri];
-
-  (*
-  Extract usage messages
-  *)
   usages = extractUsages[ast, uri];
-
-  (*
-  Extract symbol references
-  *)
   symbols = extractSymbolReferences[cst, uri];
-
-  (*
-  Extract package dependencies (from BeginPackage and Needs)
-  *)
   fileDeps = extractDependencies[ast];
-
-  (*
-  Extract detailed context loading information
-  *)
   contextLoads = extractContextLoads[ast];
-
-  (*
-  Extract explicit context references (e.g., Developer`ToPackedArray)
-  *)
   explicitContextRefs = extractExplicitContextRefs[cst];
-
-  (*
-  Extract the main package context if this is a package file
-  *)
-  packageContext = extractPackageContext[ast];
-
-  (*
-  Extract context alias mappings from Needs["Full`" -> "Alias`"] calls
-  *)
+  structuredMetadata = structuredPackageMetadata[filePath, ast];
+  mergedStructuredData = mergeStructuredDependencyData[fileDeps, contextLoads, structuredMetadata];
+  fileDeps = Lookup[mergedStructuredData, "Dependencies", fileDeps];
+  contextLoads = Lookup[mergedStructuredData, "ContextLoads", contextLoads];
+  packageContext = Lookup[structuredMetadata, "PackageContext", extractPackageContext[ast]];
+  packageScopeContext = Lookup[structuredMetadata, "PackageScopeContext", None];
+  privateContext = Lookup[structuredMetadata, "PrivateContext", None];
   fileAliases = extractContextAliases[ast];
 
-  (*
-  Add dependencies to global list and load external packages
-  *)
   If[Length[fileDeps] > 0,
     $PacletIndex["Dependencies"] = DeleteDuplicates[
       Join[$PacletIndex["Dependencies"], fileDeps]
@@ -681,46 +669,185 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileSymbols, fileDeps
     If[$Debug2,
       log["indexFile: found dependencies: ", fileDeps]
     ];
-    (*
-    Load external dependency packages so their symbols are available
-    for context detection. Skip workspace-internal packages.
-    *)
-    loadExternalDependencies[fileDeps]
+    If[isWorkspaceURI[uri],
+      loadExternalDependencies[fileDeps]
+    ]
   ];
 
-  (*
-  Update the index using batch operations to avoid quadratic AppendTo
-  *)
-  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext, fileAliases];
+  addFileToIndex[
+    uri,
+    definitions,
+    usages,
+    symbols,
+    fileDeps,
+    contextLoads,
+    explicitContextRefs,
+    packageContext,
+    packageScopeContext,
+    privateContext,
+    fileAliases
+  ];
 
-  (*
-  Persist the extracted data into the workspace cache (in memory).
-  The cache is flushed to disk when the background queue empties.
-  *)
   modTime = Quiet[AbsoluteTime[FileDate[filePath, "Modification"]]];
   If[NumberQ[modTime],
     writeWorkspaceCacheEntry[uri, modTime, <|
-      "Definitions"        -> definitions,
-      "Usages"             -> usages,
+      "Definitions" -> definitions,
+      "Usages" -> usages,
       (* "Symbols" (references) intentionally excluded from disk cache: they are
          large (every symbol occurrence in the file) and would bloat the cache
-         file ~10x.  They are populated in the background via $PendingReferenceFiles
+         file ~10x. They are populated in the background via $PendingReferenceFiles
          using extractFileReferences, which is cheap since it only needs the CST. *)
-      "Dependencies"       -> fileDeps,
-      "ContextLoads"       -> contextLoads,
+      "Dependencies" -> fileDeps,
+      "ContextLoads" -> contextLoads,
       "ExplicitContextRefs" -> explicitContextRefs,
-      "PackageContext"     -> packageContext,
-      "ContextAliases"     -> fileAliases
+      "PackageContext" -> packageContext,
+      "PackageScopeContext" -> packageScopeContext,
+      "PrivateContext" -> privateContext,
+      "ContextAliases" -> fileAliases
     |>]
   ];
 ]]
 
 
 (*
+Pure (side-effect-free) version of indexFile.
+Performs the same parse/extract steps as indexFile but returns the result
+as an Association instead of mutating $PacletIndex.  Used during parallel
+startup indexing via ParallelMap.
+
+Returns <|"URI"->..., "FilePath"->..., "Definitions"->..., ..., "FromCache"->bool|>
+or $Failed.
+*)
+indexFilePure[filePath_String] :=
+Catch[
+Module[{text, cst, ast, uri, definitions, usages, symbols, fileDeps,
+  contextLoads, explicitContextRefs, structuredMetadata, mergedStructuredData, packageContext,
+  packageScopeContext, privateContext, fileAliases, cacheData, modTime},
+
+  uri = "file://" <> filePath;
+
+  (* Check the disk cache first — avoids a full parse on warm starts *)
+  cacheData = readWorkspaceCacheEntry[uri, filePath];
+  If[AssociationQ[cacheData],
+    Throw[<|
+      "URI"                -> uri,
+      "FilePath"           -> filePath,
+      "Definitions"        -> Lookup[cacheData, "Definitions",         {}],
+      "Usages"             -> Lookup[cacheData, "Usages",              {}],
+      "Symbols"            -> {},  (* refs extracted separately via $PendingReferenceFiles *)
+      "Dependencies"       -> Lookup[cacheData, "Dependencies",        {}],
+      "ContextLoads"       -> Lookup[cacheData, "ContextLoads",        {}],
+      "ExplicitContextRefs"-> Lookup[cacheData, "ExplicitContextRefs", {}],
+      "PackageContext"     -> Lookup[cacheData, "PackageContext",       None],
+      "PackageScopeContext" -> Lookup[cacheData, "PackageScopeContext", None],
+      "PrivateContext"     -> Lookup[cacheData, "PrivateContext",       None],
+      "ContextAliases"     -> Lookup[cacheData, "ContextAliases",      {}],
+      "FromCache"          -> True
+    |>]
+  ];
+
+  (* Cache miss: read + parse + extract *)
+  text = Quiet[Import[filePath, "Text"]];
+  If[!StringQ[text], Throw[$Failed]];
+
+  cst = Quiet[CodeConcreteParse[text]];
+  If[FailureQ[cst], Throw[$Failed]];
+
+  ast = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[cst]]];
+  If[FailureQ[ast], Throw[$Failed]];
+
+  definitions        = extractDefinitions[ast, cst, uri];
+  usages             = extractUsages[ast, uri];
+  symbols            = extractSymbolReferences[cst, uri];
+  fileDeps           = extractDependencies[ast];
+  contextLoads       = extractContextLoads[ast];
+  explicitContextRefs= extractExplicitContextRefs[cst];
+  structuredMetadata = structuredPackageMetadata[filePath, ast];
+  mergedStructuredData = mergeStructuredDependencyData[fileDeps, contextLoads, structuredMetadata];
+  fileDeps = Lookup[mergedStructuredData, "Dependencies", fileDeps];
+  contextLoads = Lookup[mergedStructuredData, "ContextLoads", contextLoads];
+  packageContext     = Lookup[structuredMetadata, "PackageContext", extractPackageContext[ast]];
+  packageScopeContext = Lookup[structuredMetadata, "PackageScopeContext", None];
+  privateContext     = Lookup[structuredMetadata, "PrivateContext", None];
+  fileAliases        = extractContextAliases[ast];
+
+  <|
+    "URI"                -> uri,
+    "FilePath"           -> filePath,
+    "Definitions"        -> definitions,
+    "Usages"             -> usages,
+    "Symbols"            -> symbols,
+    "Dependencies"       -> fileDeps,
+    "ContextLoads"       -> contextLoads,
+    "ExplicitContextRefs"-> explicitContextRefs,
+    "PackageContext"     -> packageContext,
+    "PackageScopeContext" -> packageScopeContext,
+    "PrivateContext"     -> privateContext,
+    "ContextAliases"     -> fileAliases,
+    "FromCache"          -> False
+  |>
+]]
+
+
+(*
+Apply a single result from indexFilePure to the live $PacletIndex.
+Also writes the disk cache entry for future warm starts.
+*)
+mergeIndexResult[result_?AssociationQ] :=
+Module[{uri, filePath, fileDeps, modTime},
+  uri      = result["URI"];
+  filePath = result["FilePath"];
+  fileDeps = Lookup[result, "Dependencies", {}];
+
+  If[Length[fileDeps] > 0,
+    $PacletIndex["Dependencies"] = DeleteDuplicates[
+      Join[$PacletIndex["Dependencies"], fileDeps]
+    ];
+    loadExternalDependencies[fileDeps]
+  ];
+
+  addFileToIndex[
+    uri,
+    Lookup[result, "Definitions",         {}],
+    Lookup[result, "Usages",              {}],
+    Lookup[result, "Symbols",             {}],
+    fileDeps,
+    Lookup[result, "ContextLoads",        {}],
+    Lookup[result, "ExplicitContextRefs", {}],
+    Lookup[result, "PackageContext",      None],
+    Lookup[result, "PackageScopeContext", None],
+    Lookup[result, "PrivateContext",      None],
+    Lookup[result, "ContextAliases",      {}]
+  ];
+
+  (* Write disk cache for future startups (only for fresh parses) *)
+  If[!TrueQ[result["FromCache"]],
+    modTime = Quiet[AbsoluteTime[FileDate[filePath, "Modification"]]];
+    If[NumberQ[modTime],
+      writeWorkspaceCacheEntry[uri, modTime, <|
+        "Definitions"        -> result["Definitions"],
+        "Usages"             -> result["Usages"],
+        "Dependencies"       -> fileDeps,
+        "ContextLoads"       -> result["ContextLoads"],
+        "ExplicitContextRefs"-> result["ExplicitContextRefs"],
+        "PackageContext"     -> result["PackageContext"],
+        "PackageScopeContext" -> Lookup[result, "PackageScopeContext", None],
+        "PrivateContext"     -> Lookup[result, "PrivateContext", None],
+        "ContextAliases"     -> result["ContextAliases"]
+      |>]
+    ]
+  ]
+]
+
+mergeIndexResult[$Failed] := Null
+mergeIndexResult[_] := Null
+
+
+(*
 Batch add a file's data to the PacletIndex.
 Uses grouped-by-name operations instead of per-item AppendTo to avoid O(n^2).
 *)
-addFileToIndex[uri_, definitions_, usages_, symbols_, fileDeps_, contextLoads_, explicitContextRefs_, packageContext_, fileAliases_:{}] :=
+addFileToIndex[uri_, definitions_, usages_, symbols_, fileDeps_, contextLoads_, explicitContextRefs_, packageContext_, packageScopeContext_, privateContext_, fileAliases_:{}] :=
 Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
 
   fileSymbolsBag = Internal`Bag[];
@@ -817,6 +944,8 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
     "ContextLoads" -> contextLoads,
     "ExplicitContextRefs" -> explicitContextRefs,
     "PackageContext" -> packageContext,
+    "PackageScopeContext" -> packageScopeContext,
+    "PrivateContext" -> privateContext,
     "ContextAliases" -> fileAliases
   |>;
 
@@ -989,6 +1118,119 @@ Module[{commentNodes, result},
 ExtractDocComments = extractDocComments;
 
 
+optionRuleNodeQ[node_] :=
+  MatchQ[node, CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, _}, _]]
+
+
+stripNamedPatternWrapper[argNode_] :=
+  If[MatchQ[argNode, CallNode[LeafNode[Symbol, "Pattern", _], {_, _}, _]],
+    argNode[[2, 2]],
+    argNode
+  ]
+
+
+extractOptionNameFromLHS[lhsNode_] :=
+  Which[
+    MatchQ[lhsNode, LeafNode[Symbol, _String, _]],
+      lhsNode[[2]]
+    ,
+    MatchQ[lhsNode, LeafNode[String, _String, _]],
+      StringTake[lhsNode[[2]], {2, -2}]
+    ,
+    MatchQ[lhsNode, CallNode[LeafNode[Symbol, "HoldPattern", _], {inner_}, _]],
+      extractOptionNameFromLHS[lhsNode[[2, 1]]]
+    ,
+    True,
+      None
+  ]
+
+
+extractOptionTargetSymbols[node_] :=
+  Which[
+    MatchQ[node, LeafNode[Symbol, _String, _]],
+      {node[[2]]}
+    ,
+    MatchQ[node, CallNode[LeafNode[Symbol, "List" | "Alternatives", _], _List, _]],
+      DeleteDuplicates[Flatten[extractOptionTargetSymbols /@ node[[2]]]]
+    ,
+    MatchQ[node, CallNode[LeafNode[Symbol, "HoldPattern", _], {inner_}, _]],
+      extractOptionTargetSymbols[node[[2, 1]]]
+    ,
+    True,
+      {}
+  ]
+
+
+optionsPatternNodeQ[argNode_] :=
+Module[{inner},
+  inner = stripNamedPatternWrapper[argNode];
+  MatchQ[inner, CallNode[LeafNode[Symbol, "OptionsPattern", _], _, _]]
+]
+
+
+extractOptionsPatternTargets[argNode_, defaultName_String] :=
+Module[{inner, args, targets},
+  inner = stripNamedPatternWrapper[argNode];
+
+  If[!MatchQ[inner, CallNode[LeafNode[Symbol, "OptionsPattern", _], _, _]],
+    Return[{}]
+  ];
+
+  args = inner[[2]];
+
+  If[args === {},
+    Return[{defaultName}]
+  ];
+
+  targets = DeleteDuplicates[Flatten[extractOptionTargetSymbols /@ args]];
+
+  If[targets === {},
+    {defaultName},
+    targets
+  ]
+]
+
+
+extractOptionDefinitionEntries[node_] :=
+  Which[
+    optionRuleNodeQ[node],
+      Module[{name},
+        name = extractOptionNameFromLHS[node[[2, 1]]];
+        If[StringQ[name],
+          {<|"OptionName" -> name|>},
+          {}
+        ]
+      ]
+    ,
+    MatchQ[node, CallNode[LeafNode[Symbol, "List" | "Join" | "Sequence", _], _List, _]],
+      Flatten[extractOptionDefinitionEntries /@ node[[2]], 1]
+    ,
+    MatchQ[node, CallNode[LeafNode[Symbol, "Flatten", _], {_, ___}, _]],
+      extractOptionDefinitionEntries[node[[2, 1]]]
+    ,
+    MatchQ[node, CallNode[LeafNode[Symbol, "Options", _], {target_}, _]],
+      (<|"OptionTarget" -> #|> & /@ extractOptionTargetSymbols[node[[2, 1]]])
+    ,
+    True,
+      {}
+  ]
+
+
+extractOptionDefinitionData[rhsNode_] :=
+Module[{entries},
+  entries = extractOptionDefinitionEntries[rhsNode];
+
+  <|
+    "OptionNames" -> DeleteDuplicates[
+      Cases[entries, KeyValuePattern["OptionName" -> name_String] :> name]
+    ],
+    "OptionTargets" -> DeleteDuplicates[
+      Cases[entries, KeyValuePattern["OptionTarget" -> target_String] :> target]
+    ]
+  |>
+]
+
+
 (*
 extractArgPatternExpr[argNode]
   Given one argument AST node from a function definition LHS, returns a WL
@@ -1085,6 +1327,57 @@ extractLHSInputPatterns[lhsNode_] :=
     extractArgPatternExpr /@ lhsNode[[2]],
     {}
   ]
+
+extractFunctionSignatureInfo[funcName_String, lhsNode_] :=
+Module[{args, inputPatterns, variadic, hasOptionsPattern, optionTargets},
+  If[!MatchQ[lhsNode, CallNode[_, _List, _]],
+    Return[<|
+      "InputPatterns" -> {},
+      "Variadic" -> False,
+      "HasOptionsPattern" -> False,
+      "OptionTargets" -> {}
+    |>]
+  ];
+
+  args = lhsNode[[2]];
+  inputPatterns = {};
+  variadic = False;
+  hasOptionsPattern = False;
+  optionTargets = {};
+
+  Scan[
+    Function[{arg},
+      If[optionsPatternNodeQ[arg],
+        hasOptionsPattern = True;
+        optionTargets = DeleteDuplicates[
+          Join[optionTargets, extractOptionsPatternTargets[arg, funcName]]
+        ],
+        AppendTo[inputPatterns, extractArgPatternExpr[arg]];
+        If[MatchQ[arg,
+          CallNode[LeafNode[Symbol, "Pattern", _],
+            {_, CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _], _, _]}, _] |
+          CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _], _, _] |
+          CallNode[LeafNode[Symbol, "Optional", _], _, _]
+        ],
+          variadic = True
+        ]
+      ]
+    ],
+    args
+  ];
+
+  <|
+    "InputPatterns" -> inputPatterns,
+    "Variadic" -> variadic,
+    "HasOptionsPattern" -> hasOptionsPattern,
+    "OptionTargets" -> If[hasOptionsPattern,
+      DeleteDuplicates[Replace[optionTargets, {} :> {funcName}]],
+      {}
+    ]
+  |>
+]
+
+ExtractFunctionSignatureInfo = extractFunctionSignatureInfo;
 
 ExtractLHSInputPatterns = extractLHSInputPatterns;
 
@@ -1210,6 +1503,179 @@ inferArgSampleValueForRHS[argNode_] :=
     True, Missing["Unknown"]
   ];
 
+
+ruleLikeArgNodeQ[argNode_] := optionRuleNodeQ[argNode]
+
+
+splitTrailingOptionArgs[argNodes_List] :=
+Module[{splitPos},
+  splitPos = Length[argNodes];
+
+  While[splitPos >= 1 && ruleLikeArgNodeQ[argNodes[[splitPos]]],
+    splitPos--
+  ];
+
+  {Take[argNodes, splitPos], Drop[argNodes, splitPos]}
+]
+
+
+extractCallOptionName[argNode_] :=
+  If[ruleLikeArgNodeQ[argNode],
+    extractOptionNameFromLHS[argNode[[2, 1]]],
+    None
+  ]
+
+
+getIndexedSymbolOptionNames[symbolName_String, visited_List:{}] :=
+Module[{defs, directNames, inheritedTargets},
+  If[MemberQ[visited, symbolName],
+    Return[{}]
+  ];
+
+  defs = Select[
+    Lookup[Lookup[$PacletIndex["Symbols"], symbolName, <||>], "Definitions", {}],
+    Lookup[#, "kind", None] === "option" &
+  ];
+
+  directNames = DeleteDuplicates[Flatten[Lookup[defs, "OptionNames", {}]]];
+  inheritedTargets = DeleteDuplicates[Flatten[Lookup[defs, "OptionTargets", {}]]];
+
+  DeleteDuplicates[
+    Join[
+      Cases[directNames, _String],
+      Flatten[
+        getIndexedSymbolOptionNames[#, Append[visited, symbolName]] & /@
+          Cases[inheritedTargets, _String]
+      ]
+    ]
+  ]
+]
+
+
+definitionOptionNames[funcName_String, def_Association] :=
+Module[{targets},
+  targets = Lookup[def, "OptionTargets", {}];
+  targets = Cases[Replace[targets, {} :> {funcName}], _String];
+  DeleteDuplicates[Flatten[getIndexedSymbolOptionNames /@ targets]]
+]
+
+
+definitionAcceptsCallArgsQ[funcName_String, def_Association, argNodes_List, argSamples_List, validateOptionNames_:False] :=
+Module[{pats, isVar, hasOptionsPattern, positionalNodes, optionNodes,
+  positionalSamples, fixedN, varElemPat, optionNames, allowedOptionNames},
+
+  pats = Lookup[def, "InputPatterns", {}];
+  isVar = Lookup[def, "Variadic", False];
+  hasOptionsPattern = TrueQ[Lookup[def, "HasOptionsPattern", False]];
+
+  {positionalNodes, optionNodes} = If[hasOptionsPattern,
+    splitTrailingOptionArgs[argNodes],
+    {argNodes, {}}
+  ];
+
+  positionalSamples = Take[argSamples, Length[positionalNodes]];
+
+  If[hasOptionsPattern,
+    optionNames = extractCallOptionName /@ optionNodes;
+
+    If[TrueQ[validateOptionNames],
+      If[MemberQ[optionNames, None],
+        Return[False]
+      ];
+
+      allowedOptionNames = definitionOptionNames[funcName, def];
+
+      If[Length[allowedOptionNames] === 0 && Length[optionNodes] > 0,
+        Return[False]
+      ];
+
+      If[!AllTrue[optionNames, MemberQ[allowedOptionNames, #] &],
+        Return[False]
+      ]
+    ]
+  ];
+
+  If[isVar && Length[pats] > 0,
+    fixedN = Length[pats] - 1;
+    varElemPat = With[{lp = Last[pats]},
+      If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
+      If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
+      Blank[]]]
+    ];
+    Length[positionalSamples] >= fixedN &&
+    (fixedN === 0 || AllTrue[
+      Transpose[{Take[positionalSamples, fixedN], Take[pats, fixedN]}],
+      (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+    ]) &&
+    AllTrue[Drop[positionalSamples, fixedN],
+      (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
+    ],
+    Length[pats] === Length[positionalSamples] &&
+    AllTrue[Transpose[{positionalSamples, pats}],
+      (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+    ]
+  ]
+]
+
+DefinitionAcceptsCallArgsQ = definitionAcceptsCallArgsQ;
+
+$InferPatternLocalBindings = <||>;
+
+inferPatternRecordLocalBinding[bindings_Association, name_String, valueNode_, docComments_Association, uri_String] :=
+Module[{pat},
+  pat = Block[{$InferPatternLocalBindings = bindings},
+    inferPatternFromRHS[valueNode, docComments, uri]
+  ];
+  If[MatchQ[pat, None | _Missing],
+    KeyDrop[bindings, name],
+    Append[bindings, name -> pat]
+  ]
+]
+
+inferPatternScopeBindings[varListNode_, docComments_Association, uri_String] :=
+Module[{bindings = <||>},
+  If[!MatchQ[varListNode, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+    Return[bindings]
+  ];
+
+  Scan[
+    Function[{varNode},
+      If[MatchQ[varNode, CallNode[LeafNode[Symbol, "Set", _], {LeafNode[Symbol, _String, _], _}, _]],
+        bindings = inferPatternRecordLocalBinding[
+          bindings,
+          varNode[[2, 1, 2]],
+          varNode[[2, 2]],
+          docComments,
+          uri
+        ]
+      ]
+    ],
+    varListNode[[2]]
+  ];
+
+  bindings
+]
+
+inferPatternFromSequence[nodes_List, docComments_Association, uri_String] :=
+Module[{bindings = $InferPatternLocalBindings, pat = None},
+  Scan[
+    Function[{node},
+      If[MatchQ[node, CallNode[LeafNode[Symbol, "Set", _], {LeafNode[Symbol, _String, _], _}, _]],
+        Module[{name = node[[2, 1, 2]]},
+          bindings = inferPatternRecordLocalBinding[bindings, name, node[[2, 2]], docComments, uri];
+          pat = Lookup[bindings, name, None]
+        ],
+        pat = Block[{$InferPatternLocalBindings = bindings},
+          inferPatternFromRHS[node, docComments, uri]
+        ]
+      ]
+    ],
+    nodes
+  ];
+
+  pat
+]
+
 (*
 inferPatternFromRHS[rhsNode, docComments, uri]
   Given the RHS of a Set assignment (as an AST node), infer a WL pattern expression
@@ -1246,6 +1712,13 @@ Module[{head, headName, calleeDefs, retPat},
     *)
     LeafNode[String, _, _],
       _String
+    ,
+    (*
+    Local symbol reference inside a scoped body: resolve from the most recent
+    binding collected while walking Module/Block/With bodies.
+    *)
+    LeafNode[Symbol, _String, _] /; KeyExistsQ[$InferPatternLocalBindings, rhsNode[[2]]],
+      $InferPatternLocalBindings[rhsNode[[2]]]
     ,
     (*
     List constructor: resolve element types down to atoms, yielding {___T} for
@@ -1329,7 +1802,7 @@ Module[{head, headName, calleeDefs, retPat},
     *)
     CallNode[LeafNode[Symbol, "CompoundExpression", _], _List, _],
       If[Length[rhsNode[[2]]] === 0, None,
-        inferPatternFromRHS[Last[rhsNode[[2]]], docComments, uri]
+        inferPatternFromSequence[rhsNode[[2]], docComments, uri]
       ]
     ,
     (*
@@ -1411,7 +1884,7 @@ Module[{head, headName, calleeDefs, retPat},
       - arg 2 type  = _Failure when the callback body is the parameter itself,
                       otherwise inferred from the callback body (approximation)
       - 1-arg form  = arg1type | _Failure  (callback omitted; Enclose can throw Failure)
-    This is needed because _[2] in the generic builtin spec would be None (Function nodes
+    This is needed because _<2> in the generic builtin spec would be None (Function nodes
     have no stand-alone inferred type).
     *)
     CallNode[LeafNode[Symbol, "Enclose", _], _List, _],
@@ -1460,9 +1933,28 @@ Module[{head, headName, calleeDefs, retPat},
     rather than attempting to look up Module/Block/With in $BuiltinPatterns.
     *)
     CallNode[LeafNode[Symbol, "Module" | "Block" | "With", _], _List, _],
-      With[{args = rhsNode[[2]]},
-        If[Length[args] < 2, None,
-          inferPatternFromRHS[Last[args], docComments, uri]
+      Module[{args = rhsNode[[2]], scopeBindings},
+        If[Length[args] < 2,
+          None,
+          scopeBindings = inferPatternScopeBindings[First[args], docComments, uri];
+          Block[{$InferPatternLocalBindings = Join[$InferPatternLocalBindings, scopeBindings]},
+            inferPatternFromRHS[Last[args], docComments, uri]
+          ]
+        ]
+      ]
+    ,
+    (*
+    Apply[Join, expr] / Join @@ expr: flattening a list-valued local binding still
+    returns a list even when we only know the outer collection pattern.
+    *)
+    CallNode[LeafNode[Symbol, "Apply", _], {LeafNode[Symbol, "Join", _], _, ___}, _],
+      With[{exprPat = inferPatternFromRHS[rhsNode[[2, 2]], docComments, uri]},
+        Which[
+          exprPat === Blank[List], _List,
+          Head[exprPat] === List, _List,
+          Head[exprPat] === Alternatives && AllTrue[List @@ exprPat,
+            # === Blank[List] || Head[#] === List &], _List,
+          True, None
         ]
       ]
     ,
@@ -1531,14 +2023,14 @@ Module[{head, headName, calleeDefs, retPat},
               Function[{overload},
                 Module[{specs = overload[[1]], isVar,
                         inPats, retPat = overload[[2]]},
-                  isVar = Length[specs] > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence];
                   inPats = builtinSpecToPattern /@ specs;
+                  isVar = Length[inPats] > 0 && MatchQ[Last[inPats], _BlankSequence | _BlankNullSequence];
                   <|
                     "InputPatterns" -> inPats,
                     "Variadic" -> isVar,
                     "DocComment" -> Which[
                       retPat === None, None,
-                      (* Parametric "_[N]" / "_[N]|_[M]" patterns kept as string literals.
+                      (* Parametric "_<N>" / "_<N>|_<M>" patterns kept as string literals.
                          Store Blank[] as a non-None marker so the first-pass search finds it. *)
                       StringQ[retPat],
                         <|"ReturnPattern" -> Blank[],
@@ -1567,32 +2059,10 @@ Module[{head, headName, calleeDefs, retPat},
           (* First pass: matching definition WITH a ReturnPattern *)
           Scan[
             Function[{def},
-              Module[{pats, dc},
-                pats = Lookup[def, "InputPatterns", {}];
-                dc   = Lookup[def, "DocComment", None];
+              Module[{dc},
+                dc = Lookup[def, "DocComment", None];
                 If[
-                  Module[{isVar = Lookup[def, "Variadic", False],
-                          fixedN, varElemPat},
-                    If[isVar && Length[pats] > 0,
-                      fixedN = Length[pats] - 1;
-                      varElemPat = With[{lp = Last[pats]},
-                        If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
-                        If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
-                        Blank[]]]];
-                      Length[callArgSamples] >= fixedN &&
-                      (fixedN === 0 || AllTrue[
-                        Transpose[{Take[callArgSamples, fixedN], Take[pats, fixedN]}],
-                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
-                      ]) &&
-                      AllTrue[Drop[callArgSamples, fixedN],
-                        (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
-                      ],
-                      Length[pats] === Length[callArgSamples] &&
-                      AllTrue[Transpose[{callArgSamples, pats}],
-                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
-                      ]
-                    ]
-                  ] &&
+                  definitionAcceptsCallArgsQ[headName, def, rhsNode[[2]], callArgSamples] &&
                   AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing],
                   Throw[def]
                 ]
@@ -1600,59 +2070,37 @@ Module[{head, headName, calleeDefs, retPat},
             ],
             allDefs
           ];
+
           (* Second pass: any matching definition regardless of ReturnPattern *)
           Scan[
             Function[{def},
-              Module[{pats},
-                pats = Lookup[def, "InputPatterns", {}];
-                If[
-                  Module[{isVar = Lookup[def, "Variadic", False],
-                          fixedN, varElemPat},
-                    If[isVar && Length[pats] > 0,
-                      fixedN = Length[pats] - 1;
-                      varElemPat = With[{lp = Last[pats]},
-                        If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
-                        If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
-                        Blank[]]]];
-                      Length[callArgSamples] >= fixedN &&
-                      (fixedN === 0 || AllTrue[
-                        Transpose[{Take[callArgSamples, fixedN], Take[pats, fixedN]}],
-                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
-                      ]) &&
-                      AllTrue[Drop[callArgSamples, fixedN],
-                        (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
-                      ],
-                      Length[pats] === Length[callArgSamples] &&
-                      AllTrue[Transpose[{callArgSamples, pats}],
-                        (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
-                      ]
-                    ]
-                  ],
-                  Throw[def]
-                ]
+              If[
+                definitionAcceptsCallArgsQ[headName, def, rhsNode[[2]], callArgSamples],
+                Throw[def]
               ]
             ],
             allDefs
           ];
+
           None
         ];
 
         If[AssociationQ[matchingDef],
           With[{dc = Lookup[matchingDef, "DocComment", None]},
             Which[
-              (* "_[N]" / "_[N]|_[M]" / "_[N]|Null" passthrough: return type = inferred type of the
+              (* "_<N>" / "_<N>|_<M>" / "_<N>|Null" passthrough: return type = inferred type of the
                  Nth call arg (or a union of multiple args, possibly including Null for
                  branching functions like If[t,a] 2-arg form).  When the argument is itself
                  a function call (not a literal), we recurse into inferPatternFromRHS so
                  that chains like  var = Echo @ f[{1., 1.}]  resolve transitively.
                  Note: use ___ wildcard suffix to match trailing "|..." union parts. *)
               AssociationQ[dc] && StringMatchQ[Lookup[dc, "ReturnPatternString", ""],
-                "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
+                "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
                 Module[{retStr, argIdxs, hasNull, argNodes, argPats},
                   retStr   = dc["ReturnPatternString"];
-                  (* Parse all arg indices out of e.g. "_[2]|_[3]" or "_[2]|Null" *)
+                  (* Parse all arg indices out of e.g. "_<2>|_<3>" or "_<2>|Null" *)
                   argIdxs  = ToExpression /@ StringCases[retStr,
-                                "_[" ~~ n:DigitCharacter.. ~~ "]" :> n];
+                                "_<" ~~ n:DigitCharacter.. ~~ ">" :> n];
                   hasNull  = StringContainsQ[retStr, "|Null"];
                   argNodes = rhsNode[[2]];
                   (* For each referenced arg, try literal fast path then full recursion *)
@@ -1698,7 +2146,7 @@ Module[{head, headName, calleeDefs, retPat},
                   dc = Lookup[def, "DocComment", None];
                   If[AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing]
                        && !StringMatchQ[Lookup[dc, "ReturnPatternString", ""],
-                            "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
+                            "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
                     Throw[dc["ReturnPattern"]]
                   ]
                 ]
@@ -1764,11 +2212,22 @@ Extract definitions from AST, with doc-comment association via CST.
 The overload with cst_ builds the docComments map and threads it into walkASTForDefinitions.
 *)
 extractDefinitions[ast_, cst_, uri_] :=
-Module[{definitions, docComments},
+Module[{definitions, docComments, structuredContexts, packageContext, packageScopeContext,
+  exportedDeclaredSymbols, scopedDeclaredSymbols, declaredSymbols},
   docComments = ExtractDocComments[cst];
+  structuredContexts = structuredPackageMetadata[uriPath[uri], ast];
+  packageContext = Lookup[structuredContexts, "PackageContext", None];
+  packageScopeContext = Lookup[structuredContexts, "PackageScopeContext", None];
+  exportedDeclaredSymbols = structuredPackageDeclaredSymbols[ast, uri, "PackageExported", "public", packageContext];
+  scopedDeclaredSymbols = structuredPackageDeclaredSymbols[ast, uri, "PackageScoped", "package", packageScopeContext];
+  declaredSymbols = Join[exportedDeclaredSymbols, scopedDeclaredSymbols];
+  structuredContexts = Join[structuredContexts, <|
+    "ExportedSymbols" -> Replace[Lookup[exportedDeclaredSymbols, "name", {}], _Missing -> {}],
+    "ScopedSymbols" -> Replace[Lookup[scopedDeclaredSymbols, "name", {}], _Missing -> {}]
+  |>];
   definitions = Internal`Bag[];
-  walkASTForDefinitions[definitions, ast, None, False, uri, docComments];
-  resolveInferredPatterns[Internal`BagPart[definitions, All], uri]
+  walkASTForDefinitions[definitions, ast, None, False, uri, docComments, structuredContexts];
+  resolveInferredPatterns[Join[Internal`BagPart[definitions, All], declaredSymbols], uri]
 ]
 
 
@@ -1776,10 +2235,21 @@ Module[{definitions, docComments},
 Extract definitions from AST
 *)
 extractDefinitions[ast_, uri_] :=
-Module[{definitions},
+Module[{definitions, structuredContexts, packageContext, packageScopeContext,
+  exportedDeclaredSymbols, scopedDeclaredSymbols, declaredSymbols},
+  structuredContexts = structuredPackageMetadata[uriPath[uri], ast];
+  packageContext = Lookup[structuredContexts, "PackageContext", None];
+  packageScopeContext = Lookup[structuredContexts, "PackageScopeContext", None];
+  exportedDeclaredSymbols = structuredPackageDeclaredSymbols[ast, uri, "PackageExported", "public", packageContext];
+  scopedDeclaredSymbols = structuredPackageDeclaredSymbols[ast, uri, "PackageScoped", "package", packageScopeContext];
+  declaredSymbols = Join[exportedDeclaredSymbols, scopedDeclaredSymbols];
+  structuredContexts = Join[structuredContexts, <|
+    "ExportedSymbols" -> Replace[Lookup[exportedDeclaredSymbols, "name", {}], _Missing -> {}],
+    "ScopedSymbols" -> Replace[Lookup[scopedDeclaredSymbols, "name", {}], _Missing -> {}]
+  |>];
   definitions = Internal`Bag[];
-  walkASTForDefinitions[definitions, ast, None, False, uri, <||>];
-  resolveInferredPatterns[Internal`BagPart[definitions, All], uri]
+  walkASTForDefinitions[definitions, ast, None, False, uri, <||>, structuredContexts];
+  resolveInferredPatterns[Join[Internal`BagPart[definitions, All], declaredSymbols], uri]
 ]
 
 
@@ -1866,8 +2336,8 @@ Module[{argSamples, localDefs, defs},
         Function[{overload},
           Module[{specs = overload[[1]], isVar,
                   inPats, retPat = overload[[2]]},
-            isVar = Length[specs] > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence];
             inPats = builtinSpecToPattern /@ specs;
+            isVar = Length[inPats] > 0 && MatchQ[Last[inPats], _BlankSequence | _BlankNullSequence];
             <|
               "InputPatterns" -> inPats,
               "Variadic" -> isVar,
@@ -1890,41 +2360,19 @@ Module[{argSamples, localDefs, defs},
   Catch[
     Scan[
       Function[{def},
-        Module[{pats, dc, retStr},
-          pats   = Lookup[def, "InputPatterns", {}];
+        Module[{dc, retStr},
           dc     = Lookup[def, "DocComment", None];
           retStr = If[AssociationQ[dc], Lookup[dc, "ReturnPatternString", ""], ""];
           If[
-            Module[{isVar = Lookup[def, "Variadic", False],
-                    fixedN, varElemPat},
-              If[isVar && Length[pats] > 0,
-                fixedN = Length[pats] - 1;
-                varElemPat = With[{lp = Last[pats]},
-                  If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
-                  If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
-                  Blank[]]]];
-                Length[argSamples] >= fixedN &&
-                (fixedN === 0 || AllTrue[
-                  Transpose[{Take[argSamples, fixedN], Take[pats, fixedN]}],
-                  (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
-                ]) &&
-                AllTrue[Drop[argSamples, fixedN],
-                  (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
-                ],
-                Length[pats] === Length[argSamples] &&
-                AllTrue[Transpose[{argSamples, pats}],
-                  (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
-                ]
-              ]
-            ] &&
+            definitionAcceptsCallArgsQ[headName, def, argNodes, argSamples] &&
             AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing],
-            (* _[N] / _[N]|_[M] / _[N]|Null: recurse into the referenced call argument.
+            (* _<N> / _<N>|_<M> / _<N>|Null: recurse into the referenced call argument.
                Also handles "|Null" suffix for branching functions like If[t,a] which may
                return Null when the condition is False and no else-branch is given.
                Note: use ___ wildcard suffix to match trailing "|..." union parts. *)
-            If[StringMatchQ[retStr, "_[" ~~ DigitCharacter.. ~~ "]" ~~ ___],
+            If[StringMatchQ[retStr, "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
               Module[{argIdxs, hasNull, argPats},
-                argIdxs = ToExpression /@ StringCases[retStr, "_[" ~~ n:DigitCharacter.. ~~ "]" :> n];
+                argIdxs = ToExpression /@ StringCases[retStr, "_<" ~~ n:DigitCharacter.. ~~ ">" :> n];
                 hasNull = StringContainsQ[retStr, "|Null"];
                 argPats = DeleteCases[
                   Map[
@@ -1970,15 +2418,11 @@ Module[{argSamples, localDefs, defs},
        InputPattern arity/type matching still applies so we pick the right overload. *)
     Scan[
       Function[{def},
-        Module[{pats, irp},
-          pats = Lookup[def, "InputPatterns", {}];
+        Module[{irp},
           irp  = Lookup[def, "InferredReturnPattern", None];
           If[
             !MatchQ[irp, None | _Missing] &&
-            Length[pats] === Length[argSamples] &&
-            AllTrue[Transpose[{argSamples, pats}],
-              (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
-            ],
+            definitionAcceptsCallArgsQ[headName, def, argNodes, argSamples],
             Throw[irp]
           ]
         ]
@@ -2145,7 +2589,7 @@ resolveCallReturnPattern["If", argNodes_List, localFuncDefs_Association] :=
 resolveCallReturnPattern["Enclose", argNodes_List, localFuncDefs_Association] :=
   Module[{bodyPat, cbPat, cb, paramName, cbBody, pats},
     bodyPat = If[Length[argNodes] >= 1,
-      inferPatternFromRHS[argNodes[[1]], {}, ""], None];
+      inferPatternFromRHS[argNodes[[1]], <||>, ""], None];
     cbPat = Which[
       Length[argNodes] < 2, Blank[Failure],
       True,
@@ -2158,7 +2602,7 @@ resolveCallReturnPattern["Enclose", argNodes_List, localFuncDefs_Association] :=
             cbBody    = cb[[2, 2]];
             If[MatchQ[cbBody, LeafNode[Symbol, paramName, _]],
               Blank[Failure],
-              With[{bp = inferPatternFromRHS[cbBody, {}, ""]},
+              With[{bp = inferPatternFromRHS[cbBody, <||>, ""]},
                 If[bp =!= None, bp, Blank[Failure]]]],
           MatchQ[cb, CallNode[LeafNode[Symbol, "Function", _],
                        {LeafNode[Symbol, _, _], _}, _]],
@@ -2166,7 +2610,7 @@ resolveCallReturnPattern["Enclose", argNodes_List, localFuncDefs_Association] :=
             cbBody    = cb[[2, 2]];
             If[MatchQ[cbBody, LeafNode[Symbol, paramName, _]],
               Blank[Failure],
-              With[{bp = inferPatternFromRHS[cbBody, {}, ""]},
+              With[{bp = inferPatternFromRHS[cbBody, <||>, ""]},
                 If[bp =!= None, bp, Blank[Failure]]]],
           True, Blank[Failure]
         ]
@@ -2201,7 +2645,7 @@ resolveCallReturnPattern["Lookup", argNodes_List, localFuncDefs_Association] :=
             Cases[assocArg[[2]],
               CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, valNode_}, _] :>
                 With[{sp = sampleToPattern[inferArgSampleValueForRHS[valNode]]},
-                  If[sp =!= None, sp, inferPatternFromRHS[valNode, {}, ""]]],
+                  If[sp =!= None, sp, inferPatternFromRHS[valNode, <||>, ""]]],
               1],
             None]];
           Switch[Length[valuePats], 0, None, 1, valuePats[[1]], _, Alternatives @@ valuePats],
@@ -2221,24 +2665,26 @@ tag = {LeafNode[String, "MyPackage`", ...], CallNode[List, {LeafNode[String, "De
 Also extracts Needs["Package`"] calls at the top level.
 *)
 extractDependencies[ast_] :=
-Module[{packageDeps, needsDeps, needsAliasDeps, allDeps},
+Module[{packageDeps, needsDeps, needsAliasDeps, structuredHiddenDeps, structuredImportDeps, allDeps},
 
   (*
   Extract from PackageNode tags - dependencies are in the List following the main context
   *)
   packageDeps = Cases[ast,
     PackageNode[{LeafNode[String, _, _], CallNode[LeafNode[Symbol, "List", _], deps_List, _], ___}, _, _] :>
-      Cases[deps, LeafNode[String, s_String, _] :> abstractContextString[s]],
+      Cases[deps, LeafNode[String, s_String, _] :> normalizeContextString[s]],
     {0, 2}
   ] // Flatten;
 
   (*
   Also extract from Needs["Package`"] and Get["Package`"] calls anywhere in the file.
   These may be at top level, inside PackageNode, inside ContextNode (Private), etc.
+  Ignore Get["path/to/file.wl"] style file loads here; those are not valid contexts
+  to pass to Needs later.
   *)
   needsDeps = Cases[ast,
     CallNode[LeafNode[Symbol, "Needs" | "Get", _], {LeafNode[String, s_String, _], ___}, _] :>
-      abstractContextString[s],
+      normalizeContextString[s],
     Infinity
   ];
 
@@ -2250,11 +2696,14 @@ Module[{packageDeps, needsDeps, needsAliasDeps, allDeps},
   needsAliasDeps = Cases[ast,
     CallNode[LeafNode[Symbol, "Needs", _],
       {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, s_String, _], LeafNode[String, _, _]}, _]}, _] :>
-      abstractContextString[s],
+      normalizeContextString[s],
     Infinity
   ];
 
-  allDeps = DeleteDuplicates[Join[packageDeps, needsDeps, needsAliasDeps]];
+  structuredHiddenDeps = structuredPackageHiddenImports[ast];
+  structuredImportDeps = Lookup[structuredPackageImportRecords[ast], "context", {}];
+
+  allDeps = DeleteDuplicates[Join[packageDeps, needsDeps, needsAliasDeps, structuredHiddenDeps, structuredImportDeps]];
 
   (* Filter out None values from failed parsing *)
   Select[allDeps, StringQ]
@@ -2266,7 +2715,7 @@ Extract detailed context loading information from AST.
 Returns a list of context load records with source locations.
 *)
 extractContextLoads[ast_] :=
-Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageContext},
+Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, structuredInitLoads, structuredImportLoads, initializeCalls, importCalls},
   loads = {};
 
   (*
@@ -2275,12 +2724,12 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageConte
   packageLoads = Cases[ast,
     PackageNode[{LeafNode[String, ctx_String, KeyValuePattern[Source -> src_]], rest___}, _, _] :>
       Module[{mainCtx, deps},
-        mainCtx = abstractContextString[ctx];
+        mainCtx = normalizeContextString[ctx];
         (* The main package context is implicitly "loaded" *)
         deps = Cases[{rest},
           CallNode[LeafNode[Symbol, "List", _], depList_List, _] :>
             Cases[depList, LeafNode[String, s_String, KeyValuePattern[Source -> depSrc_]] :>
-              <| "context" -> abstractContextString[s], "source" -> depSrc, "method" -> "BeginPackage" |>
+              <| "context" -> normalizeContextString[s], "source" -> depSrc, "method" -> "BeginPackage" |>
             ],
           {1}
         ] // Flatten;
@@ -2295,7 +2744,7 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageConte
   *)
   needsLoads = Cases[ast,
     CallNode[LeafNode[Symbol, "Needs", _], {LeafNode[String, s_String, _], ___}, KeyValuePattern[Source -> src_]] :>
-      <| "context" -> abstractContextString[s], "source" -> src, "method" -> "Needs" |>,
+      <| "context" -> normalizeContextString[s], "source" -> src, "method" -> "Needs" |>,
     Infinity
   ];
 
@@ -2308,7 +2757,7 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageConte
     CallNode[LeafNode[Symbol, "Needs", _],
       {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, s_String, _], LeafNode[String, a_String, _]}, _]},
       KeyValuePattern[Source -> src_]] :>
-      <| "context" -> abstractContextString[s], "alias" -> abstractContextString[a], "source" -> src, "method" -> "Needs" |>,
+      <| "context" -> normalizeContextString[s], "alias" -> normalizeContextString[a], "source" -> src, "method" -> "Needs" |>,
     Infinity
   ];
 
@@ -2319,11 +2768,67 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, packageConte
   *)
   getLoads = Cases[ast,
     CallNode[LeafNode[Symbol, "Get", _], {LeafNode[String, s_String, _], ___}, KeyValuePattern[Source -> src_]] :>
-      <| "context" -> abstractContextString[s], "source" -> src, "method" -> "Get" |>,
+      <| "context" -> normalizeContextString[s], "source" -> src, "method" -> "Get" |>,
     Infinity
   ];
 
-  loads = Join[packageLoads, needsLoads, getLoads];
+  initializeCalls = structuredPackageCallNodes[ast, "PackageInitialize"];
+  structuredInitLoads = If[initializeCalls === {},
+    {},
+    Map[
+      <|
+        "context" -> #,
+        "source" -> Replace[
+          First[initializeCalls],
+          _[_, _, KeyValuePattern[Source -> src_]] :> src
+        ],
+        "method" -> "PackageInitialize"
+      |> &,
+      structuredPackageHiddenImports[ast]
+    ]
+  ];
+
+  importCalls = structuredPackageCallNodes[ast, "PackageImport"];
+  structuredImportLoads = Reap[
+    Scan[
+      Function[{call},
+        Module[{args, context, symbols},
+          args = callNodeArguments[call];
+          If[Length[args] >= 1,
+            context = Replace[
+              stringNodeValue[args[[1]]],
+              {
+                value_String /; validContextStringQ[value] :> normalizeContextString[value],
+                _ :> None
+              }
+            ];
+            If[StringQ[context],
+              symbols = If[Length[args] >= 2,
+                extractSymbolNamesFromValue[args[[2]]],
+                {}
+              ];
+              Sow[<|
+                "context" -> context,
+                "source" -> Replace[
+                  call,
+                  _[_, _, KeyValuePattern[Source -> src_]] :> src
+                ],
+                "method" -> "PackageImport",
+                "symbols" -> symbols
+              |>]
+            ]
+          ]
+        ]
+      ],
+      importCalls
+    ]
+  ];
+  structuredImportLoads = If[Length[structuredImportLoads[[2]]] > 0,
+    structuredImportLoads[[2, 1]],
+    {}
+  ];
+
+  loads = Join[packageLoads, needsLoads, getLoads, structuredInitLoads, structuredImportLoads];
 
   (* Filter out None values and sort by source location *)
   loads = Select[loads, StringQ[#["context"]] &];
@@ -2345,7 +2850,7 @@ Module[{aliases},
     CallNode[LeafNode[Symbol, "Needs", _],
       {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, fullCtx_String, _], LeafNode[String, aliasCtx_String, _]}, _]},
       _] :>
-      <| "fullContext" -> abstractContextString[fullCtx], "alias" -> abstractContextString[aliasCtx] |>,
+      <| "fullContext" -> normalizeContextString[fullCtx], "alias" -> normalizeContextString[aliasCtx] |>,
     Infinity
   ];
   Select[aliases, StringQ[#["fullContext"]] && StringQ[#["alias"]] &]
@@ -2385,15 +2890,17 @@ Module[{refs},
 Extract the main package context from AST if this is a package file.
 *)
 extractPackageContext[ast_] :=
-Module[{packageContexts},
+Module[{packageContexts, structuredContext},
   packageContexts = Cases[ast,
-    PackageNode[{LeafNode[String, ctx_String, _], ___}, _, _] :> abstractContextString[ctx],
+    PackageNode[{LeafNode[String, ctx_String, _], ___}, _, _] :> normalizeContextString[ctx],
     {0, 2}
   ];
 
+  structuredContext = structuredPackagePackageContext[ast];
+
   If[Length[packageContexts] > 0,
     First[packageContexts],
-    None
+    If[StringQ[structuredContext], structuredContext, None]
   ]
 ]
 
@@ -2403,6 +2910,50 @@ Load external dependency packages so their symbols are available for context det
 Skips packages that appear to be workspace-internal (defined in the workspace).
 Only loads packages that are likely system/external packages.
 *)
+(*
+Resolve an external package context to its WL source files and add them to
+$PendingIndexFiles so their symbols become available for hover/completion.
+Uses PacletFind to locate paclet-based packages; falls back to FindFile for
+packages on $Path.
+*)
+queueExternalPackageFiles[dep_String] :=
+Module[{pacletName, paclets, loc, kernelDir, searchDirs, files, newFiles},
+  pacletName = First[StringSplit[dep, "`"], dep];
+
+  paclets = Quiet[PacletFind[pacletName]];
+
+  searchDirs = If[Length[paclets] > 0,
+    loc = First[paclets]["Location"];
+    (* Prefer Kernel/ subdir; fall back to the full paclet directory *)
+    kernelDir = FileNameJoin[{loc, "Kernel"}];
+    If[DirectoryQ[kernelDir], {kernelDir}, {loc}]
+    ,
+    (* Non-paclet: locate via FindFile and use the directory containing the init file *)
+    With[{initFile = Quiet[FindFile[dep]]},
+      If[StringQ[initFile], {DirectoryName[initFile]}, {}]
+    ]
+  ];
+
+  If[Length[searchDirs] == 0, Return[]];
+
+  files = Flatten[FileNames["*.wl" | "*.m", #, Infinity]& /@ searchDirs];
+  files = Select[files, !shouldExcludeFile[#] &];
+
+  (* Batch-append new files, skipping already-indexed and already-queued entries *)
+  newFiles = Select[files,
+    Function[{fp},
+      !KeyExistsQ[$PacletIndex["Files"], "file://" <> fp] &&
+      !MemberQ[$PendingExternalDepFiles, fp] &&
+      !MemberQ[$PendingIndexFiles, fp]
+    ]
+  ];
+  If[Length[newFiles] > 0,
+    log[0, "DBG-TBDU queueExternalPackageFiles: dep=", dep, " queuing ", Length[newFiles], " files"];
+    $PendingExternalDepFiles = Join[$PendingExternalDepFiles, newFiles]
+  ]
+]
+
+
 loadExternalDependencies[deps_List] :=
 Module[{externalDeps, workspaceContexts},
 
@@ -2419,28 +2970,27 @@ Module[{externalDeps, workspaceContexts},
   externalDeps = Select[deps,
     Function[{dep},
       And[
+        validContextStringQ[dep],
         !MemberQ[workspaceContexts, dep],
-        !AnyTrue[workspaceContexts, StringStartsQ[dep, #] &]
+        !AnyTrue[workspaceContexts, StringStartsQ[dep, #] &],
+        !TrueQ[Lookup[$LoadedExternalDependencies, dep, False]]
       ]
     ]
   ];
 
   (*
-  Try to load each external dependency
+    Queue each external dependency's WL source files for background indexing so
+    their symbols appear in hover/completion results.
+
+    Do not call Needs[] here. External package init code can emit stdout/stderr,
+    block on I/O, or otherwise interfere with the LSP transport. Source
+    discovery via PacletFind / FindFile is sufficient for indexing.
   *)
   Scan[
     Function[{dep},
-      If[$Debug2,
-        log["loadExternalDependencies: loading ", dep]
-      ];
-      Quiet[
-        Check[
-          Needs[dep],
-          If[$Debug2, log["loadExternalDependencies: failed to load ", dep]],
-          {Needs::nocont, Get::noopen}
-        ],
-        {Needs::nocont, Get::noopen, General::stop}
-      ]
+      $LoadedExternalDependencies[dep] = True;
+      log[0, "DBG-TBDU loadExternalDependencies: queueing source files for ", dep];
+      queueExternalPackageFiles[dep]
     ],
     externalDeps
   ]
@@ -2457,11 +3007,34 @@ Arguments:
   uri - file URI
   docComments - Association of endLine -> parsed doc-comment (from extractDocComments)
 *)
-walkASTForDefinitions[bag_, node_, currentContext_, inPrivate_, uri_, docComments_] :=
-Module[{newContext, contextStrings, newInPrivate, packageContext},
+walkASTForDefinitions[bag_, node_, currentContext_, inPrivate_, uri_, docComments_, structuredContexts_] :=
+Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, structuredPackageScopeContext,
+  structuredPrivateContext, exportedNames, scopedNames, definitionContextFor, definitionVisibilityFor},
 
   newContext = currentContext;
   newInPrivate = inPrivate;
+  structuredPackageContext = Lookup[structuredContexts, "PackageContext", None];
+  structuredPackageScopeContext = Lookup[structuredContexts, "PackageScopeContext", None];
+  structuredPrivateContext = Lookup[structuredContexts, "PrivateContext", None];
+  exportedNames = AssociationMap[True &, Lookup[structuredContexts, "ExportedSymbols", {}]];
+  scopedNames = AssociationMap[True &, Lookup[structuredContexts, "ScopedSymbols", {}]];
+
+  definitionContextFor[name_String] := Which[
+    TrueQ[Lookup[exportedNames, name, False]] && StringQ[structuredPackageContext], structuredPackageContext,
+    TrueQ[Lookup[scopedNames, name, False]] && StringQ[structuredPackageScopeContext], structuredPackageScopeContext,
+    True, newContext
+  ];
+  definitionVisibilityFor[name_String] := Which[
+    TrueQ[Lookup[exportedNames, name, False]], "public",
+    TrueQ[Lookup[scopedNames, name, False]], "package",
+    newInPrivate, "private",
+    True, "public"
+  ];
+
+  If[StringQ[structuredPrivateContext] && !StringQ[newContext],
+    newContext = structuredPrivateContext;
+    newInPrivate = True
+  ];
 
   (*
   Track context from PackageNode/ContextNode
@@ -2531,10 +3104,9 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
         is considered adjacent and belongs to this definition.
         *)
         docComment = Lookup[docComments, defStartLine - 1, None];
-        Module[{lhsNode, rhsNode, inputPatterns, inferredRetPat, rhsCallHead, rhsCallArgs},
+        Module[{lhsNode, rhsNode, inferredRetPat, rhsCallHead, rhsCallArgs},
           lhsNode = node[[2, 1]];
           rhsNode = node[[2, 2]];
-          inputPatterns = extractLHSInputPatterns[lhsNode];
           (* Infer return pattern from the function body, even without a DocComment.
              This allows callers to chain return-type inference across functions that
              lack explicit Return: doc-comment annotations. *)
@@ -2548,19 +3120,25 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
           Scan[
             Function[{def},
               If[MatchQ[def, LeafNode[Symbol, _String, _]],
+                Module[{signatureInfo},
+                  signatureInfo = extractFunctionSignatureInfo[def[[2]], lhsNode];
                 Internal`StuffBag[bag, <|
                   "name" -> def[[2]],
                   "uri" -> uri,
                   "source" -> src,
                   "kind" -> "function",
-                  "context" -> newContext,
-                  "visibility" -> If[newInPrivate, "private", "public"],
+                  "context" -> definitionContextFor[def[[2]]],
+                  "visibility" -> definitionVisibilityFor[def[[2]]],
                   "DocComment" -> docComment,
-                  "InputPatterns" -> inputPatterns,
+                  "InputPatterns" -> signatureInfo["InputPatterns"],
+                  "Variadic" -> signatureInfo["Variadic"],
+                  "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
+                  "OptionTargets" -> signatureInfo["OptionTargets"],
                   "InferredReturnPattern" -> inferredRetPat,
                   "rhsCallHead" -> rhsCallHead,
                   "rhsCallArgs" -> rhsCallArgs
                 |>]
+                ]
               ]
             ],
             node[[3, Key["Definitions"]]]
@@ -2576,14 +3154,14 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
     MatchQ[node, CallNode[LeafNode[Symbol, "TagSetDelayed" | "TagSet", _],
       {LeafNode[Symbol, _, _], CallNode[LeafNode[Symbol, _, _], _, _], _},
       _]],
-      Module[{src, defStartLine, docComment, lhsNode, rhsNode, lhsHead, inputPatterns, inferredRetPat, rhsCallHead, rhsCallArgs},
+      Module[{src, defStartLine, docComment, lhsNode, rhsNode, lhsHead, signatureInfo, inferredRetPat, rhsCallHead, rhsCallArgs},
         src = node[[3, Key[Source]]];
         defStartLine = src[[1, 1]];
         docComment = Lookup[docComments, defStartLine - 1, None];
         lhsNode = node[[2, 2]];
         rhsNode = node[[2, 3]];
         lhsHead = lhsNode[[1, 2]];
-        inputPatterns = extractLHSInputPatterns[lhsNode];
+        signatureInfo = extractFunctionSignatureInfo[lhsHead, lhsNode];
         inferredRetPat = inferPatternFromRHS[rhsNode, docComments, uri];
         {rhsCallHead, rhsCallArgs} = If[
           MatchQ[rhsNode, CallNode[LeafNode[Symbol, _String, _], _List, _]],
@@ -2595,10 +3173,13 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
           "uri" -> uri,
           "source" -> src,
           "kind" -> "function",
-          "context" -> newContext,
-          "visibility" -> If[newInPrivate, "private", "public"],
+          "context" -> definitionContextFor[lhsHead],
+          "visibility" -> definitionVisibilityFor[lhsHead],
           "DocComment" -> docComment,
-          "InputPatterns" -> inputPatterns,
+          "InputPatterns" -> signatureInfo["InputPatterns"],
+          "Variadic" -> signatureInfo["Variadic"],
+          "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
+          "OptionTargets" -> signatureInfo["OptionTargets"],
           "InferredReturnPattern" -> inferredRetPat,
           "rhsCallHead" -> rhsCallHead,
           "rhsCallArgs" -> rhsCallArgs
@@ -2629,8 +3210,8 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
                 "uri" -> uri,
                 "source" -> src,
                 "kind" -> "constant",
-                "context" -> newContext,
-                "visibility" -> If[newInPrivate, "private", "public"],
+                "context" -> definitionContextFor[def[[2]]],
+                "visibility" -> definitionVisibilityFor[def[[2]]],
                 "DocComment" -> docComment,
                 "InferredPattern" -> inferredPat,
                 "rhsCallHead" -> rhsCallHead,
@@ -2647,15 +3228,20 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
     *)
     MatchQ[node, CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _],
       {CallNode[LeafNode[Symbol, "Options", _], {LeafNode[Symbol, _String, _]}, _], _}, _]],
-      Internal`StuffBag[bag, <|
-        "name" -> node[[2, 1, 2, 1, 2]],
-        "uri" -> uri,
-        "source" -> node[[3, Key[Source]]],
-        "kind" -> "option",
-        "context" -> newContext,
-        "visibility" -> If[newInPrivate, "private", "public"],
-        "DocComment" -> None
-      |>]
+      Module[{optionData},
+        optionData = extractOptionDefinitionData[node[[2, 2]]];
+        Internal`StuffBag[bag, <|
+          "name" -> node[[2, 1, 2, 1, 2]],
+          "uri" -> uri,
+          "source" -> node[[3, Key[Source]]],
+          "kind" -> "option",
+          "context" -> definitionContextFor[node[[2, 1, 2, 1, 2]]],
+          "visibility" -> definitionVisibilityFor[node[[2, 1, 2, 1, 2]]],
+          "DocComment" -> None,
+          "OptionNames" -> optionData["OptionNames"],
+          "OptionTargets" -> optionData["OptionTargets"]
+        |>]
+      ]
     ,
     (*
     Attributes definition: Attributes[f] = {...}
@@ -2667,8 +3253,8 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
         "uri" -> uri,
         "source" -> node[[3, Key[Source]]],
         "kind" -> "attribute",
-        "context" -> newContext,
-        "visibility" -> If[newInPrivate, "private", "public"],
+        "context" -> definitionContextFor[node[[2, 1, 2, 1, 2]]],
+        "visibility" -> definitionVisibilityFor[node[[2, 1, 2, 1, 2]]],
         "DocComment" -> None
       |>]
   ];
@@ -2679,19 +3265,19 @@ Module[{newContext, contextStrings, newInPrivate, packageContext},
   *)
   Switch[node,
     ContainerNode[_, _List, _],
-      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments]&, node[[2]]]
+      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments, structuredContexts]&, node[[2]]]
     ,
     PackageNode[_, _List, _],
-      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments]&, node[[2]]]
+      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments, structuredContexts]&, node[[2]]]
     ,
     ContextNode[_, _List, _],
-      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments]&, node[[2]]]
+      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments, structuredContexts]&, node[[2]]]
     ,
     CallNode[_, _List, _],
-      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments]&, node[[2]]]
+      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments, structuredContexts]&, node[[2]]]
     ,
     _[_, _List, _],
-      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments]&, node[[2]]]
+      Scan[walkASTForDefinitions[bag, #, newContext, newInPrivate, uri, docComments, structuredContexts]&, node[[2]]]
   ]
 ]
 
@@ -2777,7 +3363,373 @@ convert context strings like "Developer`" into symbols.
 abstractContextString[str_String /; StringStartsQ[str, "\""]] :=
   StringTake[str, {2, -2}]  (* Remove first and last quote characters *)
 
+abstractContextString[str_String] := str
+
 abstractContextString[_] := None
+
+
+validContextStringQ[str_String] :=
+  StringEndsQ[str, "`"]
+
+validContextStringQ[_] := False
+
+
+normalizeContextString[str_] :=
+Module[{context = abstractContextString[str]},
+  If[validContextStringQ[context],
+    context,
+    None
+  ]
+]
+
+
+topLevelExpressions[
+  ContainerNode[_, expressions_List, _]
+] := expressions
+topLevelExpressions[_] := {}
+
+
+structuredPackageCallNodes[ast_, name_String] :=
+  DeleteDuplicates @ Cases[
+    topLevelExpressions[ast],
+    callNode : CallNode[
+      LeafNode[Symbol, symbolName_String, _],
+      _,
+      _
+    ] /; symbolName === name :> callNode,
+    {0, Infinity}
+  ]
+
+
+callNodeArguments[
+  CallNode[
+    _,
+    args_List,
+    _
+  ]
+] := args
+callNodeArguments[_] := {}
+
+
+stringNodeValue[
+  LeafNode[String, value_String, _]
+] := StringTrim[value, "\""]
+stringNodeValue[_] := Missing["NotAvailable"]
+
+
+symbolNodeValue[
+  LeafNode[Symbol, value_String, _]
+] := value
+symbolNodeValue[_] := Missing["NotAvailable"]
+
+
+associationRuleKeyString[
+  BinaryNode[Rule, {
+    keyNode_,
+    _
+  }, _]
+] :=
+  Replace[
+    keyNode,
+    {
+      LeafNode[String, value_String, _] :> StringTrim[value, "\""],
+      LeafNode[Symbol, value_String, _] :> value,
+      _ :> Missing["NotAvailable"]
+    }
+  ]
+associationRuleKeyString[
+  CallNode[
+    LeafNode[Symbol, "Rule" | "RuleDelayed", _],
+    {
+      keyNode_,
+      _
+    },
+    _
+  ]
+] :=
+  Replace[
+    keyNode,
+    {
+      LeafNode[String, value_String, _] :> StringTrim[value, "\""],
+      LeafNode[Symbol, value_String, _] :> value,
+      _ :> Missing["NotAvailable"]
+    }
+  ]
+associationRuleKeyString[_] := Missing["NotAvailable"]
+
+
+extractContextStringsFromValue[node_] :=
+  DeleteDuplicates @ Cases[
+    node,
+    LeafNode[String, value_String, _] /; validContextStringQ[StringTrim[value, "\""]] :>
+      normalizeContextString[StringTrim[value, "\""]],
+    {0, Infinity}
+  ]
+
+
+extractSymbolNamesFromValue[node_] :=
+  DeleteDuplicates @ Cases[
+    node,
+    LeafNode[Symbol, value_String, _] /;
+      !StringContainsQ[value, "`"] &&
+      !MemberQ[{"List", "Association", "Rule", "RuleDelayed"}, value] :> value,
+    {0, Infinity}
+  ]
+
+
+parseAst[filePath_String, fileFormat_String] :=
+Module[{text, cst, agg},
+  text = Quiet[Import[filePath, "Text"]];
+  If[!StringQ[text],
+    Return[$Failed]
+  ];
+
+  cst = Quiet[CodeConcreteParse[text, "FileFormat" -> fileFormat]];
+  If[FailureQ[cst],
+    Return[$Failed]
+  ];
+
+  agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+  Quiet[CodeParser`Abstract`Abstract[agg]]
+]
+
+
+structuredPackageInitializeMetadata[ast_] :=
+Module[{initializeCalls, args, packageContext, optionsArg, hiddenImports},
+  initializeCalls = structuredPackageCallNodes[ast, "PackageInitialize"];
+  If[initializeCalls === {},
+    Return[<||>]
+  ];
+
+  args = callNodeArguments[First[initializeCalls]];
+  packageContext = If[Length[args] >= 1,
+    Replace[
+      stringNodeValue[args[[1]]],
+      {
+        value_String /; validContextStringQ[value] :> normalizeContextString[value],
+        _ :> Missing["NotAvailable"]
+      }
+    ],
+    Missing["NotAvailable"]
+  ];
+
+  optionsArg = If[Length[args] >= 2, args[[2]], Missing["NotAvailable"]];
+  hiddenImports = DeleteDuplicates @ Flatten @ Cases[
+    optionsArg,
+    rule : (BinaryNode[Rule, {_, _}, _] | CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, _}, _]) /;
+        associationRuleKeyString[rule] === "HiddenImports" :>
+      extractContextStringsFromValue[rule],
+    Infinity
+  ];
+
+  <|
+    "PackageContext" -> packageContext,
+    "HiddenImports" -> hiddenImports
+  |>
+]
+
+
+structuredPackagePackageContext[ast_] :=
+  Lookup[structuredPackageInitializeMetadata[ast], "PackageContext", Missing["NotAvailable"]]
+
+
+structuredPackageHiddenImports[ast_] :=
+  DeleteDuplicates @ Lookup[structuredPackageInitializeMetadata[ast], "HiddenImports", {}]
+
+
+structuredPackageImportRecords[ast_] :=
+Module[{calls, args, context, symbols, reaped},
+  calls = structuredPackageCallNodes[ast, "PackageImport"];
+  reaped = Reap[
+    Scan[
+      Function[{call},
+        args = callNodeArguments[call];
+        If[Length[args] >= 1,
+          context = Replace[
+            stringNodeValue[args[[1]]],
+            {
+              value_String /; validContextStringQ[value] :> normalizeContextString[value],
+              _ :> Missing["NotAvailable"]
+            }
+          ];
+          If[StringQ[context],
+            symbols = If[Length[args] >= 2,
+              extractSymbolNamesFromValue[args[[2]]],
+              {}
+            ];
+            Sow[<|
+              "context" -> context,
+              "symbols" -> symbols
+            |>]
+          ]
+        ]
+      ],
+      calls
+    ]
+  ];
+  If[Length[reaped[[2]]] == 0,
+    Return[{}]
+  ];
+
+  DeleteDuplicatesBy[
+    reaped[[2, 1]],
+    {Lookup[#, "context", Missing[]], Sort[Lookup[#, "symbols", {}]]} &
+  ]
+]
+
+
+structuredPackageDeclaredSymbols[ast_, uri_String, callName_String, visibility_String, context_String] :=
+Module[{calls},
+  If[!StringQ[context] || context === "",
+    Return[{}]
+  ];
+
+  calls = structuredPackageCallNodes[ast, callName];
+  Flatten[
+    Map[
+      Function[{call},
+        Map[
+          <|
+            "name" -> #,
+            "uri" -> uri,
+            "visibility" -> visibility,
+            "context" -> context,
+            "kind" -> "declaration",
+            "source" -> Replace[
+              call,
+              _[_, _, KeyValuePattern[Source -> src_]] :> src
+            ]
+          |> &,
+          DeleteDuplicates @ Flatten[extractSymbolNamesFromValue /@ callNodeArguments[call]]
+        ]
+      ],
+      calls
+    ],
+    1
+  ]
+]
+structuredPackageDeclaredSymbols[_, _, _, _, _] := {}
+
+
+structuredPackageContextPathParts[packageContext_String] :=
+  Select[StringSplit[StringTrim[packageContext, "`"], "`"], # =!= "" &]
+structuredPackageContextPathParts[_] := {}
+
+
+structuredPackagePrivateContext[filePath_String, packageContext_String, loaderPath_String] :=
+Module[{packageParts, relativeDir, relativeParts, contextParts},
+  If[!StringQ[filePath] || !StringQ[packageContext] || !StringQ[loaderPath],
+    Return[Missing["NotAvailable"]]
+  ];
+
+  packageParts = structuredPackageContextPathParts[packageContext];
+  relativeDir = Quiet @ Check[
+    FileNameDrop[DirectoryName[filePath], FileNameDepth[DirectoryName[loaderPath]]],
+    DirectoryName[filePath]
+  ];
+  relativeParts = Select[FileNameSplit[relativeDir], # =!= "" && # =!= "." &];
+  contextParts = Join[packageParts, relativeParts, {FileBaseName[filePath], "Private"}];
+  StringRiffle[contextParts, "`"] <> "`"
+]
+structuredPackagePrivateContext[_, _, _] := Missing["NotAvailable"]
+
+
+structuredPackageLoaderPath[root_String] :=
+Module[{cached, searchRoots, candidateForRoot},
+  cached = Lookup[$StructuredPackageLoaderCache, root, Missing["NotAvailable"]];
+  If[cached =!= Missing["NotAvailable"],
+    Return[cached]
+  ];
+
+  searchRoots = NestWhileList[DirectoryName, root, # =!= DirectoryName[#] &, 1, 4];
+
+  candidateForRoot[searchRoot_String] :=
+    Module[{candidates},
+      candidates = Select[
+        DeleteDuplicates @ Join[
+          FileNames["init.wl", searchRoot, 1],
+          FileNames["*.wl" | "*.m", searchRoot, 1]
+        ],
+        !shouldExcludeFile[#] &
+      ];
+      SelectFirst[
+        SortBy[candidates, {If[FileNameTake[#] === "init.wl", 0, 1] &, StringLength}],
+        StringQ[structuredPackagePackageContext @ parseAst[#, LSPServer`SourceFileFormat[#]]] &,
+        Missing["NotAvailable"]
+      ]
+    ];
+
+  cached = SelectFirst[
+    candidateForRoot /@ searchRoots,
+    StringQ,
+    Missing["NotAvailable"]
+  ];
+  $StructuredPackageLoaderCache[root] = cached;
+  cached
+]
+
+
+structuredPackageMetadata[filePath_String, ast_] :=
+Module[{packageContext, hiddenImports, importRecords, loaderPath, privateContext, packageScopeContext, loaderAst},
+  packageContext = structuredPackagePackageContext[ast];
+  hiddenImports = structuredPackageHiddenImports[ast];
+  importRecords = structuredPackageImportRecords[ast];
+  loaderPath = Missing["NotAvailable"];
+
+  If[!StringQ[packageContext],
+    loaderPath = structuredPackageLoaderPath[DirectoryName[filePath]];
+    If[StringQ[loaderPath],
+      loaderAst = parseAst[loaderPath, LSPServer`SourceFileFormat[loaderPath]];
+      packageContext = structuredPackagePackageContext[loaderAst];
+      hiddenImports = structuredPackageHiddenImports[loaderAst]
+    ]
+  ];
+
+  If[StringQ[packageContext] && !StringQ[loaderPath],
+    loaderPath = filePath
+  ];
+
+  privateContext = If[StringQ[packageContext] && StringQ[loaderPath],
+    structuredPackagePrivateContext[filePath, packageContext, loaderPath],
+    Missing["NotAvailable"]
+  ];
+  packageScopeContext = If[StringQ[packageContext], packageContext <> "PackageScope`", Missing["NotAvailable"]];
+
+  <|
+    "PackageContext" -> packageContext,
+    "PackageScopeContext" -> packageScopeContext,
+    "PrivateContext" -> privateContext,
+    "HiddenImports" -> hiddenImports,
+    "ImportRecords" -> importRecords,
+    "LoaderPath" -> loaderPath
+  |>
+]
+
+
+mergeStructuredDependencyData[fileDeps_List, contextLoads_List, structuredMetadata_Association] :=
+Module[{hiddenImports, mergedLoads},
+  hiddenImports = Lookup[structuredMetadata, "HiddenImports", {}];
+  mergedLoads = Join[
+    contextLoads,
+    Map[
+      <|"context" -> #, "source" -> {{1, 1}, {1, 1}}, "method" -> "PackageInitialize"|> &,
+      hiddenImports
+    ]
+  ];
+
+  <|
+    "Dependencies" -> DeleteDuplicates[Join[fileDeps, hiddenImports]],
+    "ContextLoads" -> DeleteDuplicatesBy[
+      mergedLoads,
+      {
+        Lookup[#, "method", None],
+        Lookup[#, "context", None],
+        Sort[Lookup[#, "symbols", {}]],
+        Lookup[#, "alias", None]
+      } &
+    ]
+  |>
+]
 
 
 (*
@@ -2826,22 +3778,16 @@ Module[{symbols},
   symbols
 ]
 
-
 (*
 Update the index for a single file when it changes
 *)
 UpdateFileIndex[uri_String, text_String] :=
 Catch[
-Module[{cst, agg, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbols, fileDeps,
-  contextLoads, explicitContextRefs, packageContext, fileAliases, fileFormat,
+Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
+  contextLoads, explicitContextRefs, structuredMetadata, mergedStructuredData,
+  packageContext, packageScopeContext, privateContext, fileAliases, fileFormat,
   isIPWL, ipwlAnnotations, sourceText},
 
-Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbols, fileDeps,
-  contextLoads, explicitContextRefs, packageContext, fileAliases},
-
-  (*
-  Skip files in excluded directories
-  *)
   filePath = StringReplace[uri, "file://" -> ""];
   If[shouldExcludeFile[filePath],
     If[$Debug2,
@@ -2862,16 +3808,13 @@ Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbol
   If[isIPWL,
     Module[{preprocessResult},
       preprocessResult = LSPServer`TypeWL`PreprocessIPWL[text];
-      sourceText    = preprocessResult[[1]];
+      sourceText = preprocessResult[[1]];
       ipwlAnnotations = preprocessResult[[2]];
     ],
-    sourceText      = text;
+    sourceText = text;
     ipwlAnnotations = {};
   ];
 
-  (*
-  Remove old entries for this file
-  *)
   RemoveFileFromIndex[uri];
 
   (*
@@ -2879,7 +3822,7 @@ Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbol
   Match the FileFormat option used by textDocument/concreteParse so the CST
   can be shared with the diagnostics pipeline and avoid a duplicate parse.
   *)
-  fileFormat = If[StringEndsQ[filePath, ".wls"], "Script", "Package"];
+  fileFormat = LSPServer`SourceFileFormat[filePath];
   cst = Quiet[CodeConcreteParse[sourceText, "FileFormat" -> fileFormat]];
 
   If[FailureQ[cst],
@@ -2894,7 +3837,6 @@ Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbol
   cst[[1]] = File;
 
   agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
-
   ast = Quiet[CodeParser`Abstract`Abstract[agg]];
 
   If[FailureQ[ast],
@@ -2902,48 +3844,41 @@ Module[{cst, ast, filePath, oldSymbols, definitions, usages, symbols, fileSymbol
     Throw[Null]
   ];
 
-  (*
-  Extract and add new entries
-  *)
   definitions = extractDefinitions[ast, cst, uri];
   usages = extractUsages[ast, uri];
   symbols = extractSymbolReferences[cst, uri];
-
-  (*
-  Extract package dependencies and load external ones
-  *)
   fileDeps = extractDependencies[ast];
+  contextLoads = extractContextLoads[ast];
+  explicitContextRefs = extractExplicitContextRefs[cst];
+  structuredMetadata = structuredPackageMetadata[filePath, ast];
+  mergedStructuredData = mergeStructuredDependencyData[fileDeps, contextLoads, structuredMetadata];
+  fileDeps = Lookup[mergedStructuredData, "Dependencies", fileDeps];
+  contextLoads = Lookup[mergedStructuredData, "ContextLoads", contextLoads];
+  packageContext = Lookup[structuredMetadata, "PackageContext", extractPackageContext[ast]];
+  packageScopeContext = Lookup[structuredMetadata, "PackageScopeContext", None];
+  privateContext = Lookup[structuredMetadata, "PrivateContext", None];
+  fileAliases = extractContextAliases[ast];
+
   If[Length[fileDeps] > 0,
     $PacletIndex["Dependencies"] = DeleteDuplicates[
       Join[$PacletIndex["Dependencies"], fileDeps]
     ];
-    loadExternalDependencies[fileDeps]
+    Scan[queueExternalPackageFiles, fileDeps]
   ];
 
-  (*
-  Extract detailed context loading information
-  *)
-  contextLoads = extractContextLoads[ast];
-
-  (*
-  Extract explicit context references (e.g., Developer`ToPackedArray)
-  *)
-  explicitContextRefs = extractExplicitContextRefs[cst];
-
-  (*
-  Extract the main package context if this is a package file
-  *)
-  packageContext = extractPackageContext[ast];
-
-  (*
-  Extract context alias mappings from Needs["Full`" -> "Alias`"] calls
-  *)
-  fileAliases = extractContextAliases[ast];
-
-  (*
-  Update the index using batch operations to avoid quadratic AppendTo
-  *)
-  addFileToIndex[uri, definitions, usages, symbols, fileDeps, contextLoads, explicitContextRefs, packageContext, fileAliases];
+  addFileToIndex[
+    uri,
+    definitions,
+    usages,
+    symbols,
+    fileDeps,
+    contextLoads,
+    explicitContextRefs,
+    packageContext,
+    packageScopeContext,
+    privateContext,
+    fileAliases
+  ];
 
   (*
   For .ipwl files: inject DeclaredType entries from pre-processor annotations into
@@ -3020,6 +3955,11 @@ Module[{fileEntry, fileSymbols},
   *)
   removeWorkspaceCacheEntry[uri];
 
+  If[AssociationQ[LSPServer`$ClosedFileDiagnosticsNotifications],
+    LSPServer`$ClosedFileDiagnosticsNotifications =
+      KeyDrop[LSPServer`$ClosedFileDiagnosticsNotifications, uri]
+  ];
+
   (*
   Remove definitions and references from this file
   *)
@@ -3094,6 +4034,83 @@ GetSymbolDefinitions[symbolName_String] :=
 
 
 (*
+Get the definitions for a symbol that are visible from a specific file.
+This prefers current-file definitions, then file-visible SPF contexts, and
+respects an explicit context hint when one is present in the source.
+*)
+GetVisibleSymbolDefinitions[uri_String, symbolName_String, preferredContext_:None] :=
+Module[{defs, resolvedPreferredContext, sameFileDefs, fileData, contextLoads,
+  byNameImportContexts, byNameImportContextSet, bareContextSet,
+  packageContext, packageScopeContext, privateContext, visibleRank, visibleDefs},
+
+  defs = GetSymbolDefinitions[symbolName];
+  If[!ListQ[defs] || Length[defs] === 0,
+    Return[{}]
+  ];
+
+  resolvedPreferredContext = Replace[preferredContext,
+    {
+      ctx_String :> Lookup[$PacletIndex["ContextAliases"], ctx, ctx],
+      _ :> None
+    }
+  ];
+
+  If[StringQ[resolvedPreferredContext],
+    Return[Select[defs, Lookup[#, "context", None] === resolvedPreferredContext &]]
+  ];
+
+  sameFileDefs = Select[defs, Lookup[#, "uri", None] === uri &];
+  If[Length[sameFileDefs] > 0,
+    Return[sameFileDefs]
+  ];
+
+  fileData = Lookup[$PacletIndex["Files"], uri, <||>];
+  If[fileData === <||>,
+    Return[defs]
+  ];
+
+  contextLoads = Lookup[fileData, "ContextLoads", {}];
+  byNameImportContexts = DeleteDuplicates @ Select[
+    Cases[
+      contextLoads,
+      rec_ /; MemberQ[Lookup[rec, "symbols", {}], symbolName] :>
+        Lookup[rec, "context", Missing["NotAvailable"]]
+    ],
+    StringQ
+  ];
+  byNameImportContextSet = Association[Thread[byNameImportContexts -> True]];
+  bareContextSet = Association[Thread[GetFileBareNameContexts[uri] -> True]];
+  packageContext = Lookup[fileData, "PackageContext", None];
+  packageScopeContext = Lookup[fileData, "PackageScopeContext", None];
+  privateContext = Lookup[fileData, "PrivateContext", None];
+
+  visibleRank[def_] :=
+    Module[{ctx},
+      ctx = Lookup[def, "context", None];
+      Which[
+        Lookup[def, "uri", None] === uri, 0,
+        StringQ[ctx] && KeyExistsQ[byNameImportContextSet, ctx], 1,
+        StringQ[ctx] && ctx === privateContext, 2,
+        StringQ[ctx] && ctx === packageScopeContext, 3,
+        StringQ[ctx] && ctx === packageContext, 4,
+        StringQ[ctx] && KeyExistsQ[bareContextSet, ctx], 5,
+        True, 6
+      ]
+    ];
+
+  visibleDefs = Select[defs, visibleRank[#] < 6 &];
+  If[Length[visibleDefs] > 0,
+    SortBy[visibleDefs, visibleRank],
+    defs
+  ]
+]
+
+
+GetSymbolOptionNames[symbolName_String] :=
+  getIndexedSymbolOptionNames[symbolName]
+
+
+(*
 Get all references for a symbol
 *)
 GetSymbolReferences[symbolName_String] :=
@@ -3119,7 +4136,14 @@ Module[{allSymbols, filtered},
     Module[{symData, defs, kind, usage},
       symData = $PacletIndex["Symbols", sym];
       defs = symData["Definitions"];
-      kind = If[Length[defs] > 0, defs[[1]]["kind"], "unknown"];
+      kind = Which[
+        AnyTrue[defs, Lookup[#, "kind", None] === "function" &], "function",
+        AnyTrue[defs, Lookup[#, "kind", None] === "constant" &], "constant",
+        AnyTrue[defs, Lookup[#, "kind", None] === "option" &], "option",
+        AnyTrue[defs, Lookup[#, "kind", None] === "attribute" &], "attribute",
+        Length[defs] > 0, defs[[1]]["kind"],
+        True, "unknown"
+      ];
       usage = If[Length[symData["Usages"]] > 0, symData["Usages"][[1]], None];
 
       <|
@@ -3139,9 +4163,54 @@ Get all paclet symbols (those defined in the workspace)
 *)
 GetPacletSymbols[] :=
 Module[{},
+  If[!StringQ[$WorkspaceRoot],
+    Return[Select[
+      Keys[$PacletIndex["Symbols"]],
+      Length[Lookup[$PacletIndex["Symbols", #], "Definitions", {}]] > 0 &
+    ]]
+  ];
   Select[
     Keys[$PacletIndex["Symbols"]],
-    Length[$PacletIndex["Symbols", #, "Definitions"]] > 0 &
+    IsWorkspaceSymbol[#] &
+  ]
+]
+
+
+(* Check whether a symbol has at least one definition in the workspace root. *)
+IsWorkspaceSymbol[symbolName_String] :=
+Module[{defs},
+  If[!KeyExistsQ[$PacletIndex["Symbols"], symbolName],
+    Return[False]
+  ];
+
+  defs = Lookup[$PacletIndex["Symbols", symbolName], "Definitions", {}];
+  AnyTrue[defs, isWorkspaceURI[Lookup[#, "uri", ""]] &]
+]
+
+
+(* Check whether a symbol has at least one indexed definition outside the workspace root. *)
+IsIndexedDependencySymbol[symbolName_String] :=
+Module[{defs},
+  If[!KeyExistsQ[$PacletIndex["Symbols"], symbolName],
+    Return[False]
+  ];
+
+  defs = Lookup[$PacletIndex["Symbols", symbolName], "Definitions", {}];
+  AnyTrue[defs,
+    StringQ[Lookup[#, "uri", ""]] && !isWorkspaceURI[Lookup[#, "uri", ""]] &
+  ]
+]
+
+
+(* Get all indexed symbol short names that come from dependency files. *)
+GetIndexedDependencySymbols[] :=
+Module[{},
+  If[!StringQ[$WorkspaceRoot],
+    Return[{}]
+  ];
+  Select[
+    Keys[$PacletIndex["Symbols"]],
+    IsIndexedDependencySymbol[#] &
   ]
 ]
 
@@ -3152,21 +4221,32 @@ Used by UndefinedSymbol diagnostics to suppress false positives for symbols
 from BeginPackage/Needs dependencies that are available at runtime.
 *)
 GetLoadedDependencySymbols[uri_String] :=
-Module[{fileData, contextLoads, depContexts, kernelContexts, loadedCtxs},
+Module[{fileData, contextLoads, depContexts, explicitImports, kernelContexts, loadedCtxs,
+  indexedSymbols, kernelSymbols},
   fileData = Lookup[$PacletIndex["Files"], uri, <||>];
   If[fileData === <||>, Return[{}]];
 
   contextLoads = Lookup[fileData, "ContextLoads", {}];
-  depContexts = DeleteDuplicates[Cases[#["context"]& /@ contextLoads, _String]];
+  depContexts = DeleteDuplicates @ Lookup[
+    Select[contextLoads, Lookup[#, "symbols", {}] === {} &],
+    "context",
+    {}
+  ];
+  explicitImports = DeleteDuplicates @ Flatten @ Lookup[
+    Select[contextLoads, Lookup[#, "symbols", {}] =!= {} &],
+    "symbols",
+    {}
+  ];
 
   (* Only include contexts actually present in the kernel — i.e. successfully loaded *)
   kernelContexts = GetKernelContextsCached[];
   loadedCtxs = Select[depContexts, MemberQ[kernelContexts, #]&];
-
-  (* Return short (unqualified) names of all symbols from those contexts *)
-  DeleteDuplicates @ Flatten[
+  indexedSymbols = DeleteDuplicates @ Flatten[Lookup[$PacletIndex["Contexts"], depContexts, {}]];
+  kernelSymbols = DeleteDuplicates @ Flatten[
     Function[{ctx}, StringReplace[Names[ctx <> "*"], ctx -> ""]] /@ loadedCtxs
-  ]
+  ];
+
+  DeleteDuplicates@Join[explicitImports, indexedSymbols, kernelSymbols]
 ]
 
 
@@ -3222,6 +4302,17 @@ Module[{allSymbols},
 Get the context for a symbol from the paclet index
 Returns the context string or None if not found
 *)
+GetSymbolContext[uri_String, symbolName_String, preferredContext_:None] :=
+Module[{defs},
+  defs = GetVisibleSymbolDefinitions[uri, symbolName, preferredContext];
+
+  If[Length[defs] === 0,
+    None,
+    Replace[defs[[1]]["context"], _Missing -> None]
+  ]
+]
+
+
 GetSymbolContext[symbolName_String] :=
 Module[{symData, defs},
   symData = Lookup[$PacletIndex["Symbols"], symbolName, Null];
@@ -3379,32 +4470,57 @@ Module[{ctx},
   $kernelContextsCache
 ]
 
+GetFileBareNameContexts[uri_String] :=
+Module[{fileData, contextLoads, packageContext, packageScopeContext, privateContext, bareContexts},
+
+  fileData = Lookup[$PacletIndex["Files"], uri, <||>];
+  bareContexts = GetKernelContextsCached[];
+
+  If[fileData === <||>,
+    Return[DeleteDuplicates[bareContexts]]
+  ];
+
+  packageContext = Lookup[fileData, "PackageContext", None];
+  packageScopeContext = Lookup[fileData, "PackageScopeContext", None];
+  privateContext = Lookup[fileData, "PrivateContext", None];
+  If[StringQ[packageContext],
+    AppendTo[bareContexts, packageContext]
+  ];
+  If[StringQ[packageScopeContext],
+    AppendTo[bareContexts, packageScopeContext]
+  ];
+  If[StringQ[privateContext],
+    AppendTo[bareContexts, privateContext],
+    If[StringQ[packageContext],
+      AppendTo[bareContexts, packageContext <> "Private`"]
+    ]
+  ];
+
+  contextLoads = Lookup[fileData, "ContextLoads", {}];
+  bareContexts = Join[
+    bareContexts,
+    Lookup[
+      Select[contextLoads, Lookup[#, "symbols", {}] === {} &],
+      "context",
+      {}
+    ]
+  ];
+
+  DeleteDuplicates[bareContexts]
+]
+
 GetFileLoadedContexts[uri_String] :=
-Module[{fileData, contextLoads, packageContext, loadedContexts, workspaceContexts, kernelContexts},
+Module[{fileData, contextLoads, loadedContexts, workspaceContexts},
 
   fileData = Lookup[$PacletIndex["Files"], uri, <||>];
 
-  (*
-  Get all contexts known to the kernel (cached).
-  *)
-  kernelContexts = GetKernelContextsCached[];
-
   If[fileData === <||>,
-    Return[DeleteDuplicates[kernelContexts]]
+    Return[DeleteDuplicates[GetKernelContextsCached[]]]
   ];
 
-  (* Start with all kernel-known contexts *)
-  loadedContexts = kernelContexts;
+  loadedContexts = GetFileBareNameContexts[uri];
 
-  (* Add the file's own package context if it exists *)
-  packageContext = Lookup[fileData, "PackageContext", None];
-  If[StringQ[packageContext],
-    AppendTo[loadedContexts, packageContext];
-    (* Also add the Private subcontext *)
-    AppendTo[loadedContexts, packageContext <> "Private`"]
-  ];
-
-  (* Add contexts from Needs/Get/BeginPackage *)
+  (* Add contexts from Needs/Get/BeginPackage/PackageImport, including by-name imports. *)
   contextLoads = Lookup[fileData, "ContextLoads", {}];
   loadedContexts = Join[loadedContexts, #["context"]& /@ contextLoads];
 

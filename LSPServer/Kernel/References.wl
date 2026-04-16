@@ -17,13 +17,13 @@ Module[{params, id, doc, uri, res},
 
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-  
+
     Throw[{<| "method" -> "textDocument/referencesFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -31,7 +31,7 @@ Module[{params, id, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/referencesFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
@@ -51,7 +51,7 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/referencesFencep
 Catch[
 Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entry, locations,
   localLocations, pacletReferences, pacletLocations, includeDeclaration, context},
-  
+
   log[1, "textDocument/referencesFencepost: enter"];
 
   id = content["id"];
@@ -61,16 +61,16 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
     $CancelMap[id] =.;
 
     log[2, "$CancelMap: ", $CancelMap];
-  
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
@@ -79,7 +79,7 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
   pos = params["position"];
   line = pos["line"];
   char = pos["character"];
-  
+
   (*
   Check if we should include the declaration
   *)
@@ -93,12 +93,16 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
   char+=1;
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
-  cst = entry["CST"];
+
+  cst = Lookup[entry, "CST", Null];
+
+  If[cst === Null || MissingQ[cst],
+    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+  ];
 
   If[FailureQ[cst],
     Throw[cst]
@@ -116,7 +120,7 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
   sym = cases[[1]];
 
   name = sym["String"];
-  
+
   (*
   Remove context prefix for matching
   *)
@@ -137,24 +141,24 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
         "end" -> <| "line" -> #[[2, 1]], "character" -> #[[2, 2]] |>
       |>
     |>&[Map[Max[#, 0]&, src-1, {2}]]] /@ srcs;
-  
+
   log[1, "textDocument/referencesFencepost: exit"];
 
   (*
   Find references across the paclet (workspace)
   *)
   pacletLocations = {};
-  
+
   If[StringQ[$WorkspaceRootPath],
     (*
     Get references from paclet index
     *)
     pacletReferences = GetSymbolReferences[name];
-    
+
     If[$Debug2,
       log["paclet references for ", name, ": ", Length[pacletReferences]]
     ];
-    
+
     (*
     Convert to LSP locations, excluding current file (already handled above)
     *)
@@ -168,7 +172,7 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
       |>,
       {ref, Select[pacletReferences, #["uri"] =!= uri &]}
     ];
-    
+
     (*
     Optionally include definitions as references
     *)
@@ -194,7 +198,7 @@ Module[{id, params, doc, uri, cst, pos, line, char, cases, sym, name, srcs, entr
   Combine local and paclet-wide references
   *)
   locations = Join[localLocations, pacletLocations];
-  
+
   (*
   Remove duplicates
   *)

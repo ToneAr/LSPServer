@@ -95,3 +95,26 @@ VerificationTest[
   },
   TestID -> "IDE-Test-ClosureScope-ModuleLocalInt"
 ]
+
+
+(* ── Test 5: Case E – call-shaped local assignment: expect _List ── *)
+(* Line 48 (1-based) = LSP line 47 (0-based). "  sources" -> sources at character 2. *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 5,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 47, "character" -> 2|>|>
+    |>
+  ]
+  ,
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 5,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `_List`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-ClosureScope-CallShapedLocalList"
+]

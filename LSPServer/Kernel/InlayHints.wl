@@ -226,7 +226,7 @@ Handles:
 - Symbols with explicit context prefix (e.g., Developer`ToPackedArray)
 - Symbols from loaded packages (checks actual Context[] at runtime)
 *)
-getSymbolContext[name_String] :=
+getSymbolContext[uri_String, name_String] :=
 Module[{explicitContext, symContext, deps},
 
   (*
@@ -243,19 +243,18 @@ Module[{explicitContext, symContext, deps},
   If[KeyExistsQ[$systemSymbolsSet, name],
     Return[None]
   ];
-  
+
   (*
   Check if symbol is defined in the paclet/workspace
   *)
   If[KeyExistsQ[$PacletIndex["Symbols"], name] &&
      Length[$PacletIndex["Symbols", name, "Definitions"]] > 0,
-    Module[{defs, ctx},
-      defs = $PacletIndex["Symbols", name, "Definitions"];
-      ctx = defs[[1]]["context"];
+    Module[{ctx},
+      ctx = GetSymbolContext[uri, name];
       Return[If[StringQ[ctx], ctx, None]]
     ]
   ];
-  
+
   (*
   Check if symbol is from a dependency package.
   Use Context[] to check the actual context of the symbol if it exists.
@@ -272,7 +271,7 @@ Module[{explicitContext, symContext, deps},
       ],
       {Context::notfound}
     ];
-    
+
     If[StringQ[symContext] && symContext =!= "Global`" && symContext =!= "System`",
       (* Check if symbol's context matches or is a subcontext of a dependency *)
       If[AnyTrue[deps, StringStartsQ[symContext, #] || symContext === # &],
@@ -280,14 +279,14 @@ Module[{explicitContext, symContext, deps},
       ]
     ]
   ];
-  
+
   (*
   Global variables starting with $ - no hint needed
   *)
   If[StringStartsQ[name, "$"],
     Return[None]
   ];
-  
+
   (* Unknown symbol - no hint *)
   None
 ]
@@ -462,7 +461,7 @@ Module[{id, params, doc, uri, entry, ast, cst, range, hints,
   (*
   2. Context hints for symbols
   *)
-  hints = Join[hints, getContextHints[cst, {startLine, endLine}]];
+  hints = Join[hints, getContextHints[uri, cst, {startLine, endLine}]];
 
   (*
   3. Return type hints for function calls
@@ -552,7 +551,7 @@ Module[{calls, hints},
 (*
 Get context hints for symbols (show context prefix)
 *)
-getContextHints[cst_, {startLine_, endLine_}] :=
+getContextHints[uri_String, cst_, {startLine_, endLine_}] :=
 Module[{symbols, hints},
 
   If[cst === Null || FailureQ[cst],
@@ -573,7 +572,7 @@ Module[{symbols, hints},
     Module[{name, src, ctx},
       name = sym[[2]];
       src = sym[[3, Key[Source]]];
-      ctx = getSymbolContext[name];
+      ctx = getSymbolContext[uri, name];
 
       If[ctx === None || ctx === "Global`",
         Nothing
@@ -628,7 +627,7 @@ Module[{calls, hints},
       retStr = Module[{allDefs, found},
         found = None;
         If[KeyExistsQ[$PacletIndex["Symbols"], name],
-          allDefs = $PacletIndex["Symbols", name, "Definitions"];
+          allDefs = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, name];
           (* Prefer current-file definitions *)
           Catch[
             Scan[

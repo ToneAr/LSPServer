@@ -20,9 +20,9 @@ $MinimumRecommendedCodeToolsVersionString = "1.2"
 
 $MinimumRecommendedKernelVersionString = "12.1"
 
-(* 
+(*
   Paclet version mismatch can be skipped if LSP and CodeTools paclet version match with the
-  following versions 
+  following versions
 *)
 $SkipLSPCheckVersionString = "1.11"
 $SkipCodeToolsCheckVersionString = "1.10"
@@ -92,7 +92,7 @@ Module[{cwd, lspServerVersion, codeParserVersion,
   Block[{$WorkaroundBug410895},
 
     $WorkaroundBug410895 = False;
-    
+
     res = doStage1[command, cwd];
 
     If[FailureQ[res],
@@ -143,14 +143,14 @@ Module[{serverKernel, miniRun, miniCommand, proc, str, res, cases,
     Print["ERROR: StartProcess failed"];
     Throw[proc]
   ];
- 
+
   $timeoutExpr =.;
   $timeout = False;
-  
+
   (*
   Only kill process here
   Do not Print anything, Print output in a task will go to Messages Window
- 
+
   in earlier versions, $timeoutExpr evaluates immediately inside of ScheduledTask
   so use a symbol with no definition, submit, then define
   *)
@@ -160,9 +160,9 @@ Module[{serverKernel, miniRun, miniCommand, proc, str, res, cases,
     Print["ERROR: Internal problem with SessionSubmit: ", $timeoutTask];
     Throw[$timeoutTask]
   ];
-  
+
   $timeoutExpr := ($timeout = True; KillProcess[proc]);
-  
+
   Print["Waiting maximum of 30 seconds for any hangs."];
 
   str = "";
@@ -189,7 +189,7 @@ Module[{serverKernel, miniRun, miniCommand, proc, str, res, cases,
   If[FailureQ[str],
     Throw[str]
   ];
- 
+
   If[str != "3.14159\r\n",
 
     Print["Read from Mini Server kernel:"];
@@ -237,7 +237,7 @@ Module[{serverKernel, miniRun, miniCommand, proc, str, res, cases,
   ];
 
   case = cases[[1]];
-      
+
   Which[
     StringMatchQ[case, "Test410895[(*\"*)]"],
       Print["double-quotes are kept; NO work-around needed"];
@@ -288,7 +288,7 @@ Module[{serverKernel, miniRun, miniCommand, proc, str, res, cases,
   ];
 
   $timeoutTask =.;
-  
+
   code = ProcessInformation[proc, "ExitCode"];
 
   diagnoseExitCode[code];
@@ -357,11 +357,11 @@ Module[{command, runPosition, run, startServerString, startServer,
     startServerString = StringCases[run, ss:("StartServer[" ~~ ___ ~~ "]" ~~ EndOfString) :> ss];
     If[Length[startServerString] == 1,
       startServerString = startServerString[[1]];
-      
+
       Block[{StartServer},
         startServer = ToExpression[startServerString];
         startServerArgs = startServer /. StartServer[logDir_String : "", opts:OptionsPattern[]] :> {logDir, {opts}};
-        
+
         If[(Global`CommunicationMethod /. startServerArgs[[2]]) == "Socket",
           Print["ERROR: CommunicationMethod \"Socket\" not implemented for RunServerDiagnostic", run];
           Throw[$Failed]
@@ -375,7 +375,7 @@ Module[{command, runPosition, run, startServerString, startServer,
       work around bug 410895, all quotes are stripped from StartProcess on Windows
 
       this was fixed in 13.0
-      
+
       convert e.g., Print["Foo`"] into ToExpression[FromCharacterCode[{80, 114, 105, 110, 116, 91, 34, 70, 111, 111, 96, 34, 93}]]
 
       evaluates the same expr, except that the only characters passed on command-line are letters, digits, space, comma, [] and {}
@@ -428,7 +428,7 @@ Module[{command, runPosition, run, startServerString, startServer,
     Print["ERROR: Internal problem with SessionSubmit: ", $timeoutTask];
     Throw[$timeoutTask]
   ];
-  
+
   $timeoutExpr := ($timeout = True; KillProcess[proc]);
 
   Print["Waiting maximum of 30 seconds for any hangs."];
@@ -452,7 +452,7 @@ Module[{command, runPosition, run, startServerString, startServer,
 
   Print["Writing initialize message..."];
   res = binaryWrite[proc, "Content-Length: " <> ToString[len] <> "\r\n\r\n"];
- 
+
   If[FailureQ[res],
     Throw[res]
   ];
@@ -533,7 +533,7 @@ Module[{command, runPosition, run, startServerString, startServer,
   If[FailureQ[res],
     Throw[res]
   ];
-  
+
   Pause[0.2];
 
   If[ProcessStatus[proc] != "Running",
@@ -658,7 +658,7 @@ Module[{command, runPosition, run, startServerString, startServer,
   If[FailureQ[str],
     Throw[str]
   ];
- 
+
   If[(cases = StringCases[str, RegularExpression["(?s)^Content-Length: (\\d+)\r\n\r\n(.*)$"] :> {"$1", "$2"}]) == {},
 
     Print["Read from Language Server kernel:"];
@@ -689,7 +689,7 @@ Module[{command, runPosition, run, startServerString, startServer,
     exitHard[proc, "ERROR: Bad Content-Length; exiting hard"];
     Throw[$Failed]
   ];
-  
+
   str = StringDrop[contentStr, len];
   contentStr = StringTake[contentStr, len];
 
@@ -716,11 +716,16 @@ Module[{command, runPosition, run, startServerString, startServer,
     Throw[res]
   ];
 
+  (* The stdio transport keeps a background reader thread alive until the
+     parent closes the pipe. Close stdin after sending exit so the server can
+     finish shutting down and the diagnostic does not report a false failure. *)
+  Quiet[Close[ProcessConnection[proc, "StandardInput"]], {Close::stream}];
+
   Print["waiting 2 seconds for exit..."];
   Pause[2.0];
 
   If[ProcessStatus[proc] != "Finished",
-    
+
     Print["WARN: Language Server kernel is not yet finished; waiting 2 more seconds..."];
     Pause[2.0];
 
@@ -828,18 +833,18 @@ Module[{},
       ToString[$MinimumRecommendedCodeToolsVersionString] <> ". Actual CodeFormatter version is: " <> codeFormatterVersionStr];
   ];
 
-  (* 
+  (*
       Currently, CodeParser, CodeInspector, and CodeFormatter are at version 1.10 and there is no plan to upgrade
       these. But LSPServer latest version is 1.11 and under active development.
 
-      So, we need to check for version mismatch between LSPServer and these paclets only if LSP version is less than 
+      So, we need to check for version mismatch between LSPServer and these paclets only if LSP version is less than
       $SkipLSPCheckVersionString (1.11).
   *)
 
   If[versionGreaterEqual[lspServerVersionStr, $SkipLSPCheckVersionString] &&
     (
-      majorMinorVersionEqual[codeParserVersionStr, $SkipCodeToolsCheckVersionString] && 
-      majorMinorVersionEqual[codeInspectorVersionStr, $SkipCodeToolsCheckVersionString] && 
+      majorMinorVersionEqual[codeParserVersionStr, $SkipCodeToolsCheckVersionString] &&
+      majorMinorVersionEqual[codeInspectorVersionStr, $SkipCodeToolsCheckVersionString] &&
       majorMinorVersionEqual[codeFormatterVersionStr, $SkipCodeToolsCheckVersionString]
     )
   ,
@@ -902,7 +907,7 @@ Module[{},
     (*
     Was:
     DateObject[{dateStr, {"DayName", " ", "Day", " ", "MonthName", " ", "Year", " ", "Hour", ":", "Minute", ":", "Second"}}];
-    
+
     but as discussed here:
     https://github.com/WolframResearch/vscode-wolfram/issues/2
 
@@ -919,7 +924,7 @@ Module[{},
 
 
 
-handleContent[content:KeyValuePattern["method" -> "diagnostics"]] :=
+LSPServer`handleContent[content:KeyValuePattern["method" -> "diagnostics"]] :=
 Catch[
 Module[{id, kernelVersionStr, commandLine, directory,
   maxLicenseProcessesStr, lspServerVersionStr, codeParserVersionStr,
@@ -938,7 +943,7 @@ Module[{id, kernelVersionStr, commandLine, directory,
   directory = Directory[];
 
   (*
-  handle when $MaxLicenseProcesses is the symbol Infinity and cannot be converted to JSON 
+  handle when $MaxLicenseProcesses is the symbol Infinity and cannot be converted to JSON
   *)
   maxLicenseProcessesStr = ToString[$MaxLicenseProcesses];
 
@@ -991,7 +996,7 @@ Module[{code, res},
     Print[msg];
 
     code = ProcessInformation[proc, "ExitCode"];
-    
+
     diagnoseExitCode[code];
 
     Throw[Null]
@@ -1016,13 +1021,13 @@ Module[{code, res},
   reportStdErr[proc];
 
   If[ProcessStatus[proc] == "Finished",
-    
+
     Print["Process already finished."];
 
     code = ProcessInformation[proc, "ExitCode"];
 
     diagnoseExitCode[code];
-    
+
     Throw[Null]
   ];
 
@@ -1030,7 +1035,7 @@ Module[{code, res},
   KillProcess[proc];
 
   code = ProcessInformation[proc, "ExitCode"];
-  
+
   diagnoseExitCode[code];
 ]]
 
@@ -1046,7 +1051,7 @@ Module[{stdOut, arr, str, time, diff, exceeded, oneSecond},
 
   While[True,
     Pause[0.1];
-    
+
     arr = Quiet[ReadByteArray[stdOut, EndOfBuffer], {ReadByteArray::openx}];
 
     diff = (Now - time);
@@ -1172,49 +1177,49 @@ Module[{str, stdOut, bytes},
     exitHard[proc, "ERROR: Unexpected EndOfFile; exiting hard"];
     Throw[$Failed]
   ];
-  
+
   If[MatchQ[bytes, _ReadByteArray],
     exitHard[proc, "ERROR: ReadByteArray returned unevaluated; exiting hard"];
     Throw[$Failed]
   ];
-  
+
   While[bytes === {} && str == "",
 
     Pause[0.1];
-    
+
     bytes = Quiet[ReadByteArray[stdOut, EndOfBuffer], {ReadByteArray::openx}];
-    
+
     If[bytes === EndOfFile,
       exitHard[proc, "ERROR: Unexpected EndOfFile; exiting hard"];
       Throw[$Failed]
     ];
-    
+
     If[MatchQ[bytes, _ReadByteArray],
       exitHard[proc, "ERROR: ReadByteArray returned unevaluated; exiting hard"];
       Throw[$Failed]
     ];
   ];
-  
+
   str = str <> ByteArrayToString[bytes];
-  
+
   (*
   Do one more read after sufficient time
   *)
-  
+
   Pause[0.2];
-  
+
   bytes = Quiet[ReadByteArray[stdOut, EndOfBuffer], {ReadByteArray::openx}];
-  
+
   If[bytes === EndOfFile,
     exitHard[proc, "ERROR: Unexpected EndOfFile; exiting hard"];
     Throw[$Failed]
   ];
-  
+
   If[MatchQ[bytes, _ReadByteArray],
     exitHard[proc, "ERROR: ReadByteArray returned unevaluated; exiting hard"];
     Throw[$Failed]
   ];
-  
+
   str = str <> ByteArrayToString[bytes];
 
   str
@@ -1228,7 +1233,7 @@ Module[{stdIn, res},
   stdIn = ProcessConnection[proc, "StandardInput"];
 
   res = Quiet[BinaryWrite[stdIn, input], {BinaryWrite::openx, BinaryWrite::errfile}];
-  
+
   If[FailureQ[res],
     exitHard[proc, "ERROR: BinaryWrite failed; exiting hard"];
     Throw[$Failed]
@@ -1251,11 +1256,11 @@ Module[{startupError, e, line},
   While[True,
 
     line = ReadLineFromStdIn[];
- 
+
     e = ToExpression[line];
- 
+
     line = ToString[e];
- 
+
     WriteLineToStdOut[line];
   ]
 ]]
@@ -1265,7 +1270,7 @@ Module[{startupError, e, line},
 (*
 convert "0.9" to {0, 9}
 *)
-convertVersionString[s_String] := 
+convertVersionString[s_String] :=
   FromDigits /@ StringSplit[s, ".", All]
 
 

@@ -4,22 +4,17 @@ uri = LocalObjects`PathToURI[FileNameJoin[{DirectoryName[$TestFileName], "Delaye
 
 (* Function with multiple definition *)
 VerificationTest[
-  LSPServer`handleContent[
-    <|"method" -> "textDocument/hoverFencepost", 
-      "id" -> 1, 
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 3, "character" -> 0|>|>
-    |>
-  ]
-  ,
-  {
-    <|"jsonrpc" -> "2.0", "id" -> 1, 
-    "result" -> <|"contents" -> <|
-      "kind" -> "markdown", 
-      "value" -> "f[x] has multiple definition.\n\n**Definitions**\n\n```wolfram\nf[x_]\nf[x_String]\nf[x_String] /; x\nf[x_Number]\n```"
-        |>
+  Module[{result, value},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/hoverFencepost",
+        "id" -> 1,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 3, "character" -> 0|>|>
       |>
-    |>
-  },
+    ];
+    value = result[[1]]["result"]["contents"]["value"];
+    value == "f[x] has multiple definition.\n\n**Definitions**\n\n```wolfram\nf[x_]\nf[x_String]\nf[x_String] /; x\nf[x_Number]\n```\n\n---\n**Doc Comments**\n\n**Parameters:** `_String`  \n**Returns:** `_String`\n\n**Returns:** `_String`\n\n**Parameters:** `_Number`"
+  ],
+  True,
   TestID -> "IDE-Test-SetDelayed-Multiple-Definition"
 ]
 
@@ -27,16 +22,16 @@ VerificationTest[
 (* Hovering over q on p[q[x_]] ^:= pq[x] *)
 VerificationTest[
   LSPServer`handleContent[
-    <|"method" -> "textDocument/hoverFencepost", 
-      "id" -> 2, 
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 2,
       "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 10, "character" -> 2|>|>
     |>
   ]
   ,
   {
-    <|"jsonrpc" -> "2.0", "id" -> 2, 
+    <|"jsonrpc" -> "2.0", "id" -> 2,
       "result" -> <|"contents" -> <|
-        "kind" -> "markdown", 
+        "kind" -> "markdown",
         "value" -> "**Definitions**\n\n```wolfram\np[q[x_]]\n```"
         |>
       |>
@@ -49,8 +44,8 @@ VerificationTest[
 (* Hovering over p where p[q[x_]] ^:= pq[x] *)
 VerificationTest[
   LSPServer`handleContent[
-    <|"method" -> "textDocument/hoverFencepost", 
-      "id" -> 3, 
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 3,
       "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 12, "character" -> 0|>|>
     |>
   ]
@@ -65,16 +60,16 @@ VerificationTest[
 (* Hovering over g where g/:f2[g[x_]]:=f2g[x] *)
 VerificationTest[
   LSPServer`handleContent[
-    <|"method" -> "textDocument/hoverFencepost", 
-      "id" -> 4, 
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 4,
       "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 16, "character" -> 0|>|>
     |>
   ]
   ,
   {
-    <|"jsonrpc" -> "2.0", "id" -> 4, 
-      "result" -> <|"contents" -> 
-          <|"kind" -> "markdown", 
+    <|"jsonrpc" -> "2.0", "id" -> 4,
+      "result" -> <|"contents" ->
+          <|"kind" -> "markdown",
             "value" -> "**Definitions**\n\n```wolfram\nf2[g[x_]]\n```"
           |>
       |>
@@ -87,9 +82,9 @@ TestID -> "IDE-Test-TagSetDelayed-Definition-TaggedFunction"
 (* Hovering over f2 where g/:f2[g[x_]]:=f2g[x] *)
 VerificationTest[
   LSPServer`handleContent[
-    <|"method" -> "textDocument/hoverFencepost", 
-      "id" -> 5, 
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 18, "character" -> 1|>|>  
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 5,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 18, "character" -> 1|>|>
     |>
   ]
   ,
@@ -102,21 +97,16 @@ VerificationTest[
 
 (* Function defined with arg with a specific type *)
 VerificationTest[
-  LSPServer`handleContent[
-    <|"method" -> "textDocument/hoverFencepost", 
-      "id" -> 6, 
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 25, "character" -> 3|>|>
-    |>
-  ]
-  ,
-  {
-    <|"jsonrpc" -> "2.0", "id" -> 6, 
-      "result" -> <|"contents" -> <|
-        "kind" -> "markdown", 
-        "value" -> "**Definitions**\n\n```wolfram\naddTwo[a_Integer, b_]\n```"
-        |>
+  Module[{result, value},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/hoverFencepost",
+        "id" -> 6,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 25, "character" -> 3|>|>
       |>
-    |>
-  },
+    ];
+    value = result[[1]]["result"]["contents"]["value"];
+    value == "**Definitions**\n\n```wolfram\naddTwo[a_Integer, b_]\n```\n\n---\n**Doc Comments**\n\n**Parameters:** `_Integer`  \n**Returns:** `_Integer`"
+  ],
+  True,
   TestID -> "IDE-Test-SetDelayed-ConstrainedArgs"
 ]

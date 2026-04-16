@@ -12,15 +12,15 @@ Needs["CodeParser`Utils`"]
 (*
 Find the definition location for an external symbol (from a loaded paclet).
 Returns a list of location associations, or {} if not found.
-
+    pacletDefinitions = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, symbolName, preferredContext];
 This searches:
 1. The paclet's Kernel directory for the symbol definition
 2. Uses the symbol's context to find the right paclet
 *)
 findExternalSymbolDefinition[symbolName_String] :=
-Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles, 
+Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles,
         locations, text, cst, ast, defs, uri},
-  
+
   (*
   Get the bare symbol name and its context
   *)
@@ -34,39 +34,39 @@ Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles,
       {Context::notfound}
     ]
   ];
-  
+
   If[!StringQ[symContext] || symContext === "Global`" || symContext === "System`",
     Return[{}]
   ];
-  
+
   (*
   Extract paclet name from context (first part before `)
   *)
   pacletName = First[StringSplit[symContext, "`"], None];
-  
+
   If[pacletName === None,
     Return[{}]
   ];
-  
+
   (*
   Find the paclet location
   *)
   pacletObj = Quiet[PacletObject[pacletName]];
-  
+
   If[!MatchQ[pacletObj, _PacletObject] || FailureQ[pacletObj],
     Return[{}]
   ];
-  
+
   pacletDir = pacletObj["Location"];
-  
+
   If[!StringQ[pacletDir] || !DirectoryQ[pacletDir],
     Return[{}]
   ];
-  
+
   If[$Debug2,
     log["findExternalSymbolDefinition: searching in ", pacletDir, " for ", bareSymbol]
   ];
-  
+
   (*
   Search for .wl and .m files in the paclet's Kernel directory
   *)
@@ -74,7 +74,7 @@ Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles,
     FileNames["*.wl", FileNameJoin[{pacletDir, "Kernel"}], Infinity],
     FileNames["*.m", FileNameJoin[{pacletDir, "Kernel"}], Infinity]
   ];
-  
+
   (*
   Also check the root of the paclet for .wl/.m files
   *)
@@ -82,71 +82,71 @@ Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles,
     FileNames["*.wl", pacletDir],
     FileNames["*.m", pacletDir]
   ];
-  
+
   If[Length[kernelFiles] == 0,
     Return[{}]
   ];
-  
+
   locations = {};
-  
+
   (*
   Search each file for the symbol definition
   *)
   Do[
     text = Quiet[Import[file, "Text"]];
-    
+
     If[!StringQ[text],
       Continue[]
     ];
-    
+
     (*
     Quick check - does the file contain the symbol name?
     *)
     If[!StringContainsQ[text, bareSymbol],
       Continue[]
     ];
-    
+
     (*
     Parse and search for definitions
     *)
     cst = Quiet[CodeConcreteParse[text]];
-    
+
     If[FailureQ[cst],
       Continue[]
     ];
-    
+
     ast = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[cst]]];
-    
+
     If[FailureQ[ast],
       Continue[]
     ];
-    
+
     (*
     Find definitions of this symbol
     *)
     defs = Cases[ast,
       node_[_, _, KeyValuePattern["Definitions" -> defList_List, Source -> src_]] /;
-        AnyTrue[defList, MatchQ[#, LeafNode[Symbol, s_String, _] /; 
+        AnyTrue[defList, MatchQ[#, LeafNode[Symbol, s_String, _] /;
           StringMatchQ[s, (__ ~~ "`" ~~ bareSymbol) | bareSymbol]] &] :>
         src,
       Infinity
     ];
-    
+
     (*
     Also look for usage message definitions (symbol::usage = ...)
     *)
     defs = Join[defs, Cases[ast,
       CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _],
-        {CallNode[LeafNode[Symbol, "MessageName", _], 
+        {CallNode[LeafNode[Symbol, "MessageName", _],
           {LeafNode[Symbol, s_String, _], LeafNode[String, "\"usage\"", _], ___}, _], _},
         KeyValuePattern[Source -> src_]] /;
         StringMatchQ[s, (__ ~~ "`" ~~ bareSymbol) | bareSymbol] :> src,
       Infinity
     ]];
-    
+
     If[Length[defs] > 0,
       uri = "file://" <> file;
-      
+
       locations = Join[locations, Table[
         <|
           "uri" -> uri,
@@ -160,7 +160,7 @@ Module[{bareSymbol, symContext, pacletName, pacletObj, pacletDir, kernelFiles,
     ],
     {file, kernelFiles}
   ];
-  
+
   locations
 ]
 
@@ -170,16 +170,16 @@ Catch[
 Module[{params, id, doc, uri, res},
 
   log[1, "textDocument/definition: enter expand"];
-  
+
   id = content["id"];
   params = content["params"];
-  
+
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-    
+
     Throw[{<| "method" -> "textDocument/definitionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
@@ -187,7 +187,7 @@ Module[{params, id, doc, uri, res},
   uri = doc["uri"];
 
   If[isStale[$PreExpandContentQueue[[pos[[1]]+1;;]], uri],
-  
+
     log[2, "stale"];
 
     Throw[{<| "method" -> "textDocument/definitionFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
@@ -208,7 +208,7 @@ Module[{params, id, doc, uri, res},
 handleContent[content:KeyValuePattern["method" -> "textDocument/definitionFencepost"]] :=
 Catch[
 Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, namePat, srcs, entry,
-  symbolName, pacletDefinitions, localLocations, pacletLocations},
+  symbolName, rawSymbolName, preferredContext, pacletDefinitions, localLocations, pacletLocations},
 
   log[1, "textDocument/definitionFencepost: enter"];
 
@@ -219,16 +219,16 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
     $CancelMap[id] =.;
 
     log[2, "canceled"];
-  
+
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
-  
+
   params = content["params"];
   doc = params["textDocument"];
   uri = doc["uri"];
 
   If[Lookup[content, "stale", False] || isStale[$ContentQueue, uri],
-    
+
     log[2, "stale"];
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
@@ -245,14 +245,14 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
   char+=1;
 
   entry = Lookup[$OpenFilesMap, uri, Null];
-  
+
   If[entry === Null,
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
-  
-  ast = entry["AST"];
 
-  If[FailureQ[ast],
+  ast = Lookup[entry, "AST", Null];
+
+  If[ast === Null || MissingQ[ast] || FailureQ[ast],
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
@@ -267,7 +267,12 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
 
   sym = cases[[1]];
 
-  symbolName = sym["String"];
+  rawSymbolName = sym["String"];
+  preferredContext = If[StringContainsQ[rawSymbolName, "`"],
+    StringJoin[Riffle[Most[StringSplit[rawSymbolName, "`"]], "`"]] <> "`",
+    None
+  ];
+  symbolName = rawSymbolName;
 
   (*
   Remove contexts for pattern matching
@@ -308,7 +313,7 @@ Module[{id, params, doc, uri, ast, position, locations, line, char, cases, sym, 
     (*
     Search paclet index for definitions
     *)
-    pacletDefinitions = GetSymbolDefinitions[symbolName];
+    pacletDefinitions = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, symbolName, preferredContext];
 
     If[$Debug2,
       log["paclet definitions for ", symbolName, ": ", Length[pacletDefinitions]]
