@@ -142,6 +142,7 @@ Quiet[Needs["CodeInspector`BracketMismatches`"], {MessageName[CompileUtilities`S
 Quiet[Needs["CodeInspector`Utils`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
 Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
+Needs["LSPServer`CST`"]
 
 Needs["PacletManager`"] (* for PacletInformation *)
 
@@ -908,9 +909,9 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   ];
 
   (*
-  Process a small batch of pending workspace index files on each idle iteration.
-  This lets InitializePacletIndex return immediately while indexing completes
-  in the background between requests.
+  Process a small batch of pending workspace index files only when the request
+  queue is idle. This lets InitializePacletIndex return immediately while
+  indexing completes in the background between requests.
   Track when external dep indexing transitions from active → idle so that
   diagnostics can be re-dispatched once the $PacletIndex is fully populated.
   *)
@@ -920,7 +921,10 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
       Length[$PendingIndexFiles] > 0 ||
       Length[$PendingReferenceFiles] > 0;
 
-    moreWork = ProcessPendingIndexFiles[];
+    moreWork = If[hadIndexWork && Length[$ContentQueue] == 0,
+      ProcessPendingIndexFiles[],
+      hadIndexWork
+    ];
 
     (* Mark indexing active as soon as we observe pending work, even if the
        current call drains the queues completely. Without this, single-batch
