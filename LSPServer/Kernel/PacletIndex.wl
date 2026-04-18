@@ -7,7 +7,24 @@ BeginPackage["LSPServer`PacletIndex`"]
 Paclet-wide Symbol Index
 
 This module provides workspace-wide symbol tracking for the LSP server.
-It indexes all symbol definitions and usages across files in the workspace,
+  Cases[
+    Replace[
+      Lookup[Lookup[$PacletIndex, "Symbols", <||>], symbolName, <||>]["Definitions"],
+      _Missing -> {}
+    ],
+    _Association
+  ]
+  definitions = Replace[
+    Lookup[
+      Lookup[Lookup[$PacletIndex, "Symbols", <||>], symbolName, <||>],
+      "Definitions",
+      {}
+    ],
+    Except[_List] -> {}
+  ];
+
+  Cases[definitions, _Association]
+]
 enabling features like:
 - Cross-file go-to-definition
 - Workspace-wide symbol search
@@ -134,6 +151,9 @@ consumed by ProcessPendingIndexFiles during idle loop iterations)
 $PendingIndexFiles = {}
 $PendingReferenceFiles = {}
 $PendingExternalDepFiles = {}
+(* Dep contexts whose source files have not yet been discovered via PacletFind/FileNames.
+   Discovery is deferred to the background so PacletFind never blocks the LSP event loop. *)
+$PendingDepDiscovery = {}
 $StructuredPackageLoaderCache = <||>
 
 (*
@@ -430,9 +450,10 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd,
   $PendingIndexFiles = cacheMisses;
   $PendingReferenceFiles = Map[#[[1]]&, cacheHits];  (* file paths only *)
   $PendingExternalDepFiles = {};
+  $PendingDepDiscovery = {};
 
   If[Length[allDepsFromCache] > 0,
-    loadExternalDependencies[allDepsFromCache]
+    scheduleDepDiscovery[allDepsFromCache]
   ];
 
   If[$Debug2,
@@ -441,21 +462,15 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd,
   ];
 
   (*
-  Ingest the full workspace during initialization so cross-file references,
-  workspace symbols, and diagnostics are ready immediately after startup.
-  External dependency files can continue in the background once the workspace
-  itself has been fully indexed.
+  Keep cache-hit restoration synchronous, but leave cache misses, reference
+  extraction, and external dependency files queued for ProcessScheduledJobs.
+  This lets initialized return promptly while indexing continues in the
+  background between requests.
   *)
-  While[
-    Length[$PendingIndexFiles] > 0 ||
-    Length[$PendingReferenceFiles] > 0 ||
-    Length[$PendingExternalDepFiles] > 0,
-    ProcessPendingIndexFiles[]
-  ];
-
   If[$Debug2,
-    log["InitializePacletIndex: fully ingested workspace on init; remaining ext-dep files=",
-      Length[$PendingExternalDepFiles]]
+    log["InitializePacletIndex: returning with ", Length[$PendingIndexFiles],
+      " full + ", Length[$PendingReferenceFiles], " ref + ",
+      Length[$PendingExternalDepFiles], " ext-dep files queued for background indexing"]
   ];
 
   $PacletIndex
@@ -485,11 +500,48 @@ Module[{n, batch},
     Return[
       Length[$PendingIndexFiles] > 0 ||
       Length[$PendingReferenceFiles] > 0 ||
-      Length[$PendingExternalDepFiles] > 0
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
     ]
   ];
 
-  (* Priority 1: reference-extraction queue (cache hits need only CST parse for refs) *)
+  (* Priority 1: dep discovery — run PacletFind+FileNames for queued dependency contexts.
+     Runs before reference-only files so dep symbols are available for hover quickly. *)
+  If[Length[$PendingDepDiscovery] > 0,
+    (* Process all queued dep contexts at once — discovery is fast (PacletFind+FileNames). *)
+    batch = $PendingDepDiscovery;
+    $PendingDepDiscovery = {};
+    loadExternalDependencies[batch];
+    log[0, "DBG-TBDU ProcessPendingIndexFiles: dep discovery done for ", batch,
+      " extDepFiles=", Length[$PendingExternalDepFiles]];
+    Return[
+      Length[$PendingIndexFiles] > 0 ||
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
+    ]
+  ];
+
+  (* Priority 2: external dependency files. Indexed before reference-only workspace
+     files so hover/completion work for dep symbols without waiting for the full
+     workspace reference sweep. *)
+  If[Length[$PendingExternalDepFiles] > 0,
+    n = Min[20, Length[$PendingExternalDepFiles]];
+    batch = $PendingExternalDepFiles[[;;n]];
+    $PendingExternalDepFiles = $PendingExternalDepFiles[[n + 1 ;;]];
+    Scan[indexFile, batch];
+    log[0, "DBG-TBDU ProcessPendingIndexFiles: indexed ext-dep batch of ", n, ", ",
+      Length[$PendingExternalDepFiles], " ext-dep + ", Length[$PendingIndexFiles],
+      " full + ", Length[$PendingReferenceFiles], " ref files remaining"];
+    Return[
+      Length[$PendingIndexFiles] > 0 ||
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
+    ]
+  ];
+
+  (* Priority 3: reference-extraction queue (cache hits need only CST parse for refs) *)
   If[Length[$PendingReferenceFiles] > 0,
     n = Min[20, Length[$PendingReferenceFiles]];
     batch = $PendingReferenceFiles[[;;n]];
@@ -502,28 +554,12 @@ Module[{n, batch},
     Return[
       Length[$PendingIndexFiles] > 0 ||
       Length[$PendingReferenceFiles] > 0 ||
-      Length[$PendingExternalDepFiles] > 0
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
     ]
   ];
 
-  (* Priority 2: external dependency files. These are lower priority so a large
-     dependency graph cannot starve workspace indexing and refresh. *)
-  If[Length[$PendingExternalDepFiles] > 0,
-    n = Min[20, Length[$PendingExternalDepFiles]];
-    batch = $PendingExternalDepFiles[[;;n]];
-    $PendingExternalDepFiles = $PendingExternalDepFiles[[n + 1 ;;]];
-    Scan[indexFile, batch];
-    log[0, "DBG-TBDU ProcessPendingIndexFiles: indexed ext-dep batch of ", n, ", ",
-      Length[$PendingExternalDepFiles], " ext-dep + ", Length[$PendingIndexFiles],
-      " full + ", Length[$PendingReferenceFiles], " ref files remaining"];
-    Return[
-      Length[$PendingIndexFiles] > 0 ||
-      Length[$PendingReferenceFiles] > 0 ||
-      Length[$PendingExternalDepFiles] > 0
-    ]
-  ];
-
-  (* Both queues empty - flush any pending cache changes to disk. *)
+  (* All queues empty - flush any pending cache changes to disk. *)
   saveWorkspaceCache[];
   False
 ]
@@ -609,7 +645,7 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileDeps,
           Join[$PacletIndex["Dependencies"], deps]
         ];
         If[isWorkspaceURI[uri],
-          loadExternalDependencies[deps]
+          scheduleDepDiscovery[deps]
         ]
       ]
     ];
@@ -670,7 +706,7 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileDeps,
       log["indexFile: found dependencies: ", fileDeps]
     ];
     If[isWorkspaceURI[uri],
-      loadExternalDependencies[fileDeps]
+      scheduleDepDiscovery[fileDeps]
     ]
   ];
 
@@ -1058,9 +1094,9 @@ Module[{inner, lines, descLines, returnLine, description, returnStr, returnExpr}
     Check[
       ToExpression[returnStr, InputForm, HoldComplete],
       None,
-      {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx}
+      {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx, ToExpression::sntxi, ToExpression::sntxb}
     ],
-    {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx}
+    {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx, ToExpression::sntxi, ToExpression::sntxb}
   ];
 
   If[MatchQ[returnExpr, HoldComplete[_]],
@@ -2954,6 +2990,34 @@ Module[{pacletName, paclets, loc, kernelDir, searchDirs, files, newFiles},
 ]
 
 
+(*
+Queue external dependency contexts for background discovery.
+Replaces direct calls to loadExternalDependencies in hot paths (UpdateFileIndex,
+indexFile) so that PacletFind + FileNames never block the LSP event loop.
+Deps that are already loaded, already queued, or already being discovered are skipped.
+The actual file-list discovery happens in ProcessPendingIndexFiles Priority 1.
+*)
+scheduleDepDiscovery[deps_List] :=
+Module[{workspaceContexts, newDeps},
+  workspaceContexts = Keys[$PacletIndex["Contexts"]];
+  newDeps = Select[deps,
+    Function[{dep},
+      And[
+        validContextStringQ[dep],
+        !MemberQ[workspaceContexts, dep],
+        !AnyTrue[workspaceContexts, StringStartsQ[dep, #] &],
+        !TrueQ[Lookup[$LoadedExternalDependencies, dep, False]],
+        !MemberQ[$PendingDepDiscovery, dep]
+      ]
+    ]
+  ];
+  If[Length[newDeps] > 0,
+    log[0, "DBG-TBDU scheduleDepDiscovery: queuing discovery for ", newDeps];
+    $PendingDepDiscovery = DeleteDuplicates[Join[$PendingDepDiscovery, newDeps]]
+  ]
+]
+
+
 loadExternalDependencies[deps_List] :=
 Module[{externalDeps, workspaceContexts},
 
@@ -3417,6 +3481,51 @@ stringNodeValue[
 stringNodeValue[_] := Missing["NotAvailable"]
 
 
+decodeStringNodeValue[
+  LeafNode[String, value_String, _]
+] :=
+Module[{decoded},
+  decoded = Quiet[
+    Check[
+      ToExpression[value],
+      Missing["NotAvailable"],
+      {
+        Syntax::sntunc,
+        Syntax::sntxi,
+        Syntax::sntxb,
+        Syntax::stresc,
+        Syntax::snthex,
+        Syntax::sntoct1,
+        Syntax::sntoct2,
+        Syntax::snthex32,
+        ToExpression::sntx,
+        ToExpression::sntxi,
+        ToExpression::sntxb
+      }
+    ],
+    {
+      Syntax::sntunc,
+      Syntax::sntxi,
+      Syntax::sntxb,
+      Syntax::stresc,
+      Syntax::snthex,
+      Syntax::sntoct1,
+      Syntax::sntoct2,
+      Syntax::snthex32,
+      ToExpression::sntx,
+      ToExpression::sntxi,
+      ToExpression::sntxb
+    }
+  ];
+
+  If[StringQ[decoded],
+    decoded,
+    stringNodeValue[LeafNode[String, value, <||>]]
+  ]
+]
+decodeStringNodeValue[_] := Missing["NotAvailable"]
+
+
 symbolNodeValue[
   LeafNode[Symbol, value_String, _]
 ] := value
@@ -3750,10 +3859,10 @@ Module[{usages},
           },
           _
         ],
-        LeafNode[String, msg_String, _]
+        msgNode:LeafNode[String, _String, _]
       },
       _
-    ] :> <| "name" -> name, "usage" -> Quiet[ToExpression[msg], Syntax::stresc] |>,
+    ] :> <| "name" -> name, "usage" -> decodeStringNodeValue[msgNode] |>,
     Infinity
   ];
 
@@ -3863,7 +3972,7 @@ Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
     $PacletIndex["Dependencies"] = DeleteDuplicates[
       Join[$PacletIndex["Dependencies"], fileDeps]
     ];
-    Scan[queueExternalPackageFiles, fileDeps]
+    scheduleDepDiscovery[fileDeps]
   ];
 
   addFileToIndex[
@@ -4212,6 +4321,62 @@ Module[{},
     Keys[$PacletIndex["Symbols"]],
     IsIndexedDependencySymbol[#] &
   ]
+]
+
+
+(*
+Resolve the defining context for a bare symbol name (no backtick).
+First checks $PacletIndex["Symbols"] for indexed definitions with an explicit context.
+Falls back to kernel Names["*`name"] to find a loaded symbol with that short name.
+Returns the context string (e.g. "CodeParser`") or None if unknown.
+
+IMPORTANT: Do NOT use Context[name] on a bare string — that creates the symbol
+in the current $Context instead of looking up its defining context.
+*)
+resolveSymbolContext[name_String] :=
+Module[{defs, ctx, matches},
+  (* 1. Check the paclet index for definitions that have a context *)
+  defs = Lookup[$PacletIndex["Symbols"], name, {}];
+  If[ListQ[defs] && Length[defs] > 0,
+    (* Look for a definition with an explicit context field *)
+    Do[
+      ctx = Lookup[def, "context", None];
+      If[StringQ[ctx] && ctx =!= "Global`",
+        Return[ctx, Module]
+      ],
+      {def, defs}
+    ];
+    (* If definitions exist but no context field, try to extract from qualified name *)
+    Do[
+      With[{qname = Lookup[def, "qualifiedName", None]},
+        If[StringQ[qname] && StringContainsQ[qname, "`"],
+          ctx = StringJoin[Riffle[Most[StringSplit[qname, "`"]], "`"]] <> "`";
+          If[ctx =!= "Global`",
+            Return[ctx, Module]
+          ]
+        ]
+      ],
+      {def, defs}
+    ]
+  ];
+
+  (* 2. Fall back to kernel Names[] which is safe — it only queries existing symbols,
+     does not create new ones. *)
+  matches = Quiet[Names["*`" <> name]];
+  If[ListQ[matches] && Length[matches] > 0,
+    (* Pick the first non-Global, non-System match *)
+    Do[
+      If[StringContainsQ[m, "`"],
+        ctx = StringJoin[Riffle[Most[StringSplit[m, "`"]], "`"]] <> "`";
+        If[ctx =!= "Global`" && ctx =!= "System`",
+          Return[ctx, Module]
+        ]
+      ],
+      {m, matches}
+    ]
+  ];
+
+  None
 ]
 
 
