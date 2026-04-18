@@ -11,6 +11,77 @@ Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
 
 
+diagnosticRuleTag[diagnostic_Association] :=
+Module[{code, parts},
+  code = Lookup[diagnostic, "code", Missing["NotAvailable"]];
+
+  If[!StringQ[code],
+    Return[None]
+  ];
+
+  parts = StringSplit[code, "\[VeryThinSpace]\:25bb\[VeryThinSpace]", 2];
+  First[parts]
+]
+
+
+diagnosticSourceRange[diagnostic_Association] :=
+Module[{range, start, end},
+  range = Lookup[diagnostic, "range", Missing["NotAvailable"]];
+
+  If[!AssociationQ[range],
+    Return[Missing["NotAvailable"]]
+  ];
+
+  start = Lookup[range, "start", Missing["NotAvailable"]];
+  end = Lookup[range, "end", Missing["NotAvailable"]];
+
+  If[!AssociationQ[start] || !AssociationQ[end],
+    Return[Missing["NotAvailable"]]
+  ];
+
+  {
+    {Lookup[start, "line", -1] + 1, Lookup[start, "character", -1] + 1},
+    {Lookup[end, "line", -1] + 1, Lookup[end, "character", -1] + 1}
+  }
+]
+
+
+diagnosticSupportsIgnoreQuickFixQ[diagnostic_Association] :=
+Module[{tagStr},
+  tagStr = diagnosticRuleTag[diagnostic];
+
+  StringQ[tagStr] &&
+    tagStr =!= "" &&
+    Lookup[diagnostic, "source", Missing["NotAvailable"]] === "wolfram lint"
+]
+
+
+candidateIgnoreQuickFixDiagnostics[params_, lints_List, ignoreData_] :=
+Module[{contextDiagnostics, fallbackDiagnostics},
+  contextDiagnostics = Replace[
+    Lookup[Lookup[params, "context", <||>], "diagnostics", {}],
+    Except[_List] -> {}
+  ];
+
+  If[contextDiagnostics === {},
+    fallbackDiagnostics = Flatten[
+      lintToDiagnostics /@ Select[lints, !ShouldIgnoreDiagnostic[#, ignoreData] &],
+      1
+    ];
+    contextDiagnostics = fallbackDiagnostics
+  ];
+
+  DeleteDuplicatesBy[
+    Select[contextDiagnostics, diagnosticSupportsIgnoreQuickFixQ],
+    {
+      Lookup[#, "code", Missing["NotAvailable"]],
+      Lookup[#, "range", Missing["NotAvailable"]],
+      Lookup[#, "source", Missing["NotAvailable"]]
+    } &
+  ]
+]
+
+
 expandContent[content:KeyValuePattern["method" -> "textDocument/codeAction"], pos_] :=
 Catch[
 Module[{params, id, doc, uri, res},
@@ -62,7 +133,8 @@ handleContent[content:KeyValuePattern["method" -> "textDocument/codeActionFencep
 Catch[
 Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit, diagnostics,
   command, label, actionData, actionSrc, replacementNode, insertionNode, replacementText, lintsWithConfidence,
-  shadowing, insertionText, cursor, entry, text, cst, agg, ast, cstLints, aggLints, astLints},
+  shadowing, insertionText, cursor, entry, text, cst, agg, ast, cstLints, aggLints, astLints,
+  scopingLints, workspaceLints, ignoreData},
 
 
   log[1, "textDocument/codeActionFencepost: enter"];
@@ -106,32 +178,13 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
 
-  cstLints = Lookup[entry, "CSTLints", Null];
+  cstLints = Replace[Lookup[entry, "CSTLints", {}], Except[_List] -> {}];
+  aggLints = Replace[Lookup[entry, "AggLints", {}], Except[_List] -> {}];
+  astLints = Replace[Lookup[entry, "ASTLints", {}], Except[_List] -> {}];
+  scopingLints = Replace[Lookup[entry, "ScopingLints", {}], Except[_List] -> {}];
+  workspaceLints = Replace[Lookup[entry, "WorkspaceLints", {}], Except[_List] -> {}];
 
-  If[cstLints === Null || MissingQ[cstLints],
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
-  ];
-
-  (*
-  Might get something like FileTooLarge
-  *)
-  If[FailureQ[cstLints],
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>}]
-  ];
-
-  aggLints = Lookup[entry, "AggLints", {}];
-
-  If[MissingQ[aggLints] || FailureQ[aggLints],
-    aggLints = {}
-  ];
-
-  astLints = Lookup[entry, "ASTLints", {}];
-
-  If[MissingQ[astLints] || FailureQ[astLints],
-    astLints = {}
-  ];
-
-  lints = cstLints ~Join~ aggLints ~Join~ astLints;
+  lints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints ~Join~ workspaceLints;
 
   log[2, "lints: ", stringLineTake[StringTake[ToString[lints, InputForm], UpTo[1000]], UpTo[20]]];
   log[2, "...\n"];
@@ -334,47 +387,44 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
   These offer to insert wl-disable-line or wl-disable-next-line comments.
   *)
   text = Lookup[entry, "Text", ""];
+  ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
 
-  Module[{textLines, lintTag, lintData, lintSrc, lintLine0, lineText,
+  Module[{textLines, diagnostic, diagnosticSrc, diagnosticLine0,
           disableLineEdit, disableNextLineEdit, disableLineText, disableNextLineText,
-          lineEndChar, lintDiagnostics, ignoreData, tagStr},
+          lineEndChar, tagStr, ignoreDiagnostics},
 
     textLines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
 
-    (* Get ignore data to skip already-suppressed lints *)
-    ignoreData = Lookup[entry, "IgnoreData", GetIgnoreData[uri]];
+    ignoreDiagnostics = candidateIgnoreQuickFixDiagnostics[params, lints, ignoreData];
 
     Do[
-      lintTag = lint[[1]];
-      tagStr = If[StringQ[lintTag], lintTag, SymbolName[lintTag]];
-      lintData = lint[[4]];
-      lintSrc = Lookup[lintData, Source, Lookup[lintData, CodeParser`Source, {{1, 1}, {1, 1}}]];
+      tagStr = diagnosticRuleTag[diagnostic];
+      diagnosticSrc = diagnosticSourceRange[diagnostic];
+
+      If[!MatchQ[diagnosticSrc, {{_Integer, _Integer}, {_Integer, _Integer}}],
+        Continue[]
+      ];
 
       (* Check if this lint intersects the cursor (1-based) *)
-      If[!SourceMemberIntersectingQ[lintSrc, cursor],
+      If[!SourceMemberIntersectingQ[diagnosticSrc, cursor],
         Continue[]
       ];
 
-      (* Skip already-suppressed lints *)
-      If[ShouldIgnoreDiagnostic[lint, ignoreData],
+      diagnosticLine0 = diagnosticSrc[[1, 1]] - 1;
+
+      If[diagnosticLine0 < 0,
         Continue[]
       ];
-
-      (* 0-based line number for LSP *)
-      lintLine0 = lintSrc[[1, 1]] - 1;
-
-      lintDiagnostics = lintToDiagnostics[lint];
 
       (* --- Action 1: Disable for this line --- *)
       (* Insert " (* wl-disable-line RuleName *)" at end of the line *)
-      If[lintLine0 < Length[textLines],
-        lineText = textLines[[lintLine0 + 1]];
-        lineEndChar = StringLength[lineText];
+      If[diagnosticLine0 < Length[textLines],
+        lineEndChar = StringLength[textLines[[diagnosticLine0 + 1]]];
         disableLineText = " (* wl-disable-line " <> tagStr <> " *)";
 
         disableLineEdit = <| "changes" -> <| uri -> {
-          <| "range" -> <| "start" -> <| "line" -> lintLine0, "character" -> lineEndChar |>,
-                           "end" -> <| "line" -> lintLine0, "character" -> lineEndChar |> |>,
+          <| "range" -> <| "start" -> <| "line" -> diagnosticLine0, "character" -> lineEndChar |>,
+                           "end" -> <| "line" -> diagnosticLine0, "character" -> lineEndChar |> |>,
              "newText" -> disableLineText |>
         } |> |>;
 
@@ -382,7 +432,7 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
           "title" -> "Disable \"" <> tagStr <> "\" for this line",
           "kind" -> "quickfix",
           "edit" -> disableLineEdit,
-          "diagnostics" -> lintDiagnostics
+          "diagnostics" -> {diagnostic}
         |>]
       ];
 
@@ -391,8 +441,8 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
       disableNextLineText = "(* wl-disable-next-line " <> tagStr <> " *)\n";
 
       disableNextLineEdit = <| "changes" -> <| uri -> {
-        <| "range" -> <| "start" -> <| "line" -> lintLine0, "character" -> 0 |>,
-                         "end" -> <| "line" -> lintLine0, "character" -> 0 |> |>,
+        <| "range" -> <| "start" -> <| "line" -> diagnosticLine0, "character" -> 0 |>,
+                         "end" -> <| "line" -> diagnosticLine0, "character" -> 0 |> |>,
            "newText" -> disableNextLineText |>
       } |> |>;
 
@@ -400,10 +450,10 @@ Module[{id, params, doc, uri, actions, range, lints, lspAction, lspActions, edit
         "title" -> "Disable \"" <> tagStr <> "\" for next line",
         "kind" -> "quickfix",
         "edit" -> disableNextLineEdit,
-        "diagnostics" -> lintDiagnostics
+        "diagnostics" -> {diagnostic}
       |>],
 
-      {lint, lints}
+      {diagnostic, ignoreDiagnostics}
     ]
   ];
 
