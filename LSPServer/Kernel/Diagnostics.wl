@@ -121,7 +121,11 @@ Module[{params, doc, uri, res},
     Throw[{}]
   ];
 
-  res = {<| "method" -> "textDocument/runFastDiagnostics", "params" -> params |>};
+  res = {<|
+    "method" -> "textDocument/runFastDiagnostics",
+    "params" -> params,
+    "priority" -> TrueQ[Lookup[content, "priority", False]]
+  |>};
 
   log[1, "textDocument/runDiagnostics: exit"];
 
@@ -140,6 +144,60 @@ and runWorkspaceDiagnostics are orphaned pending Task 3's fast-tier handler.
 
 (* ── Helper: compute SuppressedRegions from CST ── *)
 getSuppressedRegions[cst_] := SuppressedRegions[cst]
+
+
+(*
+Tags to globally suppress from all CodeInspect lint results.
+SuspiciousSessionSymbol fires on Echo, Print, EchoFunction, etc. — these are
+legitimate functions commonly used in WL package code and should not be warned about.
+*)
+$globallySupressedLintTags = {"SuspiciousSessionSymbol"};
+
+(*
+Cache $VersionNumber once at load time so version checks in the hot lint-filter
+path do not re-evaluate it on every call.
+*)
+$cachedKernelVersion = $VersionNumber;
+
+(*
+Extract the version number from "This was fixed in X.Y." or "fixed in X.Y" strings.
+Returns the version as a Real, or Missing[] if not found.
+*)
+kernelBugFixedInVersion[lint_] :=
+Module[{descs, matches},
+  descs = Lookup[lint[[4]], "AdditionalDescriptions", {}];
+  matches = StringCases[descs, RegularExpression["[Ff]ixed in (\\d+\\.\\d+)"] :> "$1"];
+  If[Length[Flatten[matches]] > 0,
+    ToExpression[First[Flatten[matches]]],
+    Missing[]
+  ]
+]
+
+(*
+Predicate: should this lint be kept?
+- Always drop globally suppressed tags (e.g. SuspiciousSessionSymbol).
+- Drop KernelBug lints whose bug was fixed in a kernel version <= the running kernel,
+  since the bug no longer applies.
+*)
+keepLint[lint_] :=
+Module[{tag, fixedIn},
+  tag = lint["Tag"];
+  Which[
+    MemberQ[$globallySupressedLintTags, tag],
+      False,
+    tag === "KernelBug",
+      fixedIn = kernelBugFixedInVersion[lint];
+      (* Keep only if we cannot determine a fix version, or if fix version > running kernel *)
+      MissingQ[fixedIn] || $cachedKernelVersion < fixedIn,
+    True,
+      True
+  ]
+]
+
+filterGlobalLints[lints_List] :=
+  Select[lints, keepLint]
+
+filterGlobalLints[_] := {}
 
 
 (* ── Helper: compute ignore data from CST ── *)
@@ -174,6 +232,10 @@ Join[
   Replace[Lookup[entry, "ScopingLints", {}], Except[_List] -> {}],
   Replace[Lookup[entry, "WorkspaceLints", {}], Except[_List] -> {}]
 ]
+
+
+associationEntries[value_] :=
+  Cases[Replace[value, Except[_List] -> {}], _Association]
 
 
 (* ── Helper: convert entry["ScopingData"] to InspectionObject lint entries ── *)
@@ -277,7 +339,7 @@ Catch[
 Module[{params, doc, uri, entry, text, cst, agg, ast,
         suppressedRegions, ignoreData,
         cstLints, aggLints, astLints, scopingData, scopingLints,
-        fastLints, notification},
+  fastLints, notification, tokenResponses = {}},
 
   log[1, "textDocument/runFastDiagnostics: enter"];
 
@@ -337,17 +399,20 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
     "AggregateRules" -> <||>, "AbstractRules" -> <||>,
     "SuppressedRegions" -> suppressedRegions]];
   If[!ListQ[cstLints], cstLints = {}];
+  cstLints = filterGlobalLints[cstLints];
   entry["CSTLints"] = cstLints;
 
   aggLints = Quiet[CodeInspectAgg[agg,
     "AbstractRules" -> <||>,
     "SuppressedRegions" -> suppressedRegions]];
   If[!ListQ[aggLints], aggLints = {}];
+  aggLints = filterGlobalLints[aggLints];
   entry["AggLints"] = aggLints;
 
   If[!FailureQ[ast],
     astLints = Quiet[CodeInspectAST[ast, "SuppressedRegions" -> suppressedRegions]];
     If[!ListQ[astLints], astLints = {}];
+    astLints = filterGlobalLints[astLints];
     entry["ASTLints"] = astLints,
     astLints = {}; entry["ASTLints"] = {}
   ];
@@ -375,12 +440,19 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
   fastLints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints;
   notification = buildPublishNotification[uri, entry, fastLints];
 
+  If[TrueQ[$SemanticTokens],
+    tokenResponses = LSPServer`Private`recoverPendingSemanticTokenFenceposts[
+      uri,
+      "DBG-ST: fast diagnostics recovered pending semantic-token requests"
+    ]
+  ];
+
   (* ── Fire slow tier ── *)
   dispatchWorkspaceDiagnostics[uri];
 
   log[1, "textDocument/runFastDiagnostics: exit"];
 
-  {notification}
+  Join[{notification}, tokenResponses]
 ]]
 
 
@@ -459,17 +531,20 @@ Module[{params, doc, uri, path, text, entry, parseResult,
     "AggregateRules" -> <||>, "AbstractRules" -> <||>,
     "SuppressedRegions" -> suppressedRegions]];
   If[!ListQ[cstLints], cstLints = {}];
+  cstLints = filterGlobalLints[cstLints];
   entry["CSTLints"] = cstLints;
 
   aggLints = Quiet[CodeInspectAgg[agg,
     "AbstractRules" -> <||>,
     "SuppressedRegions" -> suppressedRegions]];
   If[!ListQ[aggLints], aggLints = {}];
+  aggLints = filterGlobalLints[aggLints];
   entry["AggLints"] = aggLints;
 
   If[!FailureQ[ast],
     astLints = Quiet[CodeInspectAST[ast, "SuppressedRegions" -> suppressedRegions]];
     If[!ListQ[astLints], astLints = {}];
+    astLints = filterGlobalLints[astLints];
     entry["ASTLints"] = astLints,
     astLints = {};
     entry["ASTLints"] = {}
@@ -494,10 +569,15 @@ Module[{params, doc, uri, path, text, entry, parseResult,
 
   $OpenFilesMap[uri] = entry;
 
-  Quiet[handleContent[<|
-    "method" -> "textDocument/runWorkspaceDiagnostics",
-    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
-  |>]];
+  (*
+  Do NOT run workspace diagnostics synchronously here — it blocks the
+  event loop for seconds per file, and during bootstrap the PacletIndex
+  is usually incomplete (external deps haven't been indexed yet).
+  The fast lints (CST/Agg/AST/Scoping) are published immediately.
+  Full workspace diagnostics for closed files will be re-dispatched
+  when indexing finishes (via the $IndexingWasActive completion hook and
+  queueWorkspaceDiagnosticsSweep).
+  *)
 
   entry = Lookup[$OpenFilesMap, uri, entry];
   notification = buildPublishNotification[uri, entry, allEntryDiagnosticsLints[entry]];
@@ -679,6 +759,7 @@ Module[{params, doc, uri, entry, cst, cstLints, suppressedRegions},
     Throw[{}]
   ];
 
+  cstLints = filterGlobalLints[cstLints];
   log[2, "cstLints: ", #["Tag"]& /@ cstLints];
 
   entry["CSTLints"] = cstLints;
@@ -749,6 +830,7 @@ Module[{params, doc, uri, entry, agg, aggLints, suppressedRegions},
     Throw[{}]
   ];
 
+  aggLints = filterGlobalLints[aggLints];
   log[2, "aggLints: ", #["Tag"]& /@ aggLints];
 
   entry["AggLints"] = aggLints;
@@ -820,6 +902,7 @@ Module[{params, doc, uri, entry, ast, cst, astLints, suppressedRegions},
     Throw[{}]
   ];
 
+  astLints = filterGlobalLints[astLints];
   log[2, "astLints: ", #["Tag"]& /@ astLints];
 
   entry["ASTLints"] = astLints;
@@ -995,6 +1078,20 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   Workspace-wide checks: undefined symbols and context loading errors.
   Only run when a workspace root has been set and the CST is available.
   *)
+  (*
+  If external dependency indexing is still in progress, skip workspace-level
+  checks (UndefinedSymbol, UnimportedSymbol, UnloadedContext) entirely.
+  Leave WorkspaceLints as Null so the post-indexing re-dispatch will run them
+  with a fully populated $PacletIndex.  This avoids a flash of false warnings
+  for symbols from external packages that haven't been indexed yet.
+  *)
+  If[TrueQ[LSPServer`Private`$IndexingWasActive] ||
+     Length[LSPServer`PacletIndex`$PendingIndexFiles] > 0 ||
+     Length[LSPServer`PacletIndex`Private`$PendingExternalDepFiles] > 0,
+    log[1, "runWorkspaceDiagnostics: skipping workspace checks \[LongDash] indexing still in progress for ", uri];
+    Throw[{}]
+  ];
+
   If[$WorkspaceRootPath =!= None && !FailureQ[cst],
 
   (*
@@ -1026,6 +1123,10 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   are visible without qualification in the current file.
   *)
   dependencySymbolSet = Association[Thread[GetLoadedDependencySymbols[uri] -> True]];
+
+  log[1, "runWorkspaceDiagnostics: dependencySymbolSet size: ", Length[dependencySymbolSet],
+    " sample: ", Take[Keys[dependencySymbolSet], UpTo[10]]];
+
   accessibleWorkspaceSymbolSet = Association[
     Flatten[
       Map[
@@ -1037,6 +1138,10 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
     ]
   ];
   bareNameContextSet = Association[Thread[GetFileBareNameContexts[uri] -> True]];
+
+  log[1, "runWorkspaceDiagnostics: bareNameContexts: ", Keys[bareNameContextSet],
+    " accessibleWorkspaceSymbolSet size: ", Length[accessibleWorkspaceSymbolSet],
+    " sample: ", Take[Keys[accessibleWorkspaceSymbolSet], UpTo[10]]];
 
   (*
   Get locally defined symbols from scoping data
@@ -1093,6 +1198,11 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   classifiedRefs = DeleteCases[classifySymbolRef /@ symbolRefs, None];
   undefined = Select[classifiedRefs, Lookup[#, "kind", ""] === "undefined" &];
   unimported = Select[classifiedRefs, Lookup[#, "kind", ""] === "unimported" &];
+
+  If[Length[undefined] > 0,
+    log[1, "runWorkspaceDiagnostics: ", Length[undefined], " undefined symbols in ", uri,
+      ": ", Take[Lookup[undefined, "name", "?"], UpTo[20]]]
+  ];
 
   (*
   Create lints for symbols that exist but are not imported into this file.
@@ -1325,20 +1435,27 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
             Which[
               (* Builtin with a known return type - pick the best arity-matching overload *)
               KeyExistsQ[$BuiltinPatterns, fname],
-                With[{ovs = $BuiltinPatterns[fname], nArgs = Length[node[[2]]]},
-                  Module[{bestOv},
-                    bestOv = SelectFirst[ovs,
-                      Function[{ov},
-                        With[{specs = ov[[1]], n = Length[ov[[1]]]},
-                          If[n > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence],
-                            nArgs >= n - 1,   (* variadic: at least fixedN args *)
-                            n === nArgs       (* fixed arity: exact match *)
+                With[{ovs = Replace[$BuiltinPatterns[fname], Except[_List] -> {}], nArgs = Length[node[[2]]]},
+                  If[ovs === {},
+                    Missing["Unknown"],
+                    Module[{bestOv},
+                      bestOv = SelectFirst[ovs,
+                        Function[{ov},
+                          With[{specs = ov[[1]], n = Length[ov[[1]]]},
+                            If[n > 0 && MatchQ[Last[specs], _BlankSequence | _BlankNullSequence],
+                              nArgs >= n - 1,   (* variadic: at least fixedN args *)
+                              n === nArgs       (* fixed arity: exact match *)
+                            ]
                           ]
-                        ]
-                      ],
-                      First[ovs]  (* fallback: first overload if nothing matches *)
-                    ];
-                    patternToSampleValue[bestOv[[2]]]
+                        ],
+                        Missing["NotFound"]
+                      ];
+
+                      If[MissingQ[bestOv],
+                        Missing["Unknown"],
+                        patternToSampleValue[bestOv[[2]]]
+                      ]
+                    ]
                   ]
                 ],
               (* User-defined: use DocComment ReturnPattern first,
@@ -1346,10 +1463,16 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
               KeyExistsQ[$PacletIndex["Symbols"], fname] &&
                 Length[$PacletIndex["Symbols", fname, "Definitions"]] > 0,
                 Module[{defs, retPats, irps},
-                  defs = $PacletIndex["Symbols", fname, "Definitions"];
+                  defs = associationEntries[$PacletIndex["Symbols", fname, "Definitions"]];
+                  If[defs === {},
+                    Missing["Unknown"],
                   retPats = DeleteMissing[
                     Map[Function[d,
-                      Lookup[Lookup[d, "DocComment", <||>], "ReturnPattern", Missing["Unknown"]]
+                      Lookup[
+                        Replace[Lookup[d, "DocComment", None], Except[_Association] -> <||>],
+                        "ReturnPattern",
+                        Missing["Unknown"]
+                      ]
                     ], defs]
                   ];
                   Which[
@@ -1365,6 +1488,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                         patternToSampleValue[irps[[1]]],
                         Missing["Unknown"]
                       ]
+                  ]
                   ]
                 ],
               True, Missing["Unknown"]
@@ -1629,7 +1753,8 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       localVarMap =
         Module[{rawEntries, convergenceEntries, condEntries, paramEntries,
                 iterEntries, mapParamEntries, allEntries,
-                closureVarRanges, sowedVarRanges, findEnclosingClosureForVar},
+                closureVarRanges, sowedVarRanges, findEnclosingClosureForVar,
+                validScopeRangeQ, normalizeLocalVarEntries},
           (* Pre-scan: build closureVarRanges — maps each declared var name to the
              list of source ranges of closures (Module/Block/With) that declare it.
              Used to scope rawEntries and convergenceEntries to their closure. *)
@@ -1684,6 +1809,26 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
               ]
             ]
           ];
+          validScopeRangeQ = Function[{range},
+            range === None || MatchQ[range, {{_Integer, _Integer}, {_Integer, _Integer}}]
+          ];
+          normalizeLocalVarEntries[entries_] :=
+            Join[
+              Cases[
+                entries,
+                entry : {_String, _Integer, _, _, _} /;
+                  validScopeRangeQ[entry[[4]]] && validScopeRangeQ[entry[[5]]] :>
+                    entry,
+                Infinity
+              ],
+              Append[#, None] & /@ Cases[
+                entries,
+                entry : {_String, _Integer, _, _} /;
+                  validScopeRangeQ[entry[[4]]] :>
+                    entry,
+                Infinity
+              ]
+            ];
           rawEntries = Cases[ast,
             CallNode[
               LeafNode[Symbol, "Set", _],
@@ -1939,12 +2084,12 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
             1
           ];
 
-          (* Append closureRange = None to entry types that are already scope-guarded
-             by branchRange or defSrc (condEntries, paramEntries, iterEntries, mapParamEntries). *)
-          condEntries      = Map[Append[#, None] &, condEntries];
-          paramEntries     = Map[Append[#, None] &, paramEntries];
-          iterEntries      = Map[Append[#, None] &, iterEntries];
-          mapParamEntries  = Map[Append[#, None] &, mapParamEntries];
+           rawEntries = normalizeLocalVarEntries[rawEntries];
+           convergenceEntries = normalizeLocalVarEntries[convergenceEntries];
+           condEntries = normalizeLocalVarEntries[condEntries];
+           paramEntries = normalizeLocalVarEntries[paramEntries];
+           iterEntries = normalizeLocalVarEntries[iterEntries];
+           mapParamEntries = normalizeLocalVarEntries[mapParamEntries];
           allEntries = Join[condEntries, rawEntries, convergenceEntries,
                             paramEntries, iterEntries, mapParamEntries];
           GroupBy[
@@ -1972,14 +2117,14 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       *)
       patternNodeToSample = Function[{blankNode},
         Switch[blankNode,
-          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Integer", _]}, _],    0,
-          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "String", _]}, _],     "",
-          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Real", _]}, _],       0.,
-          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Rational", _]}, _],   1/2,
-          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Complex", _]}, _],    Complex[0, 0],
-          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "List", _]}, _],       {},
+          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Integer", _]}, _],     0,
+          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "String", _]}, _],      "",
+          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Real", _]}, _],        0.,
+          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Rational", _]}, _],    1/2,
+          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Complex", _]}, _],     Complex[0, 0],
+          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "List", _]}, _],        {},
           CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Association", _]}, _], <||>,
-          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Symbol", _]}, _],     Unique[],
+          CallNode[LeafNode[Symbol, "Blank", _], {LeafNode[Symbol, "Symbol", _]}, _],      Unique[],
           _, Missing["Unknown"]
         ]
       ];
@@ -2219,12 +2364,13 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
             *)
             localEntries = Lookup[localDefMap, funcName, {}];
             allDefs = If[Length[localEntries] > 0,
-              localEntries,
+              associationEntries[localEntries],
               Module[{pacletDefs},
                 pacletDefs = If[KeyExistsQ[$PacletIndex["Symbols"], funcName],
                   $PacletIndex["Symbols", funcName, "Definitions"],
                   {}
                 ];
+                pacletDefs = associationEntries[pacletDefs];
                 If[Length[pacletDefs] > 0,
                   pacletDefs,
                   (* PacletIndex has no definitions (symbol only referenced, not defined).
@@ -2558,7 +2704,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
       returnMismatchLints = Flatten[
         Function[{symName},
           Module[{defs},
-            defs = GetSymbolDefinitions[symName];
+            defs = associationEntries[GetSymbolDefinitions[symName]];
             defs = Select[defs,
               #["uri"] === uri && #["kind"] === "function" &&
               AssociationQ[#["DocComment"]] &&
@@ -2622,7 +2768,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
         declaredTypeLints = Flatten[
           Function[{symName},
             Module[{allDefs, declEntry, declaredRetPat, funcDefs},
-              allDefs = GetSymbolDefinitions[symName];
+              allDefs = associationEntries[GetSymbolDefinitions[symName]];
               (* Find the declaration entry with a non-parametric DeclaredType for this file *)
               declEntry = SelectFirst[allDefs,
                 #["uri"] === uri && #["kind"] === "declaration" &&
@@ -2721,10 +2867,10 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
           Function[{ann},
             If[ann["kind"] =!= "DeclaredType", Return[{}]];
             Module[{sym = ann["symbol"], allDefs},
-              allDefs = Lookup[
+              allDefs = associationEntries[Lookup[
                 Lookup[LSPServer`PacletIndex`$PacletIndex["Symbols"], sym, <||>],
                 "Definitions", {}
-              ];
+              ]];
               (* Has any non-declaration definition in a non-IPWL file? *)
               If[NoneTrue[allDefs,
                   !TrueQ[Lookup[Lookup[LSPServer`PacletIndex`$PacletIndex["Files"], #["uri"], <||>], "IsIPWL", False]] &&
@@ -2765,7 +2911,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
 
   $OpenFilesMap[uri] = entry;
 
-  {}
+  {buildPublishNotification[uri, entry, allEntryDiagnosticsLints[entry]]}
 ]]
 
 
@@ -2818,7 +2964,8 @@ Module[{params, doc, uri, entry},
 handleContent[content:KeyValuePattern["method" -> "textDocument/publishDiagnostics"]] :=
 Catch[
 Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints, astLints,
-  scopingLints, workspaceLints, diagnostics, ignoreData, beforeIgnoreCount},
+  scopingLints, workspaceLints, diagnostics, ignoreData, beforeIgnoreCount,
+  cachedNotification},
 
   log[1, "textDocument/publishDiagnostics: enter"];
 
@@ -2839,6 +2986,16 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
   Possibly cleared
   *)
   If[entry === Null,
+    cachedNotification = If[
+      AssociationQ[$ClosedFileDiagnosticsNotifications],
+      Lookup[$ClosedFileDiagnosticsNotifications, uri, Missing["NotAvailable"]],
+      Missing["NotAvailable"]
+    ];
+
+    If[AssociationQ[cachedNotification],
+      Throw[{cachedNotification}]
+    ];
+
     Throw[{<| "jsonrpc" -> "2.0",
               "method" -> "textDocument/publishDiagnostics",
               "params" -> <| "uri" -> uri,
@@ -2867,8 +3024,9 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
 
   (*
   Workspace-wide lints (undefined symbols, etc.)
+  May be Null if the slow tier has not completed yet; treat as empty.
   *)
-  workspaceLints = Lookup[entry, "WorkspaceLints", {}];
+  workspaceLints = Replace[Lookup[entry, "WorkspaceLints", {}], Except[_List] -> {}];
 
   lints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints ~Join~ workspaceLints;
 
@@ -2934,7 +3092,11 @@ Module[{params, doc, uri, entry, lints, lintsWithConfidence, cstLints, aggLints,
 ]]
 
 
-
+    cachedNotification = If[
+      AssociationQ[$ClosedFileDiagnosticsNotifications],
+      Lookup[$ClosedFileDiagnosticsNotifications, uri, Missing["NotAvailable"]],
+      Missing["NotAvailable"]
+    ];
 
 (*
 returns a function lint -> True|False
