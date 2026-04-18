@@ -123,6 +123,7 @@ The messages may cause unexplained hangs in clients
 
 So manually set $Messages to a tmp file and then handle the messages later
 *)
+$startupMessagesText = "";
 $startupMessagesFile = OpenWrite[]
 
 If[!FailureQ[$startupMessagesFile],
@@ -142,7 +143,6 @@ Quiet[Needs["CodeInspector`BracketMismatches`"], {MessageName[CompileUtilities`S
 Quiet[Needs["CodeInspector`Utils`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
 Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
-Needs["LSPServer`CST`"]
 
 Needs["PacletManager`"] (* for PacletInformation *)
 
@@ -184,7 +184,7 @@ WolframLanguageSyntax`Generate`$builtinFunctions :=
 	(* ] *)
 
 WolframLanguageSyntax`Generate`$obsoleteSymbols =
-	Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
+    Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
 
 WolframLanguageSyntax`Generate`$sessionSymbols =
 	Get[FileNameJoin[{location, "Resources", "Data", "SessionSymbols.wl"}]]
@@ -224,6 +224,7 @@ Get[FileNameJoin[{location, "Kernel", "Socket.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "ListenSocket.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "ServerDiagnostics.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "DocumentSymbol.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "CST.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "PacletIndex.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "BracketMismatches.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "CodeAction.wl"}]]
@@ -247,7 +248,7 @@ Get[FileNameJoin[{location, "Kernel", "Workspace.wl"}]]
 (*
 This uses func := func = def idiom and is fast
 *)
-loadAllFuncs[]
+LSPServer`Library`loadAllFuncs[]
 
 
 $DefaultConfidenceLevel = 0.50
@@ -377,23 +378,68 @@ contentQueuePriorityMethodQ[content_] :=
   )
 
 
+(*
+  prioritizeContentQueueContents groups items so that each fencepost
+  is immediately followed by its dependent items (runDiagnostics,
+  publishDiagnostics, etc.) for the same URI, rather than pulling ALL
+  fenceposts to the front. This prevents diagnostic starvation when
+  many files are opened simultaneously.
+*)
 prioritizeContentQueueContents[contents_List] :=
-  Join[
-    Select[contents, contentQueuePriorityMethodQ],
-    Select[contents, !contentQueuePriorityMethodQ[#] &]
+  Module[{priorityGroups, nonGrouped, result, uri, method, i,
+          fencepostIndices, claimed, group},
+
+    (* Find indices of all priority (fencepost) items *)
+    fencepostIndices = Select[Range[Length[contents]],
+      contentQueuePriorityMethodQ[contents[[#]]] &];
+
+    (* For each fencepost, greedily claim the immediately following
+       non-priority items that share the same URI (these are the
+       runDiagnostics / publishDiagnostics that were expanded together
+       with the fencepost). *)
+    claimed = <||>;  (* index -> True for items claimed by a group *)
+    priorityGroups = {};
+
+    Do[
+      uri = Lookup[Lookup[Lookup[contents[[idx]], "params", <||>], "textDocument", <||>], "uri", None];
+      group = {idx};
+      i = idx + 1;
+      While[i <= Length[contents] && !KeyExistsQ[claimed, i] &&
+            !contentQueuePriorityMethodQ[contents[[i]]] &&
+            Lookup[Lookup[Lookup[contents[[i]], "params", <||>], "textDocument", <||>], "uri", None] === uri,
+        AppendTo[group, i];
+        i++
+      ];
+      Do[claimed[g] = True, {g, group}];
+      AppendTo[priorityGroups, group],
+      {idx, fencepostIndices}
+    ];
+
+    (* Collect remaining unclaimed non-priority items *)
+    nonGrouped = Select[Range[Length[contents]],
+      !KeyExistsQ[claimed, #] &];
+
+    (* Result: priority groups first (each fencepost + its diagnostics),
+       then any remaining items *)
+    result = Join[
+      Flatten[Map[contents[[#]] &, priorityGroups, {2}], 1],
+      contents[[nonGrouped]]
+    ];
+
+    result
   ]
 
 
 appendContentsToContentQueue[contents_List] :=
   If[contents =!= {},
-    (* Keep semantic-token and lifecycle fenceposts ahead of slower
-       diagnostics / code-action work so token responses are not starved
-       behind large backlogs after didOpen or didChange. *)
+    (* Keep fencepost items grouped with their per-URI diagnostic
+       pipeline items so diagnostics are not starved behind a wall
+       of fenceposts from other URIs. *)
     $ContentQueue = prioritizeContentQueueContents[Join[$ContentQueue, contents]]
   ]
 
 
-contentQueueEmptyQ[] := empty[$ContentQueue]
+contentQueueEmptyQ[] := $ContentQueue === {}
 
 
 takeFirstContentQueueItem[] :=
@@ -919,7 +965,8 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
     hadIndexWork =
       Length[$PendingExternalDepFiles] > 0 ||
       Length[$PendingIndexFiles] > 0 ||
-      Length[$PendingReferenceFiles] > 0;
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[LSPServer`PacletIndex`Private`$PendingDepDiscovery] > 0;
 
     moreWork = If[hadIndexWork && Length[$ContentQueue] == 0,
       ProcessPendingIndexFiles[],
@@ -935,6 +982,22 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
 
     If[$IndexingWasActive && !moreWork,
       $IndexingWasActive = False;
+      log[1, "Indexing complete. Invalidating WorkspaceLints for ", Length[$OpenFilesMap], " open files and re-dispatching workspace diagnostics."];
+      (* Invalidate cached WorkspaceLints for all open files so that
+         runWorkspaceDiagnostics actually re-runs instead of returning
+         the stale results computed before external deps were indexed. *)
+      Scan[
+        Function[{uri},
+          Module[{entry},
+            entry = Lookup[$OpenFilesMap, uri, Null];
+            If[AssociationQ[entry],
+              entry["WorkspaceLints"] = Null;
+              $OpenFilesMap[uri] = entry
+            ]
+          ]
+        ],
+        Keys[$OpenFilesMap]
+      ];
       (* Re-dispatch workspace diagnostics for all open files now that
          $PacletIndex is fully populated with external dep symbols.
          dispatchWorkspaceDiagnostics handles both the parallel-kernel path
@@ -1104,7 +1167,7 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
         ,
         {j, 1, Length[jobs]}
       ];
-      If[!empty[toRemoveIndices],
+      If[toRemoveIndices =!= {},
         jobs = Delete[jobs, toRemoveIndices];
         entryCopy = entry;
         entryCopy["ScheduledJobs"] = jobs;
@@ -1115,7 +1178,7 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
     openFilesMapCopy
   ];
 
-  If[!empty[contents],
+  If[contents =!= {},
 
     contents = expandContents[contents];
 
@@ -1203,9 +1266,16 @@ Module[{contents},
 
 
 
+(*
+  runDiagnostics expands to runFastDiagnostics which already publishes
+  partial diagnostics.  A separate publishDiagnostics was re-reading the
+  entry before workspace lints arrived, overwriting real results with an
+  empty array.  Removed the redundant publishDiagnostics here;
+  the workspace-diagnostics slow tier publishes a final update itself
+  once it completes.
+*)
 $didOpenMethods = {
-  "textDocument/runDiagnostics",
-  "textDocument/publishDiagnostics"
+  "textDocument/runDiagnostics"
 }
 
 
@@ -1217,17 +1287,11 @@ $didCloseMethods = {
 $didSaveMethods = {}
 
 
-$didChangeMethods = {}
-
-$didChangeScheduledJobs = {
-  Function[{entry}, If[Now - entry["LastChange"] > Quantity[$DiagnosticsDelayAfterLastChange, "Seconds"],
-    {{
-      "textDocument/runDiagnostics",
-      "textDocument/publishDiagnostics"
-    }, True},
-    {{}, False}]
-  ]
+$didChangeMethods = {
+  "textDocument/runDiagnostics"
 }
+
+$didChangeScheduledJobs = {}
 
 
 RegisterDidOpenMethods[meths_] := ($didOpenMethods = Join[$didOpenMethods, meths])
@@ -2672,9 +2736,18 @@ Module[{params, doc, uri, res},
     Throw[{<| "method" -> "textDocument/didChangeFencepost", "params" -> params, "stale" -> True |>}]
   ];
 
-  res = <| "method" -> #, "params" -> params |>& /@ ({
-      "textDocument/didChangeFencepost"
-    } ~Join~ $didChangeMethods);
+  res = Join[
+    {<| "method" -> "textDocument/didChangeFencepost", "params" -> params |>},
+    Map[
+      Function[{method},
+        If[MemberQ[{"textDocument/runDiagnostics", "textDocument/publishDiagnostics"}, method],
+          <| "method" -> method, "params" -> params, "priority" -> True |>,
+          <| "method" -> method, "params" -> params |>
+        ]
+      ],
+      $didChangeMethods
+    ]
+  ];
 
   log[1, "textDocument/didChange: Exit"];
 
@@ -2885,16 +2958,22 @@ exitHard[] := (
 (*
 now cleanup Startup Messages handling
 *)
-Module[{name},
+Module[{name, startupMessagesText},
 
   If[!FailureQ[$startupMessagesFile],
 
-    name = Close[$startupMessagesFile];
+    name = Quiet[Check[Close[$startupMessagesFile], $Failed]];
 
-    $startupMessagesText = Import[name, "Text"];
+    startupMessagesText = If[StringQ[name] && FileExistsQ[name],
+      Replace[Quiet[Check[Import[name, "Text"], ""]], Except[_String] -> ""],
+      ""
+    ];
 
-    DeleteFile[name];
+    If[StringQ[name] && FileExistsQ[name],
+      Quiet[Check[DeleteFile[name], Null]]
+    ];
 
+    $startupMessagesText = startupMessagesText;
     $Messages = $oldMessages
   ]
 ]
