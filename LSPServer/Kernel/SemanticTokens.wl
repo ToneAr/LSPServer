@@ -197,14 +197,24 @@ Module[{symContext, explicitContext},
       ]
     ];
 
+    (* The explicit context is not a known dep context (could be a CellContext alias
+       or local short name). Fall back to checking the bare symbol name — if the bare
+       symbol is indexed as an external dep symbol, treat it as a dep symbol regardless
+       of the short context prefix. *)
+    symContext = LSPServer`PacletIndex`Private`resolveSymbolContext[Last[StringSplit[name, "`"]]];
+    If[StringQ[symContext] && symContext =!= "Global`" && symContext =!= "System`",
+      Return[KeyExistsQ[$depsSet, symContext] ||
+             AnyTrue[$depsList, StringStartsQ[symContext, #] &]]
+    ];
+
     Return[False]
   ];
 
-  (* For bare symbols, try to get the symbol's context at runtime *)
-  symContext = Quiet[
-    Check[Context[name], None, {Context::notfound}],
-    {Context::notfound}
-  ];
+  (* For bare symbols, look up the symbol's context from the paclet index
+     or via kernel Names[]. Do NOT use Context[name] on a bare string — that
+     creates the symbol in the current package context ($Context) and returns
+     that context instead of the symbol's actual defining context. *)
+  symContext = LSPServer`PacletIndex`Private`resolveSymbolContext[name];
 
   If[!StringQ[symContext] || symContext === "Global`" || symContext === "System`",
     Return[False]
@@ -238,7 +248,17 @@ Module[{bareSymbol},
     isSystemOption[bareSymbol],
       {"property", {"readonly"}}
     ,
-    (* Check paclet symbols using bare name *)
+    (* Symbols with explicit context from built-in Mathematica subcontexts
+       (System`*, Typeset`*, FrontEnd`*, etc.) — treat as system/builtin *)
+    StringContainsQ[name, "`"] &&
+    AnyTrue[{"System`", "Typeset`", "FrontEnd`", "Developer`", "Internal`",
+             "MathLink`", "PackageScope`"},
+      StringStartsQ[name, #] &],
+      {"function", {"readonly", "defaultLibrary"}}
+    ,
+    (* Check paclet symbols using bare name.
+       Also catches workspace symbols accessed via a local cell context alias
+       (e.g. gpl`sortOrder where sortOrder is defined in TDBU`Utilities`GPL`) *)
     isPacletSymbol[bareSymbol],
       {"class", {"definition"}}
     ,
