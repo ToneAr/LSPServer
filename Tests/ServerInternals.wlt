@@ -120,6 +120,144 @@ VerificationTest[
 
 
 VerificationTest[
+  LSPServer`PacletIndex`Private`parseDocComment["(* Return: _[1 *)"],
+  <|"Description" -> None, "ReturnPattern" -> None, "ReturnPatternString" -> "_[1"|>,
+  TestID -> "PacletIndex-ParseDocComment-Swallows-Incomplete-ReturnPatterns"
+]
+
+
+VerificationTest[
+  StringQ[
+    LSPServer`PacletIndex`Private`decodeStringNodeValue[
+      LeafNode[String, FromCharacterCode[{34, 92, 91, 65, 108, 112, 104, 97, 34}], <||>]
+    ]
+  ],
+  True,
+  TestID -> "PacletIndex-ExtractUsages-Swallows-Malformed-StringTokens"
+]
+
+
+VerificationTest[
+  Module[{uri, text, params, result},
+    uri = "file:///tmp/SingleConvergenceEntry.wl";
+    text = StringRiffle[{
+      "needsInt[x_Integer] := x",
+      "test[] := Module[{ref},",
+      "  If[True, ref = 0, ref = 1];",
+      "  needsInt[ref]",
+      "]"
+    }, "\n"];
+    params = <|"textDocument" -> <|"uri" -> uri|>|>;
+
+    Block[{
+      LSPServer`$WorkspaceRootPath = "/tmp",
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$ClosedFileDiagnosticsNotifications = <||>,
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text, "LastChange" -> Now|>|>,
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      LSPServer`Diagnostics`Private`$BuiltinPatterns = <||>
+    },
+      Scan[
+        LSPServer`handleContent[<|"method" -> #, "params" -> params|>] &,
+        {
+          "textDocument/concreteParse",
+          "textDocument/aggregateParse",
+          "textDocument/abstractParse"
+        }
+      ];
+
+      result = Check[
+        LSPServer`handleContent[<|"method" -> "textDocument/runWorkspaceDiagnostics", "params" -> params|>],
+        "MESSAGE"
+      ];
+
+      {
+        result =!= "MESSAGE",
+        MatchQ[result, {} | {_Association}],
+        ListQ[Lookup[LSPServer`$OpenFilesMap[uri], "WorkspaceLints", {}]]
+      }
+    ]
+  ],
+  {True, True, True},
+  TestID -> "RunWorkspaceDiagnostics-Single-Convergence-Entry-NoMessages"
+]
+
+
+VerificationTest[
+  Module[{fixturePath, uri, fileText, openParams, uriParams, result},
+    fixturePath = FileNameJoin[{DirectoryName[$TestFileName], "..", "LSPServer", "Kernel", "Diagnostics.wl"}];
+    uri = LocalObjects`PathToURI[fixturePath];
+    fileText = ReadString[fixturePath];
+    openParams = <|
+      "textDocument" -> <|
+        "uri" -> uri,
+        "languageId" -> "wolfram",
+        "version" -> 1,
+        "text" -> fileText
+      |>
+    |>;
+    uriParams = <|"textDocument" -> <|"uri" -> uri|>|>;
+
+    Block[{
+      LSPServer`$WorkspaceRootPath = FileNameJoin[{DirectoryName[$TestFileName], ".."}],
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$ClosedFileDiagnosticsNotifications = <||>,
+      LSPServer`$OpenFilesMap = <||>,
+      LSPServer`$DiagnosticsKernel = $Failed,
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      LSPServer`Diagnostics`Private`$BuiltinPatterns = <||>
+    },
+      Scan[
+        LSPServer`handleContent[
+          <|
+            "method" -> #,
+            "params" -> If[# === "textDocument/didOpenFencepost", openParams, uriParams]
+          |>
+        ] &,
+        {
+          "textDocument/didOpenFencepost",
+          "textDocument/concreteParse",
+          "textDocument/suppressedRegions",
+          "textDocument/parseIgnoreComments",
+          "textDocument/runConcreteDiagnostics",
+          "textDocument/aggregateParse",
+          "textDocument/runAggregateDiagnostics",
+          "textDocument/abstractParse",
+          "textDocument/runAbstractDiagnostics"
+        }
+      ];
+
+      result = Check[
+        LSPServer`handleContent[<|"method" -> "textDocument/runWorkspaceDiagnostics", "params" -> uriParams|>],
+        "MESSAGE"
+      ];
+
+      {
+        result =!= "MESSAGE",
+        MatchQ[result, {} | {_Association}]
+      }
+    ]
+  ],
+  {True, True},
+  TestID -> "RunWorkspaceDiagnostics-DiagnosticsFile-NoMessages"
+]
+
+
+VerificationTest[
   Module[{uri, params, result},
     uri = "file:///tmp/HoverFastPath.wl";
     params = <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 0, "character" -> 0|>|>;
@@ -171,6 +309,17 @@ VerificationTest[
   ],
   {False, {"file:///tmp/ClosedFile.wl"}, {}},
   TestID -> "Bootstrap-Closed-File-Diagnostics-Uses-Synchronous-Fallback"
+]
+
+
+VerificationTest[
+  {
+    Length[DownValues[LSPServer`Library`Private`getStartupError]] > 0,
+    Length[DownValues[LSPServer`Private`takeFirstContentQueueItem]] > 0,
+    Names["LSPServer`CST`Private`takeFirstContentQueueItem"] === {}
+  },
+  {True, True, True},
+  TestID -> "Startup-PreloadAndCSTContext-AreBoundCorrectly"
 ]
 
 
@@ -1432,7 +1581,7 @@ VerificationTest[
           LSPServer`StdIO`Private`writeLSPResult = Function[Null],
           Pause = Function[Null]
         },
-          LSPServer`readEvalWriteLoop["StdIO", None]
+        } &) /@ Lookup[First[result], "result", {}],
         ],
         "queue"
       ],
@@ -1443,6 +1592,71 @@ VerificationTest[
   ],
   <|"method" -> "shared"|>,
   TestID -> "StdIO-Loop-Uses-Shared-ContentQueue"
+]
+
+
+VerificationTest[
+  Module[{uri, params, result},
+    uri = "file:///tmp/test_codeaction_ignore_warning.wl";
+    params = <|
+      "textDocument" -> <|"uri" -> uri|>,
+      "range" -> <|
+        "start" -> <|"line" -> 0, "character" -> 0|>,
+        "end" -> <|"line" -> 0, "character" -> 5|>
+      |>,
+      "context" -> <|
+        "diagnostics" -> {
+          <|
+            "code" -> "UndefinedSymbol\[VeryThinSpace]\:25bb\[VeryThinSpace]foo",
+            "message" -> "Symbol \"foo\" is not defined in the paclet or System context",
+            "severity" -> 2,
+            "range" -> <|
+              "start" -> <|"line" -> 0, "character" -> 0|>,
+              "end" -> <|"line" -> 0, "character" -> 3|>
+            |>,
+            "source" -> "wolfram lint"
+          |>
+        }
+      |>
+    |>;
+
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "foo[]\n"
+      |>|>
+    },
+      result = Check[
+        LSPServer`handleContent[
+          <|"method" -> "textDocument/codeActionFencepost", "id" -> 77, "params" -> params|>
+        ],
+        "MESSAGE"
+      ];
+
+      SortBy[
+        ({
+          #["title"],
+          #["edit", "changes", uri][[1, "range", "start"]],
+          #["edit", "changes", uri][[1, "newText"]]
+        } &) /@ Lookup[First[result], "result", {}],
+        First
+      ]
+    ]
+  ],
+  {
+    {
+      "Disable \"UndefinedSymbol\" for next line",
+      <|"line" -> 0, "character" -> 0|>,
+      "(* wl-disable-next-line UndefinedSymbol *)\n"
+    },
+    {
+      "Disable \"UndefinedSymbol\" for this line",
+      <|"line" -> 0, "character" -> 5|>,
+      " (* wl-disable-line UndefinedSymbol *)"
+    }
+  },
+  TestID -> "CodeAction-Ignore-QuickFixes-Use-Context-Diagnostics"
 ]
 
 
