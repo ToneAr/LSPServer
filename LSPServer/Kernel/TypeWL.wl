@@ -152,7 +152,7 @@ Module[{expr, pat},
         Check[
           ToExpression[str, InputForm, HoldComplete],
           None,
-          {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx}
+          {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx, ToExpression::sntxi, ToExpression::sntxb}
         ]
       ];
       If[MatchQ[expr, HoldComplete[_]],

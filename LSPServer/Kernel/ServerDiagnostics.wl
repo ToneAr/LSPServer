@@ -75,8 +75,8 @@ Module[{cwd, lspServerVersion, codeParserVersion,
   Print["INFORMATION: Host Kernel CodeInspector build date: ", codeInspectorBuildDate];
   Print["INFORMATION: Host Kernel CodeFormatter build date: ", codeFormatterBuildDate];
 
-  If[$startupMessagesText =!= "",
-    Print["There were messages when loading LSPServer` package: ", $startupMessagesText];
+  If[LSPServer`$startupMessagesText =!= "",
+    Print["There were messages when loading LSPServer` package: ", LSPServer`$startupMessagesText];
     Throw[$Failed]
   ];
 
