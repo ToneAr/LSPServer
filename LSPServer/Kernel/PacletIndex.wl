@@ -155,6 +155,9 @@ $PendingExternalDepFiles = {}
    Discovery is deferred to the background so PacletFind never blocks the LSP event loop. *)
 $PendingDepDiscovery = {}
 $StructuredPackageLoaderCache = <||>
+$LoadedExternalDependencies = <||>
+$WorkspaceSymbolIndex = <||>
+$WorkspaceSymbolSearchEntries = {}
 
 (*
 ==============================================================================
@@ -349,6 +352,8 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd,
     "Dependencies" -> {},
     "ContextAliases" -> <||>
   |>;
+  $WorkspaceSymbolIndex = <||>;
+  $WorkspaceSymbolSearchEntries = {};
 
   (*
   Load the workspace-level cache from disk - one Import for the whole workspace
@@ -879,6 +884,55 @@ mergeIndexResult[$Failed] := Null
 mergeIndexResult[_] := Null
 
 
+workspaceSymbolEntryFromDefinition[name_String, def_Association] :=
+  Module[{src},
+    src = Lookup[def, "source", {{1, 1}, {1, 1}}];
+    If[!MatchQ[src, {{_Integer, _Integer}, {_Integer, _Integer}}],
+      src = {{1, 1}, {1, 1}}
+    ];
+    <|
+      "name" -> name,
+      "kind" -> Lookup[def, "kind", "unknown"],
+      "location" -> <|
+        "uri" -> Lookup[def, "uri", ""],
+        "range" -> <|
+          "start" -> <|
+            "line" -> src[[1, 1]] - 1,
+            "character" -> src[[1, 2]] - 1
+          |>,
+          "end" -> <|
+            "line" -> src[[2, 1]] - 1,
+            "character" -> src[[2, 2]] - 1
+          |>
+        |>
+      |>,
+      "containerName" -> Replace[Lookup[def, "context", None], None -> ""]
+    |>
+  ]
+
+
+refreshWorkspaceSymbolEntriesForSymbol[name_String] :=
+Module[{defs, entries},
+  defs = Replace[
+    Lookup[Lookup[$PacletIndex["Symbols"], name, <||>], "Definitions", {}],
+    Except[_List] -> {}
+  ];
+  entries = workspaceSymbolEntryFromDefinition[name, #] & /@ defs;
+  $WorkspaceSymbolIndex[name] = entries;
+  $WorkspaceSymbolSearchEntries = Flatten[Values[$WorkspaceSymbolIndex], 1]
+]
+
+
+dropWorkspaceSymbolEntriesForSymbol[name_String] :=
+(
+  If[AssociationQ[$WorkspaceSymbolIndex],
+    $WorkspaceSymbolIndex = KeyDrop[$WorkspaceSymbolIndex, name],
+    $WorkspaceSymbolIndex = <||>
+  ];
+  $WorkspaceSymbolSearchEntries = Flatten[Values[$WorkspaceSymbolIndex], 1]
+)
+
+
 (*
 Batch add a file's data to the PacletIndex.
 Uses grouped-by-name operations instead of per-item AppendTo to avoid O(n^2).
@@ -927,6 +981,8 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
     ],
     defsByName
   ];
+
+  Scan[refreshWorkspaceSymbolEntriesForSymbol, Keys[defsByName]];
 
   (*
   Group usages by symbol name for batch insert
@@ -3895,7 +3951,7 @@ Catch[
 Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
   contextLoads, explicitContextRefs, structuredMetadata, mergedStructuredData,
   packageContext, packageScopeContext, privateContext, fileAliases, fileFormat,
-  isIPWL, ipwlAnnotations, sourceText},
+  isIPWL, ipwlAnnotations, sourceText, openEntry, reusedCachedArtifacts = False},
 
   filePath = StringReplace[uri, "file://" -> ""];
   If[shouldExcludeFile[filePath],
@@ -3926,31 +3982,53 @@ Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
 
   RemoveFileFromIndex[uri];
 
+  openEntry = Lookup[LSPServer`$OpenFilesMap, uri, Missing["NotAvailable"]];
+
+  If[
+    AssociationQ[openEntry] &&
+    Lookup[openEntry, "Text", Missing["NotAvailable"]] === text &&
+    Lookup[openEntry, "PreprocessedText", text] === sourceText,
+    cst = Lookup[openEntry, "CST", Missing["NotAvailable"]];
+    agg = Lookup[openEntry, "Agg", Missing["NotAvailable"]];
+    ast = Lookup[openEntry, "AST", Missing["NotAvailable"]];
+
+    reusedCachedArtifacts =
+      cst =!= Null && !MissingQ[cst] && !FailureQ[cst] &&
+      agg =!= Null && !MissingQ[agg] && !FailureQ[agg] &&
+      ast =!= Null && !MissingQ[ast] && !FailureQ[ast];
+  ];
+
   (*
   Parse the new content.
   Match the FileFormat option used by textDocument/concreteParse so the CST
   can be shared with the diagnostics pipeline and avoid a duplicate parse.
   *)
-  fileFormat = LSPServer`SourceFileFormat[filePath];
-  cst = Quiet[CodeConcreteParse[sourceText, "FileFormat" -> fileFormat]];
+  If[!reusedCachedArtifacts,
+    fileFormat = LSPServer`SourceFileFormat[filePath];
+    cst = Quiet[CodeConcreteParse[sourceText, "FileFormat" -> fileFormat]];
 
-  If[FailureQ[cst],
-    If[$Debug2, log["UpdateFileIndex: failed to parse"]];
-    Throw[Null]
-  ];
+    If[FailureQ[cst],
+      If[$Debug2, log["UpdateFileIndex: failed to parse"]];
+      Throw[Null]
+    ];
 
-  (*
-  Apply the same ContainerNode head mutation that textDocument/concreteParse does
-  so the stored CST is in the expected form for the diagnostics pipeline.
-  *)
-  cst[[1]] = File;
+    (*
+    Apply the same ContainerNode head mutation that textDocument/concreteParse does
+    so the stored CST is in the expected form for the diagnostics pipeline.
+    *)
+    cst[[1]] = File;
 
-  agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
-  ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
 
-  If[FailureQ[ast],
-    If[$Debug2, log["UpdateFileIndex: failed to abstract"]];
-    Throw[Null]
+    If[FailureQ[ast],
+      If[$Debug2, log["UpdateFileIndex: failed to abstract"]];
+      Throw[Null]
+    ];
+  ,
+    If[cst[[1]] =!= File,
+      cst[[1]] = File
+    ]
   ];
 
   definitions = extractDefinitions[ast, cst, uri];
@@ -4079,6 +4157,7 @@ Module[{fileEntry, fileSymbols},
           DeleteCases[$PacletIndex["Symbols", symName, "Definitions"], KeyValuePattern["uri" -> uri]];
         $PacletIndex["Symbols", symName, "References"] =
           DeleteCases[$PacletIndex["Symbols", symName, "References"], KeyValuePattern["uri" -> uri]];
+        refreshWorkspaceSymbolEntriesForSymbol[symName];
 
         (*
         Remove symbol entry if empty
@@ -4086,7 +4165,8 @@ Module[{fileEntry, fileSymbols},
         If[$PacletIndex["Symbols", symName, "Definitions"] === {} &&
            $PacletIndex["Symbols", symName, "References"] === {} &&
            $PacletIndex["Symbols", symName, "Usages"] === {},
-          $PacletIndex["Symbols", symName] =.
+          $PacletIndex["Symbols", symName] =.;
+          dropWorkspaceSymbolEntriesForSymbol[symName]
         ]
       ]
     ],
@@ -4419,34 +4499,7 @@ Module[{fileData, contextLoads, depContexts, explicitImports, kernelContexts, lo
 Get all workspace symbols for workspace/symbol search
 *)
 GetAllWorkspaceSymbols[] :=
-Module[{bag},
-  bag = Internal`Bag[];
-
-  KeyValueMap[
-    Function[{name, data},
-      Scan[
-        Function[{def},
-          Internal`StuffBag[bag, <|
-            "name" -> name,
-            "kind" -> def["kind"],
-            "location" -> <|
-              "uri" -> def["uri"],
-              "range" -> <|
-                "start" -> <| "line" -> def["source"][[1, 1]] - 1, "character" -> def["source"][[1, 2]] - 1 |>,
-                "end" -> <| "line" -> def["source"][[2, 1]] - 1, "character" -> def["source"][[2, 2]] - 1 |>
-              |>
-            |>,
-            "containerName" -> Replace[def["context"], None -> ""]
-          |>]
-        ],
-        data["Definitions"]
-      ]
-    ],
-    $PacletIndex["Symbols"]
-  ];
-
-  Internal`BagPart[bag, All]
-]
+  Replace[$WorkspaceSymbolSearchEntries, Except[_List] -> {}]
 
 
 (*

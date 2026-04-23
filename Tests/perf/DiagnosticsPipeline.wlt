@@ -1,6 +1,7 @@
 PacletDirectoryLoad[AbsoluteFileName[
   FileNameJoin[{DirectoryName[$TestFileName], "..", "..", "build", "paclet"}]]];
 Needs["LSPServer`"];
+LSPServer`LoadAllFeatureModules[];
 Needs["MUnit`"];
 
 $ConfidenceLevel = 0.50;
@@ -98,14 +99,34 @@ VerificationTest[
       |>
     |>;
     result = LSPServer`expandContents[{fakeContent}];
-    Take[Lookup[result, "method", Missing["NotFound"]], 3]
+    Lookup[result, "method", Missing["NotFound"]]
   ],
   {
     "textDocument/didChangeFencepost",
-    "textDocument/runFastDiagnostics",
-    "textDocument/publishDiagnostics"
+    "textDocument/runFastDiagnostics"
   },
   TestID -> "DidChangeExpandsToImmediateFastTierAndPublish"
+]
+
+
+VerificationTest[
+  Module[{fakeContent, result},
+    fakeContent = <|
+      "method" -> "textDocument/didOpen",
+      "params" -> <|
+        "textDocument" -> <|
+          "uri" -> "file:///test_didopen_deferred_fasttier.wl",
+          "text" -> "x = 1"
+        |>
+      |>
+    |>;
+    result = LSPServer`expandContents[{fakeContent}];
+    Lookup[result, "method", Missing["NotFound"]]
+  ],
+  {
+    "textDocument/didOpenFencepost"
+  },
+  TestID -> "DidOpenExpandsToFencepostOnly"
 ]
 
 VerificationTest[
@@ -131,20 +152,22 @@ VerificationTest[
   {
     "textDocument/didChangeFencepost",
     "textDocument/runFastDiagnostics",
-    "textDocument/publishDiagnostics",
-    "textDocument/runWorkspaceDiagnostics"
+    "textDocument/runWorkspaceDiagnostics",
+    "textDocument/documentSymbolFencepost"
   },
   TestID -> "DidChangeImmediateDiagnosticsArePrioritized"
 ]
 
 VerificationTest[
-  Module[{fakeURI, result, tokenResult},
+  Module[{fakeURI, result},
     fakeURI = "file:///test_fasttier_pending_semantic_tokens.wl";
     LSPServer`$SemanticTokens = True;
     LSPServer`$OpenFilesMap = <||>;
     LSPServer`$OpenFilesMap[fakeURI] = <|
       "Text" -> "x = 1\ny[z_] := z + 1\n",
-      "LastChange" -> Now
+      "LastChange" -> Now,
+      "ScheduledJobs" -> {Function[{entry}, {{}, False}]},
+      "IndexUpdatePending" -> True
     |>;
     LSPServer`$PendingSemanticTokenRequests = <|fakeURI -> {42}|>;
     LSPServer`$DiagnosticsTask = None;
@@ -156,20 +179,48 @@ VerificationTest[
         "params" -> <|"textDocument" -> <|"uri" -> fakeURI|>|>
       |>]
     ];
-    tokenResult = SelectFirst[
-      result,
-      AssociationQ[#] && Lookup[#, "id", None] === 42 &,
-      Missing["NotFound"]
-    ];
     {
       AnyTrue[result, MatchQ[#, KeyValuePattern["method" -> "textDocument/publishDiagnostics"]] &],
-      MatchQ[tokenResult, KeyValuePattern[{"jsonrpc" -> "2.0", "result" -> KeyValuePattern["data" -> _List]}]],
+      Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
       Lookup[LSPServer`$PendingSemanticTokenRequests, fakeURI, Missing["NotFound"]],
       KeyExistsQ[LSPServer`$OpenFilesMap[fakeURI], "SemanticTokens"]
     }
   ],
-  {True, True, Missing["NotFound"], True},
-  TestID -> "FastTierRecoversPendingSemanticTokenRequests"
+  {False, {"textDocument/semanticTokens/fullFencepost"}, {42}, False},
+  TestID -> "FastTierQueuesPendingSemanticTokenRequests"
+]
+
+
+VerificationTest[
+  Module[{fakeURI, result},
+    fakeURI = "file:///test_fasttier_parse_only_while_reindex_pending.wl";
+    LSPServer`$SemanticTokens = False;
+    LSPServer`$OpenFilesMap = <||>;
+    LSPServer`$OpenFilesMap[fakeURI] = <|
+      "Text" -> "x = 1\ny[z_] := z + 1\n",
+      "LastChange" -> Now,
+      "ScheduledJobs" -> {Function[{entry}, {{}, False}]},
+      "IndexUpdatePending" -> True
+    |>;
+    LSPServer`$DiagnosticsTask = None;
+    LSPServer`$ContentQueue = {};
+    LSPServer`$DiagnosticsKernel = $Failed;
+    result = Block[{LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics = Function[uri, Null]},
+      LSPServer`handleContent[<|
+        "method" -> "textDocument/runFastDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> fakeURI|>|>
+      |>]
+    ];
+    {
+      result,
+      KeyExistsQ[LSPServer`$OpenFilesMap[fakeURI], "CST"],
+      KeyExistsQ[LSPServer`$OpenFilesMap[fakeURI], "AST"],
+      KeyExistsQ[LSPServer`$OpenFilesMap[fakeURI], "CSTLints"],
+      Lookup[LSPServer`$OpenFilesMap[fakeURI], "WorkspaceLints", Missing["NotFound"]]
+    }
+  ],
+  {{}, True, True, False, Null},
+  TestID -> "FastTierParseOnlyWhileReindexPending"
 ]
 
 VerificationTest[
@@ -200,11 +251,19 @@ VerificationTest[
       "Contexts" -> <||>, "Dependencies" -> {}, "ContextAliases" -> <||>|>;
     $BuiltinPatterns = <||>;
     $WorkspaceRootPath = "/tmp/testws";
+    $OpenFilesMap = <|"file:///test.wl" -> <|"AST" -> HoldComplete[testAST]|>|>;
+    LSPServer`Private`$IndexingWasActive = False;
+    LSPServer`PacletIndex`$PendingIndexFiles = {};
+    LSPServer`PacletIndex`Private`$PendingExternalDepFiles = {};
     snap = buildWorkerSnapshot["file:///test.wl"];
     KeyExistsQ[snap, "PacletIndex"] &&
     KeyExistsQ[snap, "BuiltinPatterns"] &&
     KeyExistsQ[snap, "WorkspaceRootPath"] &&
-    KeyExistsQ[snap, "ConfidenceLevel"]
+    KeyExistsQ[snap, "ConfidenceLevel"] &&
+    KeyExistsQ[snap, "OpenFileEntry"] &&
+    KeyExistsQ[snap, "IndexingWasActive"] &&
+    KeyExistsQ[snap, "PendingIndexFiles"] &&
+    KeyExistsQ[snap, "PendingExternalDepFiles"]
   ],
   True,
   TestID -> "BuildWorkerSnapshotHasRequiredKeys"
@@ -270,13 +329,19 @@ VerificationTest[
             "ContextAliases" -> <||>
           |>,
           LSPServer`PacletIndex`$WorkspaceRoot = None,
+          LSPServer`$PendingIndexFiles = {},
+          LSPServer`$PendingReferenceFiles = {},
+          LSPServer`$PendingExternalDepFiles = {},
           LSPServer`PacletIndex`$PendingIndexFiles = {},
           LSPServer`PacletIndex`$PendingReferenceFiles = {},
           LSPServer`PacletIndex`$PendingExternalDepFiles = {}
         },
           LSPServer`PacletIndex`InitializePacletIndex[workspaceRoot];
           {
-            Sort[FileNameTake /@ LSPServer`PacletIndex`$PendingIndexFiles],
+            Sort[DeleteDuplicates[FileNameTake /@ Join[
+              LSPServer`$PendingIndexFiles,
+              LSPServer`PacletIndex`$PendingIndexFiles
+            ]]],
             indexed
           }
         ]
@@ -508,6 +573,7 @@ VerificationTest[
       LSPServer`$DiagnosticsTaskStartTime = None,
       LSPServer`$QueueLastNonEmptyTime = AbsoluteTime[],
       LSPServer`$IndexingWasActive = False,
+      LSPServer`$WorkspaceIndexingQueued = False,
       LSPServer`PacletIndex`$PendingExternalDepFiles = {"/tmp/testws/External.wl"},
       LSPServer`PacletIndex`$PendingIndexFiles = {"/tmp/testws/Workspace.wl"},
       LSPServer`PacletIndex`$PendingReferenceFiles = {},
@@ -519,13 +585,44 @@ VerificationTest[
       {
         calls,
         LSPServer`$IndexingWasActive,
-        LSPServer`PacletIndex`$PendingIndexFiles,
-        LSPServer`PacletIndex`$PendingExternalDepFiles
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
+        LSPServer`$WorkspaceIndexingQueued
       }
     ]
   ],
-  {0, True, {"/tmp/testws/Workspace.wl"}, {"/tmp/testws/External.wl"}},
-  TestID -> "ProcessScheduledJobsDefersIndexingWhileQueueBusy"
+  {0, True, {"textDocument/documentSymbolFencepost", "workspace/processIndexing"}, True},
+  TestID -> "ProcessScheduledJobsQueuesCooperativeIndexingWhileQueueBusy"
+]
+
+VerificationTest[
+  Module[{calls = 0},
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$IndexingWasActive = True,
+      LSPServer`$WorkspaceIndexingQueued = True,
+      LSPServer`$OpenFilesMap = <||>,
+      LSPServer`$WorkspaceDiagnosticsSweepURIs = {},
+      LSPServer`PacletIndex`$PendingExternalDepFiles = {"/tmp/testws/External.wl"},
+      LSPServer`PacletIndex`$PendingIndexFiles = {"/tmp/testws/Workspace.wl"},
+      LSPServer`PacletIndex`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`Private`$PendingDepDiscovery = {},
+      LSPServer`PacletIndex`ProcessPendingIndexFiles = Function[{}, calls++; True],
+      LSPServer`Private`queueWorkspaceIndexing = Function[{reason},
+        LSPServer`$WorkspaceIndexingQueued = True;
+        AppendTo[LSPServer`$ContentQueue, <|"method" -> "workspace/processIndexing", "deferrable" -> True|>]
+      ],
+      LSPServer`Private`finishWorkspaceIndexing = Function[{}, AppendTo[LSPServer`$ContentQueue, <|"method" -> "finished"|>]]
+    },
+      {
+        LSPServer`handleContent[<|"method" -> "workspace/processIndexing"|>],
+        calls,
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
+        LSPServer`$WorkspaceIndexingQueued
+      }
+    ]
+  ],
+  {{}, 1, {"workspace/processIndexing"}, True},
+  TestID -> "WorkspaceProcessIndexing-Requeues-Remaining-Work"
 ]
 
 VerificationTest[
@@ -565,6 +662,278 @@ VerificationTest[
   ],
   {None, None, None, <|"URI" -> "file:///tmp/testws/ClosedResult.wl", "Notification" -> <||>|>, "textDocument/publishClosedFileDiagnostics"},
   TestID -> "ProcessScheduledJobsPublishesCompletedClosedSweepTask"
+]
+
+
+VerificationTest[
+  Module[{uri},
+    uri = "file:///tmp/testws/HoverResult.wl";
+
+    Block[{
+      LSPServer`$ServerState = "running",
+      LSPServer`$ContentQueue = {},
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> "Sin[x]\n", "AST" -> HoldComplete[Null], "LastChange" -> Now|>|>,
+      LSPServer`$DiagnosticsKernel = "fake-kernel",
+      LSPServer`$DiagnosticsKernelLaunchAfter = None,
+      LSPServer`$DiagnosticsTask = None,
+      LSPServer`$DiagnosticsTaskURI = None,
+      LSPServer`$DiagnosticsTaskKind = None,
+      LSPServer`$DiagnosticsTaskResult = None,
+      LSPServer`$DiagnosticsTaskStartTime = None,
+      LSPServer`$HoverTask = "hover-task",
+      LSPServer`$HoverTaskURI = uri,
+      LSPServer`$HoverTaskID = 44,
+      LSPServer`$HoverTaskResult = None,
+      LSPServer`$HoverTaskStartTime = None,
+      LSPServer`$WorkspaceDiagnosticsSweepURIs = {},
+      LSPServer`$IndexingWasActive = False,
+      LSPServer`$PendingExternalDepFiles = {},
+      LSPServer`$PendingIndexFiles = {},
+      LSPServer`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`Private`$PendingDepDiscovery = {},
+      LSPServer`Private`ProcessPendingIndexFiles = Function[{}, False],
+      LSPServer`Private`queueSemanticTokensRefresh = Function[args, Null],
+      TimeConstrained = Function[{expr, timeout, alt}, expr],
+      WaitAll = Function[{task}, <|"URI" -> uri, "ID" -> 44, "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>|>]
+    },
+      LSPServer`ProcessScheduledJobs[];
+      {
+        LSPServer`$HoverTask,
+        LSPServer`$HoverTaskURI,
+        LSPServer`$HoverTaskID,
+        LSPServer`$HoverTaskResult,
+        Lookup[First[LSPServer`$ContentQueue], "method", Missing["NotFound"]],
+        Lookup[First[LSPServer`$ContentQueue], "id", Missing["NotFound"]]
+      }
+    ]
+  ],
+  {None, None, None, <|"URI" -> "file:///tmp/testws/HoverResult.wl", "ID" -> 44, "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>|>, "textDocument/publishHoverResult", 44},
+  TestID -> "ProcessScheduledJobsPublishesCompletedHoverTask"
+]
+
+
+VerificationTest[
+  Module[{abortCalls = {}, closeCalls = {}, result},
+    Block[{
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$DiagnosticsKernel = "fake-kernel",
+      LSPServer`$DiagnosticsKernelBin = "/tmp/fake/WolframKernel",
+      LSPServer`$DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 60,
+      LSPServer`$DiagnosticsTask = "fake-task",
+      LSPServer`$DiagnosticsTaskURI = "file:///tmp/testws/Open.wl",
+      LSPServer`$DiagnosticsTaskKind = "open-file",
+      LSPServer`$DiagnosticsTaskResult = <||>,
+      LSPServer`$DiagnosticsTaskStartTime = AbsoluteTime[] - 1,
+      LSPServer`$OpenFilesMap = <||>,
+      LSPServer`$ServerState = "running",
+      AbortKernels = Function[{kernel}, AppendTo[abortCalls, kernel]],
+      CloseKernels = Function[{kernel}, AppendTo[closeCalls, kernel]]
+    },
+      result = LSPServer`handleContent[<|"method" -> "shutdown", "id" -> 7|>];
+      {
+        result,
+        abortCalls,
+        closeCalls,
+        LSPServer`$DiagnosticsKernel,
+        LSPServer`$DiagnosticsKernelBin,
+        LSPServer`$DiagnosticsTask,
+        LSPServer`$DiagnosticsTaskURI,
+        LSPServer`$DiagnosticsTaskKind,
+        LSPServer`$DiagnosticsTaskResult,
+        LSPServer`$DiagnosticsTaskStartTime,
+        LSPServer`$DiagnosticsKernelLaunchAfter,
+        LSPServer`$ServerState
+      }
+    ]
+  ],
+  {
+    {<|"jsonrpc" -> "2.0", "id" -> 7, "result" -> Null|>},
+    {"fake-kernel"},
+    {"fake-kernel"},
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    "shutdown"
+  },
+  TestID -> "ShutdownCleansUpDiagnosticsWorker"
+]
+
+
+VerificationTest[
+  Module[{abortCalls = {}, closeCalls = {}, launchCount = 0, installDir},
+    installDir = CreateDirectory[];
+    Module[{addonsApps, kernelObjDir, kernelBin, result},
+      addonsApps = FileNameJoin[{installDir, "AddOns", "Applications"}];
+      kernelObjDir = FileNameJoin[{installDir, "SystemFiles", "Components", "KernelObjects", "Kernel"}];
+      kernelBin = FileNameJoin[{installDir, "SystemFiles", "Kernel", "Binaries", $SystemID, "WolframKernel"}];
+      Quiet[CreateDirectory[addonsApps, CreateIntermediateDirectories -> True]];
+      Quiet[CreateDirectory[kernelObjDir, CreateIntermediateDirectories -> True]];
+      Quiet[CreateDirectory[DirectoryName[kernelBin], CreateIntermediateDirectories -> True]];
+      Quiet[Export[FileNameJoin[{kernelObjDir, "KernelObjectsStartup.wl"}], "", "Text"]];
+      Quiet[Export[kernelBin, "", "Text"]];
+      result = Quiet[
+        Block[{
+          LSPServer`$DiagnosticsKernel = "stale-kernel",
+          LSPServer`$DiagnosticsKernelBin = "/tmp/stale/WolframKernel",
+          LSPServer`$DiagnosticsTask = "stale-task",
+          LSPServer`$DiagnosticsTaskURI = "file:///tmp/testws/Closed.wl",
+          LSPServer`$DiagnosticsTaskKind = "closed-file-sweep",
+          LSPServer`$DiagnosticsTaskResult = <||>,
+          LSPServer`$DiagnosticsTaskStartTime = AbsoluteTime[] - 10,
+          LSPServer`$WorkspaceDiagnosticsSweepURIs = {},
+          AbortKernels = Function[{kernel}, AppendTo[abortCalls, kernel]],
+          CloseKernels = Function[{kernel}, AppendTo[closeCalls, kernel]],
+          LaunchKernels = Function[{n}, launchCount++; {"new-kernel"}],
+          ParallelEvaluate = Function[{expr, kernel}, Null, HoldAll],
+          DistributeDefinitions = Function[args, Null, HoldAll],
+          Get = Function[{path}, Null],
+          Needs = Function[{ctx}, Null],
+          $InstallationDirectory = installDir
+        },
+          LSPServer`Private`launchDiagnosticsKernel[];
+          {
+            launchCount,
+            abortCalls,
+            closeCalls,
+            LSPServer`$DiagnosticsKernel,
+            LSPServer`$DiagnosticsKernelBin,
+            LSPServer`$DiagnosticsTask,
+            LSPServer`$DiagnosticsTaskURI,
+            LSPServer`$DiagnosticsTaskKind,
+            LSPServer`$WorkspaceDiagnosticsSweepURIs
+          }
+        ],
+        {$InstallationDirectory::strval}
+      ];
+      Quiet[DeleteDirectory[installDir, DeleteContents -> True]];
+      result
+    ]
+  ],
+  {
+    1,
+    {"stale-kernel"},
+    {"stale-kernel"},
+    "new-kernel",
+    _String,
+    None,
+    None,
+    None,
+    {"file:///tmp/testws/Closed.wl"}
+  },
+  SameTest -> MatchQ,
+  TestID -> "LaunchDiagnosticsKernelCleansUpExistingWorkerFirst"
+]
+
+
+VerificationTest[
+  Module[{abortCalls = {}, closeCalls = {}, launchCount = 0, installDir},
+    installDir = CreateDirectory[];
+    Module[{addonsApps, kernelObjDir, kernelBin, result},
+      addonsApps = FileNameJoin[{installDir, "AddOns", "Applications"}];
+      kernelObjDir = FileNameJoin[{installDir, "SystemFiles", "Components", "KernelObjects", "Kernel"}];
+      kernelBin = FileNameJoin[{installDir, "SystemFiles", "Kernel", "Binaries", $SystemID, "WolframKernel"}];
+      Quiet[CreateDirectory[addonsApps, CreateIntermediateDirectories -> True]];
+      Quiet[CreateDirectory[kernelObjDir, CreateIntermediateDirectories -> True]];
+      Quiet[CreateDirectory[DirectoryName[kernelBin], CreateIntermediateDirectories -> True]];
+      Quiet[Export[FileNameJoin[{kernelObjDir, "KernelObjectsStartup.wl"}], "", "Text"]];
+      Quiet[Export[kernelBin, "", "Text"]];
+      result = Quiet[
+        Block[{
+          LSPServer`$DiagnosticsKernel = None,
+          LSPServer`$DiagnosticsKernelBin = None,
+          LSPServer`$DiagnosticsTask = None,
+          LSPServer`$DiagnosticsTaskURI = None,
+          LSPServer`$DiagnosticsTaskKind = None,
+          LSPServer`$DiagnosticsTaskResult = None,
+          LSPServer`$DiagnosticsTaskStartTime = None,
+          AbortKernels = Function[{kernel}, AppendTo[abortCalls, kernel]],
+          CloseKernels = Function[{kernel}, AppendTo[closeCalls, kernel]],
+          LaunchKernels = Function[{n}, launchCount++; {"new-kernel"}],
+          ParallelEvaluate = Function[{expr, kernel}, $Failed, HoldAll],
+          DistributeDefinitions = Function[args, Throw["should-not-run", "dist"]],
+          Get = Function[{path}, Null],
+          Needs = Function[{ctx}, Null],
+          $InstallationDirectory = installDir
+        },
+          LSPServer`Private`launchDiagnosticsKernel[];
+          {
+            launchCount,
+            abortCalls,
+            closeCalls,
+            LSPServer`$DiagnosticsKernel,
+            LSPServer`$DiagnosticsKernelBin
+          }
+        ],
+        {$InstallationDirectory::strval}
+      ];
+      Quiet[DeleteDirectory[installDir, DeleteContents -> True]];
+      result
+    ]
+  ],
+  {
+    1,
+    {"new-kernel"},
+    {"new-kernel"},
+    $Failed,
+    $Failed
+  },
+  TestID -> "LaunchDiagnosticsKernelCleansUpFailedSetupKernel"
+]
+
+VerificationTest[
+  Module[{uri, result},
+    uri = "file:///tmp/testws/MergeOpen.wl";
+
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "foo[]\n",
+        "CSTLints" -> {},
+        "AggLints" -> {},
+        "ASTLints" -> {},
+        "ScopingLints" -> {},
+        "WorkspaceLints" -> {
+          CodeInspector`InspectionObject[
+            "UndefinedSymbol",
+            "bad symbol",
+            "Remark",
+            <|CodeParser`Source -> {{1, 1}, {1, 4}}, ConfidenceLevel -> 0.9, "Argument" -> "foo"|>
+          ]
+        },
+        "IgnoreData" -> {}
+      |>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$DiagnosticsTaskResult = <|
+        "URI" -> uri,
+        "WorkspaceLints" -> {
+          CodeInspector`InspectionObject[
+            "UndefinedSymbol",
+            "bad symbol",
+            "Remark",
+            <|CodeParser`Source -> {{1, 1}, {1, 4}}, ConfidenceLevel -> 0.9, "Argument" -> "foo"|>
+          ]
+        }
+      |>,
+      LSPServer`$ConfidenceLevel = 0.50
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/mergeWorkspaceLints",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+      {
+        Lookup[First[result], "method", Missing["NotFound"]],
+        Length[Lookup[Lookup[First[result], "params", <||>], "diagnostics", {}]],
+        ListQ[Lookup[LSPServer`$OpenFilesMap[uri], "WorkspaceLints", Null]],
+        LSPServer`$DiagnosticsTaskResult
+      }
+    ]
+  ],
+  {"textDocument/publishDiagnostics", 1, True, None},
+  TestID -> "MergeWorkspaceLintsPublishesMergedDiagnostics"
 ]
 
 VerificationTest[
@@ -619,6 +988,7 @@ VerificationTest[
     Block[{
       LSPServer`$WorkspaceRootPath = "/tmp/testws",
       LSPServer`$ContentQueue = {},
+      LSPServer`$WorkspaceBootstrapAfter = None,
       LSPServer`$WorkspaceDiagnosticsSweepURIs = {},
       LSPServer`$OpenFilesMap = <||>,
       LSPServer`PacletIndex`$PacletIndex = <||>,
@@ -628,13 +998,47 @@ VerificationTest[
         |>
       ],
       LSPServer`LoadProjectIgnoreConfig = Function[{root}, Null]
-    },
+      },
       LSPServer`handleContent[<|"method" -> "initialized", "params" -> <||>|>];
+      MatchQ[LSPServer`$WorkspaceBootstrapAfter, _?NumericQ]
+    ]
+  ],
+  True,
+  TestID -> "InitializedSchedulesBootstrapWorkspaceIndex"
+]
+
+VerificationTest[
+  Module[{},
+    Block[{
+      LSPServer`$ServerState = "running",
+      LSPServer`$WorkspaceRootPath = "/tmp/testws",
+      LSPServer`$ContentQueue = {},
+      LSPServer`$WorkspaceBootstrapAfter = AbsoluteTime[] - 1,
+      LSPServer`$QueueLastNonEmptyTime = AbsoluteTime[] - 5,
+      LSPServer`$DiagnosticsTask = None,
+      LSPServer`$DiagnosticsTaskKind = None,
+      LSPServer`$DiagnosticsTaskURI = None,
+      LSPServer`$DiagnosticsTaskResult = None,
+      LSPServer`$DiagnosticsTaskStartTime = None,
+      LSPServer`$DiagnosticsKernel = None,
+      LSPServer`$DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 60,
+      LSPServer`$IndexingWasActive = False,
+      LSPServer`$PendingExternalDepFiles = {},
+      LSPServer`$PendingIndexFiles = {},
+      LSPServer`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`Private`$PendingDepDiscovery = {},
+      LSPServer`Private`ProcessPendingIndexFiles = Function[{}, False],
+      LSPServer`$WorkspaceDiagnosticsSweepURIs = {},
+      LSPServer`$OpenFilesMap = <||>,
+      LSPServer`Private`launchDiagnosticsKernel = Function[{}, Null],
+      LSPServer`Private`queueSemanticTokensRefresh = Function[args, Null]
+    },
+      LSPServer`ProcessScheduledJobs[];
       # ["method"] & /@ LSPServer`$ContentQueue
     ]
   ],
-  {"workspace/bootstrapClosedFileDiagnostics"},
-  TestID -> "InitializedQueuesBootstrapClosedFileDiagnostics"
+  {"workspace/bootstrapWorkspaceIndex"},
+  TestID -> "ProcessScheduledJobsQueuesBootstrapWorkspaceIndexAfterIdle"
 ]
 
 VerificationTest[
@@ -716,19 +1120,11 @@ VerificationTest[
 ]
 
 VerificationTest[
-  Module[{fixturePath, uri, fileText, entry, cst, agg, ast},
-    fixturePath = FileNameJoin[{DirectoryName[$TestFileName], "..", "hover", "DocCommentTest.wl"}];
-    uri = LocalObjects`PathToURI[fixturePath];
-    fileText = ReadString[fixturePath];
-
-    cst = Quiet[CodeConcreteParse[fileText, "FileFormat" -> "Package"]];
-    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
-    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+  Module[{uri, entry},
+    uri = "file:///tmp/dispatch-workspace-diags.wl";
     entry = <|
-      "Text" -> fileText,
-      "CST" -> cst,
-      "Agg" -> agg,
-      "AST" -> ast,
+      "Text" -> "f[x_] := x\n",
+      "AST" -> HoldComplete[testAST],
       "LastChange" -> Now
     |>;
 
@@ -741,8 +1137,9 @@ VerificationTest[
       LSPServer`$DiagnosticsTaskURI = None,
       LSPServer`$DiagnosticsTaskKind = None,
       LSPServer`$DiagnosticsTaskResult = None,
+      LSPServer`$DiagnosticsTaskStartTime = None,
       LSPServer`$OpenFilesMap = <|uri -> entry|>,
-      LSPServer`$WorkspaceRootPath = DirectoryName[fixturePath],
+      LSPServer`$WorkspaceRootPath = "/tmp",
       LSPServer`$ConfidenceLevel = 0.50,
       LSPServer`PacletIndex`$PacletIndex = <|
         "Symbols" -> <||>,
@@ -751,7 +1148,8 @@ VerificationTest[
         "Dependencies" -> {},
         "ContextAliases" -> <||>
       |>,
-      LSPServer`Diagnostics`Private`$BuiltinPatterns = <||>
+      LSPServer`Diagnostics`Private`$BuiltinPatterns = <||>,
+      ParallelSubmit = Function[{kernels, expr}, "fake-task", HoldAll]
     },
       LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics[uri];
       {
@@ -762,11 +1160,14 @@ VerificationTest[
             "params" -> KeyValuePattern["textDocument" -> KeyValuePattern["uri" -> uri]]
           }]
         ],
-        Lookup[Last[LSPServer`$ContentQueue], "method", Missing["NotFound"]],
-        LSPServer`$DiagnosticsTask
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
+        LSPServer`$DiagnosticsTask,
+        LSPServer`$DiagnosticsTaskKind,
+        LSPServer`$DiagnosticsTaskURI
       }
     ]
   ],
-  {1, "textDocument/runWorkspaceDiagnostics", None},
-  TestID -> "DispatchWorkspaceDiagnosticsQueuesSyncWork"
+  {0, Missing["NotFound"], "fake-task", "open-file", _String},
+  SameTest -> MatchQ,
+  TestID -> "DispatchWorkspaceDiagnosticsUsesBackgroundTask"
 ]

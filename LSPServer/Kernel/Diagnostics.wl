@@ -276,19 +276,25 @@ Build a serialisable snapshot of mutable global state for the
 background diagnostics worker kernel. The worker sets these globals
 from the snapshot before running, so all helper functions work unchanged.
 *)
-buildWorkerSnapshot[uri_String] := <|
+LSPServer`buildWorkerSnapshot[uri_String] := <|
   "PacletIndex"       -> $PacletIndex,
   "BuiltinPatterns"   -> $BuiltinPatterns,
   "WorkspaceRootPath" -> $WorkspaceRootPath,
-  "ConfidenceLevel"   -> $ConfidenceLevel
+  "ConfidenceLevel"   -> $ConfidenceLevel,
+  "OpenFileEntry"     -> Lookup[$OpenFilesMap, uri, Null],
+  "IndexingWasActive" -> TrueQ[LSPServer`Private`$IndexingWasActive],
+  "PendingIndexFiles" -> Replace[LSPServer`PacletIndex`$PendingIndexFiles, Except[_List] -> {}],
+  "PendingExternalDepFiles" -> Replace[
+    LSPServer`PacletIndex`Private`$PendingExternalDepFiles,
+    Except[_List] -> {}
+  ]
 |>
 
 (*
 Queue synchronous workspace diagnostics work.
-Deduplicate identical queued requests so repeated refresh triggers do not
-inflate the queue.
+Used as a fallback when the background diagnostics kernel is unavailable.
 *)
-dispatchWorkspaceDiagnostics[uri_String] :=
+queueWorkspaceDiagnosticsSync[uri_String] :=
 Module[{content, queuedQ},
   content = <|
     "method" -> "textDocument/runWorkspaceDiagnostics",
@@ -308,6 +314,111 @@ Module[{content, queuedQ},
   ];
 
   Null
+]
+
+
+dropQueuedWorkspaceDiagnostics[uri_String] :=
+  $ContentQueue = Select[
+    Replace[$ContentQueue, Except[_List] -> {}],
+    !(
+      AssociationQ[#] &&
+      Lookup[#, "method", None] === "textDocument/runWorkspaceDiagnostics" &&
+      Lookup[
+        Lookup[Lookup[#, "params", <||>], "textDocument", <||>],
+        "uri",
+        None
+      ] === uri
+    ) &
+  ]
+
+
+runWorkspaceDiagnosticsWorker[uri_String, snapshot_?AssociationQ] :=
+Module[{entry, workspaceLints},
+  entry = Lookup[snapshot, "OpenFileEntry", Null];
+
+  If[!AssociationQ[entry],
+    Return[$Failed]
+  ];
+
+  Quiet[Check[
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> entry|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$WorkspaceRootPath = Lookup[snapshot, "WorkspaceRootPath", None],
+      LSPServer`$ConfidenceLevel = Lookup[snapshot, "ConfidenceLevel", 0.50],
+      LSPServer`PacletIndex`$PacletIndex = Lookup[snapshot, "PacletIndex", <||>],
+      $BuiltinPatterns = Lookup[snapshot, "BuiltinPatterns", <||>],
+      LSPServer`Private`$IndexingWasActive = TrueQ[Lookup[snapshot, "IndexingWasActive", False]],
+      LSPServer`PacletIndex`$PendingIndexFiles = Replace[
+        Lookup[snapshot, "PendingIndexFiles", {}],
+        Except[_List] -> {}
+      ],
+      LSPServer`PacletIndex`Private`$PendingExternalDepFiles = Replace[
+        Lookup[snapshot, "PendingExternalDepFiles", {}],
+        Except[_List] -> {}
+      ]
+    },
+      LSPServer`handleContent[<|
+        "method" -> "textDocument/runWorkspaceDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      workspaceLints = Lookup[Lookup[LSPServer`$OpenFilesMap, uri, <||>], "WorkspaceLints", Null];
+
+      If[!ListQ[workspaceLints],
+        $Failed,
+        <|
+          "URI" -> uri,
+          "WorkspaceLints" -> workspaceLints
+        |>
+      ]
+    ],
+    $Failed
+  ]]
+]
+
+
+(*
+Dispatch workspace diagnostics.
+Prefer the background diagnostics worker so the main request loop stays responsive.
+Fall back to the synchronous queue when the worker is unavailable.
+*)
+dispatchWorkspaceDiagnostics[uri_String] :=
+Module[{entry, ast, snapshot, task},
+  If[$DiagnosticsKernel === None || $DiagnosticsKernel === $Failed,
+    Return[queueWorkspaceDiagnosticsSync[uri]]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  ast = Lookup[entry, "AST", Null];
+
+  If[!AssociationQ[entry] || ast === Null || FailureQ[ast],
+    Return[queueWorkspaceDiagnosticsSync[uri]]
+  ];
+
+  snapshot = LSPServer`buildWorkerSnapshot[uri];
+
+  If[!AssociationQ[snapshot],
+    Return[queueWorkspaceDiagnosticsSync[uri]]
+  ];
+
+  LSPServer`Private`cancelCurrentDiagnosticsTask[];
+  dropQueuedWorkspaceDiagnostics[uri];
+
+  task = Quiet[Check[
+    ParallelSubmit[{$DiagnosticsKernel}, runWorkspaceDiagnosticsWorker[uri, snapshot]],
+    $Failed
+  ]];
+
+  If[task === $Failed,
+    queueWorkspaceDiagnosticsSync[uri],
+    $DiagnosticsTask = task;
+    $DiagnosticsTaskURI = uri;
+    $DiagnosticsTaskKind = "open-file";
+    $DiagnosticsTaskResult = None;
+    $DiagnosticsTaskStartTime = AbsoluteTime[];
+    Null
+  ]
 ]
 
 
@@ -339,7 +450,7 @@ Catch[
 Module[{params, doc, uri, entry, text, cst, agg, ast,
         suppressedRegions, ignoreData,
         cstLints, aggLints, astLints, scopingData, scopingLints,
-  fastLints, notification, tokenResponses = {}},
+  fastLints, notification},
 
   log[1, "textDocument/runFastDiagnostics: enter"];
 
@@ -385,6 +496,39 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
     entry["PreviousAST"] = ast
   ];
 
+  (* Save parse artifacts so hover can use them even if we abort *)
+  $OpenFilesMap[uri] = entry;
+
+  (* ── YIELD POINT 1: after parsing, before lint passes ── *)
+  If[TrueQ[LSPServer`Private`yieldToInteractiveRequests[uri]],
+    log[1, "runFastDiagnostics: stale after parse, aborting"];
+    Throw[{}]
+  ];
+
+  (* Re-read entry in case it was updated by a didChange during yield *)
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[entry === Null || isStale[$ContentQueue, uri], Throw[{}]];
+
+  (* When a didChange is still waiting for its debounced runIndexUpdate,
+     stop after parsing so semantic/folding refresh can use fresh CST/AST
+     without paying the full lint cost on every edit turn. *)
+  If[
+    TrueQ[Lookup[entry, "IndexUpdatePending", False]] &&
+    Lookup[entry, "ScheduledJobs", {}] =!= {},
+    entry["WorkspaceLints"] = Null;
+    $OpenFilesMap[uri] = entry;
+
+    If[TrueQ[$SemanticTokens],
+      LSPServer`Private`queuePendingSemanticTokenFenceposts[
+        uri,
+        "DBG-ST: fast diagnostics parsed fresh artifacts while reindex pending"
+      ]
+    ];
+
+    log[1, "textDocument/runFastDiagnostics: exit parse-only"];
+    Throw[{}]
+  ];
+
   (* ── Suppressed regions + ignore comments ── *)
   suppressedRegions = Lookup[entry, "SuppressedRegions",
     getSuppressedRegions[cst]];
@@ -402,12 +546,28 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
   cstLints = filterGlobalLints[cstLints];
   entry["CSTLints"] = cstLints;
 
+  (* ── YIELD POINT 2: after CST lint ── *)
+  If[TrueQ[LSPServer`Private`yieldToInteractiveRequests[uri]],
+    log[1, "runFastDiagnostics: stale after CST lint, aborting"];
+    $OpenFilesMap[uri] = entry;
+    Throw[{}]
+  ];
+  If[isStale[$ContentQueue, uri], $OpenFilesMap[uri] = entry; Throw[{}]];
+
   aggLints = Quiet[CodeInspectAgg[agg,
     "AbstractRules" -> <||>,
     "SuppressedRegions" -> suppressedRegions]];
   If[!ListQ[aggLints], aggLints = {}];
   aggLints = filterGlobalLints[aggLints];
   entry["AggLints"] = aggLints;
+
+  (* ── YIELD POINT 3: after Agg lint ── *)
+  If[TrueQ[LSPServer`Private`yieldToInteractiveRequests[uri]],
+    log[1, "runFastDiagnostics: stale after Agg lint, aborting"];
+    $OpenFilesMap[uri] = entry;
+    Throw[{}]
+  ];
+  If[isStale[$ContentQueue, uri], $OpenFilesMap[uri] = entry; Throw[{}]];
 
   If[!FailureQ[ast],
     astLints = Quiet[CodeInspectAST[ast, "SuppressedRegions" -> suppressedRegions]];
@@ -416,6 +576,14 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
     entry["ASTLints"] = astLints,
     astLints = {}; entry["ASTLints"] = {}
   ];
+
+  (* ── YIELD POINT 4: after AST lint, before scoping ── *)
+  If[TrueQ[LSPServer`Private`yieldToInteractiveRequests[uri]],
+    log[1, "runFastDiagnostics: stale after AST lint, aborting"];
+    $OpenFilesMap[uri] = entry;
+    Throw[{}]
+  ];
+  If[isStale[$ContentQueue, uri], $OpenFilesMap[uri] = entry; Throw[{}]];
 
   (* ── Scoping ── *)
   scopingData = {};
@@ -441,9 +609,9 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
   notification = buildPublishNotification[uri, entry, fastLints];
 
   If[TrueQ[$SemanticTokens],
-    tokenResponses = LSPServer`Private`recoverPendingSemanticTokenFenceposts[
+    LSPServer`Private`queuePendingSemanticTokenFenceposts[
       uri,
-      "DBG-ST: fast diagnostics recovered pending semantic-token requests"
+      "DBG-ST: fast diagnostics queued pending semantic-token fenceposts"
     ]
   ];
 
@@ -452,7 +620,43 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
 
   log[1, "textDocument/runFastDiagnostics: exit"];
 
-  Join[{notification}, tokenResponses]
+  {notification}
+]]
+
+
+handleContent[content:KeyValuePattern["method" -> "textDocument/mergeWorkspaceLints"]] :=
+Catch[
+Module[{params, doc, uri, entry, taskResult, workspaceLints},
+
+  params = content["params"];
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  taskResult = $DiagnosticsTaskResult;
+  $DiagnosticsTaskResult = None;
+
+  If[isStale[$ContentQueue, uri],
+    Throw[{}]
+  ];
+
+  If[!AssociationQ[taskResult] || Lookup[taskResult, "URI", None] =!= uri,
+    Throw[{}]
+  ];
+
+  workspaceLints = Lookup[taskResult, "WorkspaceLints", Null];
+  If[!ListQ[workspaceLints],
+    Throw[{}]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[entry === Null,
+    Throw[{}]
+  ];
+
+  entry["WorkspaceLints"] = workspaceLints;
+  $OpenFilesMap[uri] = entry;
+
+  {buildPublishNotification[uri, entry, allEntryDiagnosticsLints[entry]]}
 ]]
 
 

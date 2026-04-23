@@ -2,6 +2,7 @@
 PacletDirectoryLoad[AbsoluteFileName[
   FileNameJoin[{DirectoryName[$TestFileName], "..", "..", "build", "paclet"}]]];
 <<LSPServer`
+LSPServer`LoadAllFeatureModules[];
 
 (* Set the confidence level so tests work without calling StartServer[]. *)
 $ConfidenceLevel = 0.50;

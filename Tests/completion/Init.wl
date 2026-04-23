@@ -2,6 +2,7 @@
 PacletDirectoryLoad[AbsoluteFileName[
   FileNameJoin[{DirectoryName[$TestFileName], "..", "..", "build", "paclet"}]]];
 << LSPServer`
+LSPServer`LoadAllFeatureModules[];
 
 completionResponse[uri_, id_, line_, character_] :=
   LSPServer`handleContent[<|

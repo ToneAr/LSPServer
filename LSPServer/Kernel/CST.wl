@@ -78,13 +78,14 @@ cstToJSON[other_] :=
 
 handleContent[content : KeyValuePattern["method" -> "wolfram/cst"]] :=
 Catch[
-Module[{params, id, uri, source, tabSize, cst, entry, json},
+Module[{params, textDocument, id, uri, source, tabSize, cst, entry, json},
 
   log[1, "wolfram/cst: enter"];
 
   id = content["id"];
-  params = content["params"];
-  uri = Lookup[params["textDocument"], "uri", Null];
+  params = Replace[Lookup[content, "params", <||>], Except[_Association] -> <||>];
+  textDocument = Replace[Lookup[params, "textDocument", <||>], Except[_Association] -> <||>];
+  uri = Lookup[textDocument, "uri", Null];
   source = Lookup[params, "source", Null];
   tabSize = Lookup[params, "tabSize", 2];
 

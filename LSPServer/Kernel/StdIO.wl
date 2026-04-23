@@ -290,6 +290,11 @@ Module[{errStr, ferror, eof},
 readEvalWriteLoop["StdIO", sock_]:=
 Module[{content, contents},
 
+  (* Install yield-point thunks so long-running handlers can serve
+     interactive requests mid-computation. *)
+  LSPServer`$TryQueueThunk = Function[TryQueue["StdIO"]];
+  LSPServer`$WriteLSPResultThunk = Function[{c}, writeLSPResult["StdIO", sock, c]];
+
   (*
   loop over:
     read content
@@ -304,7 +309,7 @@ Module[{content, contents},
     ProcessScheduledJobs[];
 
     If[LSPServer`Private`contentQueueEmptyQ[],
-      Pause[0.1];
+      Pause[0.01];
       Continue[]
     ];
 

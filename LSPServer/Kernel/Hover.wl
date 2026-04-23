@@ -44,11 +44,16 @@ $obsoleteSet := $obsoleteSet = Association[Thread[
 
 
 hoverEntryReadyQ[entry_Association] :=
-Module[{ast, scheduledJobs},
+Module[{ast},
   ast = Lookup[entry, "AST", Null];
-  scheduledJobs = Lookup[entry, "ScheduledJobs", {}];
-
-  ast =!= Null && !FailureQ[ast] && scheduledJobs === {}
+  (*
+  Only require the AST to be present and valid.  Scheduled jobs are background
+  debounce timers (diagnostics, implicit tokens, bracket matching) that are
+  independent of hover — requiring them to be empty before taking the fast path
+  caused a full re-parse on every hover during normal editing (ScheduledJobs is
+  non-empty for several seconds after every keystroke).
+  *)
+  ast =!= Null && !FailureQ[ast]
 ]
 
 
@@ -105,7 +110,7 @@ Module[{params, id, doc, uri, entry, res},
 handleContent[content: KeyValuePattern["method" -> "textDocument/hoverFencepost"]] :=
 Catch[
 Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char, pre, ast, cstTabs, syms, toks, nums, slots,
-  res},
+  res, snapshot, task},
 
 
   log[1, "textDocument/hoverFencepost: enter"];
@@ -134,6 +139,28 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
   ];
 
   position = params["position"];
+
+  (* Only borrow the shared worker when diagnostics are idle. Otherwise fall
+     back to the main-kernel path instead of aborting the in-flight diagnostics. *)
+  If[ValueQ[$DiagnosticsKernel] && $DiagnosticsKernel =!= None && $DiagnosticsKernel =!= $Failed &&
+     $DiagnosticsTask === None,
+    snapshot = buildHoverWorkerSnapshot[uri, position, id];
+    If[AssociationQ[snapshot] && snapshot =!= <||>,
+      cancelCurrentHoverTask[];
+      task = Quiet[Check[
+        ParallelSubmit[{$DiagnosticsKernel}, runHoverWorker[snapshot]],
+        $Failed
+      ]];
+      If[task =!= $Failed,
+        $HoverTask = task;
+        $HoverTaskURI = uri;
+        $HoverTaskID = id;
+        $HoverTaskResult = None;
+        $HoverTaskStartTime = AbsoluteTime[];
+        Throw[{}]
+      ]
+    ]
+  ];
 
 
   line = position["line"];
@@ -234,6 +261,174 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
 
   res
 ]]
+
+
+buildHoverWorkerSnapshot[uri_String, position_Association, id_Integer] :=
+Module[{entry, ast},
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[!AssociationQ[entry],
+    Return[<||>]
+  ];
+
+  ast = Lookup[entry, "AST", Null];
+  If[ast === Null || MissingQ[ast] || FailureQ[ast],
+    Return[<||>]
+  ];
+
+  <|
+    "URI" -> uri,
+    "ID" -> id,
+    "Position" -> position,
+    "LastChange" -> Lookup[entry, "LastChange", None],
+    "OpenFileEntry" -> entry,
+    "PacletIndex" -> $PacletIndex,
+    "WorkspaceRootPath" -> $WorkspaceRootPath,
+    "ConfidenceLevel" -> $ConfidenceLevel
+  |>
+]
+
+
+runHoverWorker[snapshot_?AssociationQ] :=
+Module[{uri, id, position, entry, response},
+  uri = Lookup[snapshot, "URI", None];
+  id = Lookup[snapshot, "ID", None];
+  position = Lookup[snapshot, "Position", <||>];
+  entry = Lookup[snapshot, "OpenFileEntry", Null];
+
+  If[!StringQ[uri] || !IntegerQ[id] || !AssociationQ[position] || !AssociationQ[entry],
+    Return[$Failed]
+  ];
+
+  response = Quiet[Check[
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> entry|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$WorkspaceRootPath = Lookup[snapshot, "WorkspaceRootPath", None],
+      LSPServer`$ConfidenceLevel = Lookup[snapshot, "ConfidenceLevel", 0.50],
+      LSPServer`PacletIndex`$PacletIndex = Lookup[snapshot, "PacletIndex", <||>],
+      LSPServer`$CancelMap = <||>
+    },
+      finalizeHoverWorkerResponse[
+        hoverResponseResult[id, uri, position]
+      ]
+    ],
+    $Failed
+  ]];
+
+  If[AssociationQ[response],
+    Join[response, <|
+      "URI" -> uri,
+      "ID" -> id,
+      "LastChange" -> Lookup[snapshot, "LastChange", None]
+    |>],
+    $Failed
+  ]
+]
+
+
+handleContent[content: KeyValuePattern["method" -> "textDocument/publishHoverResult"]] :=
+Catch[
+Module[{id, params, doc, uri, taskResult, entry, taskLastChange},
+
+  id = Lookup[content, "id", None];
+  params = Lookup[content, "params", <||>];
+  doc = Lookup[params, "textDocument", <||>];
+  uri = Lookup[doc, "uri", None];
+
+  If[!IntegerQ[id] || !StringQ[uri] || isStale[$ContentQueue, uri],
+    Throw[{}]
+  ];
+
+  taskResult = $HoverTaskResult;
+  $HoverTaskResult = None;
+
+  If[!AssociationQ[taskResult] ||
+     Lookup[taskResult, "URI", None] =!= uri ||
+     Lookup[taskResult, "ID", None] =!= id,
+    Throw[{}]
+  ];
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[!AssociationQ[entry],
+    Throw[{}]
+  ];
+
+  taskLastChange = Lookup[taskResult, "LastChange", Missing["NotAvailable"]];
+  If[taskLastChange =!= Missing["NotAvailable"] &&
+     Lookup[entry, "LastChange", Missing["NotAvailable"]] =!= taskLastChange,
+    Throw[{}]
+  ];
+
+  {<|"jsonrpc" -> "2.0", "id" -> id, "result" -> Lookup[taskResult, "Result", Null]|>}
+]]
+
+
+hoverResponseResult[id_, uri_, position_Association] :=
+Module[{entry, text, ast, cstTabs, textLines, line, char, pre, toks, strs, syms, nums, slots, res},
+
+  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[entry === Null,
+    Return[Null]
+  ];
+
+  text = entry["Text"];
+  ast = Lookup[entry, "AST", Null];
+  If[ast === Null || MissingQ[ast],
+    Return[Null]
+  ];
+
+  line = position["line"] + 1;
+  char = position["character"] + 1;
+
+  cstTabs = Lookup[entry, "CSTTabs", Null];
+  If[cstTabs === Null,
+    cstTabs = CodeConcreteParse[Lookup[entry, "PreprocessedText", text], "TabWidth" -> 4]
+  ];
+  If[cstTabs === Null || FailureQ[cstTabs],
+    Return[Null]
+  ];
+
+  If[StringContainsQ[text, "\t"],
+    textLines = StringSplit[text, {"\r\n", "\n", "\r"}, All];
+    If[line > Length[textLines],
+      Return[Null]
+    ];
+    pre = StringTake[textLines[[line]], char - 1];
+    char = 1;
+    Scan[(If[# == "\t", char = (4 * Quotient[char, 4] + 1) + 4, char++])&, Characters[pre]];
+  ];
+
+  toks = Cases[cstTabs,
+    (LeafNode | CompoundNode)[_, _,
+      KeyValuePattern[Source -> src_ /; SourceMemberQ[src, {line, char}]]], Infinity];
+
+  strs = Cases[toks, LeafNode[String, _, _], Infinity];
+  syms = Cases[toks, LeafNode[Symbol, _, _], {1}];
+  nums = Cases[toks, LeafNode[Integer | Real | Rational, _, _], Infinity];
+  slots = Cases[toks,
+    (LeafNode[_, s_String, _] /; StringStartsQ[s, "#"]) |
+    CompoundNode[Slot | SlotSequence, _, _],
+    Infinity];
+
+  res = Which[
+    strs =!= {},
+      First[handleStrings[id, strs, line]]["result"],
+    syms =!= {},
+      First[handleSymbols[id, uri, ast, cstTabs, syms, line]]["result"],
+    slots =!= {},
+      First[handleSlots[id, uri, ast, cstTabs, slots, line]]["result"],
+    nums =!= {},
+      First[handleNumbers[id, nums]]["result"],
+    True,
+      Null
+  ];
+
+  res
+]
+
+
+finalizeHoverWorkerResponse[result_] :=
+  <|"Result" -> result|>
 
 
 (*

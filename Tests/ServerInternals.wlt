@@ -2,6 +2,7 @@
 PacletDirectoryLoad[AbsoluteFileName[
   FileNameJoin[{DirectoryName[$TestFileName], "..", "build", "paclet"}]]];
 <<LSPServer`
+LSPServer`LoadAllFeatureModules[];
 Needs["CodeParser`"];
 
 
@@ -120,6 +121,300 @@ VerificationTest[
 
 
 VerificationTest[
+  Module[{uri, text},
+    uri = "file:///tmp/FormattingCommentList.wl";
+    text = "{\n  a,\n  (*\n    c\n  *)\n  b\n}\n";
+
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text|>|>
+    },
+      Lookup[
+        First[Lookup[
+          First[LSPServer`handleContent[<|
+        "method" -> "textDocument/formatting",
+        "id" -> 501,
+        "params" -> <|
+          "textDocument" -> <|"uri" -> uri|>,
+          "options" -> <|"tabSize" -> 2, "insertSpaces" -> True|>
+        |>
+      |>],
+          "result",
+          {}
+        ]],
+        "newText",
+        Missing["NotFound"]
+      ]
+    ]
+  ],
+  "{\n  a,\n  (*\n    c\n  *)\n  b\n}\n",
+  TestID -> "Formatting-List-Comment-Block-Stays-Inert"
+]
+
+
+VerificationTest[
+  Module[{uri, text},
+    uri = "file:///tmp/FormattingCommentAssociation.wl";
+    text = "<|\n  \"a\" -> 1,\n  (*\n    c\n  *)\n  \"b\" -> 2\n|>\n";
+
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text|>|>
+    },
+      Lookup[
+        First[Lookup[
+          First[LSPServer`handleContent[<|
+        "method" -> "textDocument/formatting",
+        "id" -> 502,
+        "params" -> <|
+          "textDocument" -> <|"uri" -> uri|>,
+          "options" -> <|"tabSize" -> 2, "insertSpaces" -> True|>
+        |>
+      |>],
+          "result",
+          {}
+        ]],
+        "newText",
+        Missing["NotFound"]
+      ]
+    ]
+  ],
+  "<|\n  \"a\" -> 1,\n  (*\n    c\n  *)\n  \"b\" -> 2\n|>\n",
+  TestID -> "Formatting-Association-Comment-Block-Stays-Inert"
+]
+
+
+VerificationTest[
+  Module[{uri, result},
+    uri = "file:///tmp/AsyncHover.wl";
+    Block[{
+      LSPServer`$DiagnosticsKernel = "fake-kernel",
+      LSPServer`$DiagnosticsTask = None,
+      LSPServer`$DiagnosticsTaskURI = None,
+      LSPServer`$DiagnosticsTaskKind = None,
+      LSPServer`$DiagnosticsTaskResult = None,
+      LSPServer`$DiagnosticsTaskStartTime = None,
+      LSPServer`$HoverTask = None,
+      LSPServer`$HoverTaskURI = None,
+      LSPServer`$HoverTaskID = None,
+      LSPServer`$HoverTaskResult = None,
+      LSPServer`$HoverTaskStartTime = None,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "Sin[x]\n",
+        "AST" -> HoldComplete[Null],
+        "LastChange" -> Now,
+        "ScheduledJobs" -> {}
+      |>|>,
+      LSPServer`$WorkspaceRootPath = "/tmp",
+      LSPServer`$ConfidenceLevel = 0.50,
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      LSPServer`Private`cancelCurrentDiagnosticsTask = Function[{}, Null],
+      ParallelSubmit = Function[{kernels, expr}, "hover-task"]
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/hoverFencepost",
+        "id" -> 91,
+        "params" -> <|
+          "textDocument" -> <|"uri" -> uri|>,
+          "position" -> <|"line" -> 0, "character" -> 1|>
+        |>
+      |>];
+      {
+        result,
+        LSPServer`$HoverTask,
+        LSPServer`$HoverTaskURI,
+        LSPServer`$HoverTaskID
+      }
+    ]
+  ],
+  {{}, "hover-task", "file:///tmp/AsyncHover.wl", 91},
+  TestID -> "HoverFencepost-Dispatches-Async-Worker"
+]
+
+
+VerificationTest[
+  Module[{uri, result},
+    uri = "file:///tmp/BusyDiagnosticsHover.wl";
+    Block[{
+      LSPServer`$DiagnosticsKernel = "fake-kernel",
+      LSPServer`$DiagnosticsTask = "busy-task",
+      LSPServer`$DiagnosticsTaskURI = uri,
+      LSPServer`$DiagnosticsTaskKind = "open-file",
+      LSPServer`$DiagnosticsTaskResult = None,
+      LSPServer`$DiagnosticsTaskStartTime = AbsoluteTime[],
+      LSPServer`$HoverTask = None,
+      LSPServer`$HoverTaskURI = None,
+      LSPServer`$HoverTaskID = None,
+      LSPServer`$HoverTaskResult = None,
+      LSPServer`$HoverTaskStartTime = None,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "Sin[x]\n",
+        "AST" -> HoldComplete[Null],
+        "LastChange" -> Now,
+        "ScheduledJobs" -> {}
+      |>|>,
+      LSPServer`$WorkspaceRootPath = "/tmp",
+      LSPServer`$ConfidenceLevel = 0.50,
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      ParallelSubmit = Function[{kernels, expr}, Throw["ParallelSubmitCalled", "parallel"]]
+    },
+      result = Catch[
+        LSPServer`handleContent[<|
+          "method" -> "textDocument/hoverFencepost",
+          "id" -> 92,
+          "params" -> <|
+            "textDocument" -> <|"uri" -> uri|>,
+            "position" -> <|"line" -> 0, "character" -> 1|>
+          |>
+        |>],
+        "parallel"
+      ];
+      {
+        result,
+        LSPServer`$HoverTask,
+        LSPServer`$DiagnosticsTask
+      }
+    ]
+  ],
+  {{{<|"jsonrpc" -> "2.0", "id" -> 92, "result" -> Null|>}, None, "busy-task"}},
+  TestID -> "HoverFencepost-Skips-Async-While-Diagnostics-Busy"
+]
+
+
+VerificationTest[
+  Module[{uri, result},
+    uri = "file:///tmp/AsyncHoverPublish.wl";
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$HoverTaskResult = <|
+        "URI" -> uri,
+        "ID" -> 77,
+        "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>
+      |>
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/publishHoverResult",
+        "id" -> 77,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+      {result, LSPServer`$HoverTaskResult}
+    ]
+  ],
+  {
+    {<|"jsonrpc" -> "2.0", "id" -> 77, "result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>|>},
+    None
+  },
+  TestID -> "PublishHoverResult-Returns-Worker-Response"
+]
+
+
+VerificationTest[
+  Module[{uri, oldStamp, newStamp, result},
+    uri = "file:///tmp/AsyncHoverStale.wl";
+    oldStamp = Now - Quantity[2, "Seconds"];
+    newStamp = Now;
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> "Sin[x]\n", "AST" -> HoldComplete[Null], "LastChange" -> newStamp|>|>,
+      LSPServer`$HoverTaskResult = <|
+        "URI" -> uri,
+        "ID" -> 78,
+        "LastChange" -> oldStamp,
+        "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "stale hover"|>|>
+      |>
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/publishHoverResult",
+        "id" -> 78,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+      {result, LSPServer`$HoverTaskResult}
+    ]
+  ],
+  {{}, None},
+  TestID -> "PublishHoverResult-Drops-Stale-LastChange"
+]
+
+
+VerificationTest[
+  Module[{text, cst, folds},
+    text = "config = Module[{x},\n  x = 1;\n  x\n]\n\nfoo[a_] := Module[{y},\n  y = a;\n  y\n]\n";
+    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst[[1]] = File;
+    folds = LSPServer`FoldingRange`Private`filterAssignmentAnchoredFoldingRanges[
+      cst,
+      {
+        <|"startLine" -> 0, "endLine" -> 3, "kind" -> "region"|>,
+        <|"startLine" -> 5, "endLine" -> 8, "kind" -> "region"|>
+      }
+    ];
+    folds
+  ],
+  {
+    <|"startLine" -> 5, "endLine" -> 8, "kind" -> "region"|>
+  },
+  TestID -> "FoldingRange-Filters-Plain-Set-Anchored-Folds"
+]
+
+
+VerificationTest[
+  Block[{
+    LSPServer`$ContentQueue = {
+      <|"method" -> "textDocument/runFastDiagnostics"|>,
+      <|"method" -> "textDocument/concreteParse", "id" -> 42,
+        "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/Pipeline.wl"|>|>|>,
+      <|"method" -> "textDocument/aggregateParse", "id" -> 42,
+        "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/Pipeline.wl"|>|>|>,
+      <|"method" -> "textDocument/hoverFencepost", "id" -> 42,
+        "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/Pipeline.wl"|>,
+          "position" -> <|"line" -> 0, "character" -> 0|>|>|>
+    }
+  },
+    LSPServer`Private`takeFirstContentQueueItem[];
+    Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]]
+  ],
+  {
+    "textDocument/aggregateParse",
+    "textDocument/hoverFencepost",
+    "textDocument/runFastDiagnostics"
+  },
+  TestID -> "TakeFirstContentQueueItem-Promotes-Whole-Request-Pipeline"
+]
+
+
+VerificationTest[
+  Block[{
+    LSPServer`$PendingTokenRefresh = True
+  },
+    {
+      LSPServer`handleContent[<|"jsonrpc" -> "2.0", "id" -> -1, "result" -> Null|>],
+      LSPServer`$PendingTokenRefresh
+    }
+  ],
+  {{}, False},
+  TestID -> "ServerInitiatedResponse-Clears-PendingTokenRefresh"
+]
+
+
+VerificationTest[
   LSPServer`PacletIndex`Private`parseDocComment["(* Return: _[1 *)"],
   <|"Description" -> None, "ReturnPattern" -> None, "ReturnPatternString" -> "_[1"|>,
   TestID -> "PacletIndex-ParseDocComment-Swallows-Incomplete-ReturnPatterns"
@@ -230,6 +525,7 @@ VerificationTest[
         ] &,
         {
           "textDocument/didOpenFencepost",
+          "textDocument/runOpenIndexUpdate",
           "textDocument/concreteParse",
           "textDocument/suppressedRegions",
           "textDocument/parseIgnoreComments",
@@ -314,7 +610,7 @@ VerificationTest[
 
 VerificationTest[
   {
-    Length[DownValues[LSPServer`Library`Private`getStartupError]] > 0,
+    Length[OwnValues[LSPServer`Library`Private`getStartupError]] > 0,
     Length[DownValues[LSPServer`Private`takeFirstContentQueueItem]] > 0,
     Names["LSPServer`CST`Private`takeFirstContentQueueItem"] === {}
   },
@@ -402,7 +698,14 @@ VerificationTest[
     LSPServer`$DiagnosticsTaskURI = None,
     LSPServer`$DiagnosticsTaskResult = None,
     LSPServer`$DiagnosticsTaskStartTime = None,
-    LSPServer`$DiagnosticsKernel = Unique["Kernel"]
+    LSPServer`$DiagnosticsKernel = Unique["Kernel"],
+    LSPServer`$OpenFilesMap = <|
+      "file:///tmp/OpenFile.wl" -> <|
+        "AST" -> HoldComplete[openFileAST],
+        "LastChange" -> Now
+      |>
+    |>,
+    ParallelSubmit = Function[{kernels, expr}, "fake-task", HoldAll]
   },
     LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics["file:///tmp/OpenFile.wl"];
     {
@@ -411,16 +714,16 @@ VerificationTest[
         KeyValuePattern[{
           "method" -> "textDocument/runWorkspaceDiagnostics",
           "params" -> KeyValuePattern["textDocument" -> KeyValuePattern["uri" -> "file:///tmp/OpenFile.wl"]]
-        }]
+          }]
       ],
-      Sort[Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]]],
+      Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
       LSPServer`$DiagnosticsTask,
       LSPServer`$DiagnosticsTaskKind,
       LSPServer`$DiagnosticsTaskURI
     }
   ],
-  {1, {"initialized", "textDocument/runWorkspaceDiagnostics"}, None, None, None},
-  TestID -> "DispatchWorkspaceDiagnostics-Queues-Sync-Work-Even-With-Live-Kernel"
+  {0, {"initialized"}, "fake-task", "open-file", "file:///tmp/OpenFile.wl"},
+  TestID -> "DispatchWorkspaceDiagnostics-Uses-Background-Task-With-Live-Kernel"
 ]
 
 
@@ -498,6 +801,54 @@ VerificationTest[
   ],
   True,
   TestID -> "Initialize-Missing-Optional-Document-Capabilities-Default-Safely"
+]
+
+
+VerificationTest[
+  Block[{
+    LSPServer`$AllowedImplicitTokens = {},
+    LSPServer`$BracketMatcher = False,
+    LSPServer`$SemanticTokens = False,
+    LSPServer`$InlayHints = False,
+    LSPServer`$CodeActionLiteralSupport = False,
+    LSPServer`$HierarchicalDocumentSymbolSupport = True,
+    LSPServer`$kernelStartTime = Now
+  },
+    Module[{result, capabilities, semanticTokensProvider, legend},
+      result = Check[
+        First @ LSPServer`handleContent[<|
+          "method" -> "initialize",
+          "id" -> 1,
+          "params" -> <|
+            "capabilities" -> <|
+              "textDocument" -> <|
+                "semanticTokens" -> <||>
+              |>
+            |>,
+            "initializationOptions" -> <|
+              "semanticTokens" -> True
+            |>
+          |>
+        |>],
+        "MESSAGE"
+      ];
+      If[result === "MESSAGE",
+        "MESSAGE",
+        capabilities = Lookup[Lookup[result, "result", <||>], "capabilities", <||>];
+        semanticTokensProvider = Lookup[capabilities, "semanticTokensProvider", <||>];
+        legend = Lookup[semanticTokensProvider, "legend", <||>];
+        {
+          Lookup[legend, "tokenTypes", Missing["NotFound"]],
+          Lookup[legend, "tokenModifiers", Missing["NotFound"]]
+        }
+      ]
+    ]
+  ],
+  {
+    Keys[LSPServer`SemanticTokens`$SemanticTokenTypes],
+    Keys[LSPServer`SemanticTokens`$SemanticTokenModifiers]
+  },
+  TestID -> "Initialize-Semantic-Tokens-Legend-Loads-Feature-Module"
 ]
 
 
@@ -589,10 +940,10 @@ VerificationTest[
       result = LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri];
       hasTokens = KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokens"] &&
                   ListQ[LSPServer`$OpenFilesMap[uri, "SemanticTokens"]];
-      {result, hasTokens}
+      {result, hasTokens, Lookup[LSPServer`$OpenFilesMap[uri], "SemanticTokensIncomplete", Missing["NotFound"]]}
     ]
   ],
-  {True, True},
+  {True, True, Missing["NotFound"]},
   TestID -> "SemanticTokens-Refresh-Precomputes-Missing-Tokens"
 ]
 
@@ -628,7 +979,123 @@ VerificationTest[
 
 
 VerificationTest[
-  Module[{uri, text, cst, agg, ast, entry, responses, recovered},
+  Module[{uri, text, cst, agg, ast, result},
+    uri = "file:///tmp/test_semantic_tokens_fencepost_queues_scoping_followup.wl";
+    text = "x = 1\ny[z_] := Module[{a}, a + z]\n";
+
+    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst[[1]] = File;
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text, "CST" -> cst, "Agg" -> agg, "AST" -> ast|>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$PendingSemanticTokenRequests = <|uri -> {42}|>,
+      LSPServer`$CancelMap = <||>
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/semanticTokens/fullFencepost",
+        "id" -> 42,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      {
+        MatchQ[result, {<|"jsonrpc" -> "2.0", "id" -> 42, "result" -> KeyValuePattern["data" -> _List]|>}],
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
+        TrueQ[Lookup[LSPServer`$OpenFilesMap[uri], "SemanticTokensIncomplete", False]],
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokens"],
+        Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]]
+      }
+    ]
+  ],
+  {True, {"textDocument/runScopingData"}, True, True, Missing["NotFound"]},
+  TestID -> "SemanticTokens-Fencepost-Queues-Scoping-Followup-For-First-Pass"
+]
+
+
+VerificationTest[
+  Module[{uri, text, cst, agg, ast, usedSlowClassifier = False, result},
+    uri = "file:///tmp/test_semantic_tokens_first_pass_uses_fast_classifier.wl";
+    text = "x = 1\ny[z_] := Module[{a}, a + z]\n";
+
+    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst[[1]] = File;
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text, "CST" -> cst, "Agg" -> agg, "AST" -> ast|>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$PendingSemanticTokenRequests = <|uri -> {42}|>,
+      LSPServer`$CancelMap = <||>,
+      LSPServer`SemanticTokens`Private`classifyGlobalSymbol = Function[{name}, usedSlowClassifier = True; {"comment", {"error"}}]
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/semanticTokens/fullFencepost",
+        "id" -> 42,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      {
+        MatchQ[result, {<|"jsonrpc" -> "2.0", "id" -> 42, "result" -> KeyValuePattern["data" -> _List]|>}],
+        usedSlowClassifier,
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]]
+      }
+    ]
+  ],
+  {True, False, {"textDocument/runScopingData"}},
+  TestID -> "SemanticTokens-First-Pass-Uses-Fast-Classifier"
+]
+
+
+VerificationTest[
+  Module[{uri, text, cst, agg, ast, result},
+    uri = "file:///tmp/test_runscopingdata_refreshes_incomplete_tokens.wl";
+    text = "x = 1\ny[z_] := Module[{a}, a + z]\n";
+
+    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst[[1]] = File;
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+
+    Block[{
+      LSPServer`$SemanticTokens = True,
+      LSPServer`$PendingTokenRefresh = False,
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> text,
+        "CST" -> cst,
+        "Agg" -> agg,
+        "AST" -> ast,
+        "SemanticTokens" -> {1, 2, 3},
+        "SemanticTokensIncomplete" -> True
+      |>|>,
+      LSPServer`$ContentQueue = {}
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/runScopingData",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      {
+        result,
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "ScopingData"],
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokens"],
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokensIncomplete"],
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
+        LSPServer`$PendingTokenRefresh
+      }
+    ]
+  ],
+  {{}, True, False, False, {"workspace/semanticTokens/refresh"}, True},
+  TestID -> "RunScopingData-Invalidates-Incomplete-Tokens-And-Queues-Refresh"
+]
+
+
+VerificationTest[
+  Module[{uri, text, cst, agg, ast, entry, responses, recovered, queuedIDs, fencepostResponses},
     uri = "file:///tmp/test_refresh_handler_recovers_pending_request.wl";
     text = "x = 1\ny[z_] := z + 1\n";
 
@@ -640,14 +1107,23 @@ VerificationTest[
     entry = <|"Text" -> text, "CST" -> cst, "Agg" -> agg, "AST" -> ast|>;
 
     Block[{
+      LSPServer`$SemanticTokens = True,
       LSPServer`$OpenFilesMap = <|uri -> entry|>,
       LSPServer`$ContentQueue = {},
       LSPServer`$InternalRequestId = 0,
       LSPServer`$PendingSemanticTokenRequests = <|uri -> {42}|>
     },
       responses = LSPServer`handleContent[<|"method" -> "workspace/semanticTokens/refresh"|>];
+      queuedIDs = Cases[
+        LSPServer`$ContentQueue,
+        KeyValuePattern[{"method" -> "textDocument/semanticTokens/fullFencepost", "id" -> pendingID_}] :> pendingID
+      ];
+      fencepostResponses = LSPServer`handleContent /@ Select[
+        LSPServer`$ContentQueue,
+        MatchQ[#, KeyValuePattern[{"method" -> "textDocument/semanticTokens/fullFencepost"}]] &
+      ];
       recovered = AnyTrue[
-        responses,
+        Flatten[fencepostResponses, 1],
         AssociationQ[#] &&
         Lookup[#, "jsonrpc", None] === "2.0" &&
         Lookup[#, "id", None] === 42 &&
@@ -655,18 +1131,19 @@ VerificationTest[
       ];
       {
         Lookup[First[responses], "method", None] === "workspace/semanticTokens/refresh",
+        queuedIDs,
         recovered,
         Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]]
       }
     ]
   ],
-  {True, True, Missing["NotFound"]},
+  {True, {42}, True, Missing["NotFound"]},
   TestID -> "SemanticTokens-Refresh-Recovers-Pending-Requests"
 ]
 
 
 VerificationTest[
-  Module[{uri, text, cst, agg, ast, entry, responses, recoveredData},
+  Module[{uri, text, cst, agg, ast, entry, responses, recoveredData, fencepostResponses, queuedIDs},
     uri = "file:///tmp/test_refresh_handler_recovers_pending_request_with_cache.wl";
     text = "x = 1\ny[z_] := z + 1\n";
 
@@ -684,14 +1161,23 @@ VerificationTest[
     |>;
 
     Block[{
+      LSPServer`$SemanticTokens = True,
       LSPServer`$OpenFilesMap = <|uri -> entry|>,
       LSPServer`$ContentQueue = {},
       LSPServer`$InternalRequestId = 0,
       LSPServer`$PendingSemanticTokenRequests = <|uri -> {42}|>
     },
       responses = LSPServer`handleContent[<|"method" -> "workspace/semanticTokens/refresh"|>];
+      queuedIDs = Cases[
+        LSPServer`$ContentQueue,
+        KeyValuePattern[{"method" -> "textDocument/semanticTokens/fullFencepost", "id" -> pendingID_}] :> pendingID
+      ];
+      fencepostResponses = LSPServer`handleContent /@ Select[
+        LSPServer`$ContentQueue,
+        MatchQ[#, KeyValuePattern[{"method" -> "textDocument/semanticTokens/fullFencepost"}]] &
+      ];
       recoveredData = Cases[
-        responses,
+        Flatten[fencepostResponses, 1],
         assoc_ /; AssociationQ[assoc] &&
           Lookup[assoc, "jsonrpc", None] === "2.0" &&
           Lookup[assoc, "id", None] === 42 :>
@@ -700,13 +1186,14 @@ VerificationTest[
       ];
       {
         Lookup[First[responses], "method", None] === "workspace/semanticTokens/refresh",
+        queuedIDs,
         recoveredData =!= {} && First[recoveredData] =!= {9, 9, 9},
         Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]],
         KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokens"]
       }
     ]
   ],
-  {True, True, Missing["NotFound"], True},
+  {True, {42}, True, Missing["NotFound"], True},
   TestID -> "SemanticTokens-Refresh-Recovers-Pending-Requests-With-Cached-Tokens"
 ]
 
@@ -745,7 +1232,7 @@ VerificationTest[
 
 
 VerificationTest[
-  Module[{uri, text, cst, agg, ast, job},
+  Module[{uri, text, cst, agg, ast, job, jobResult},
     uri = "file:///tmp/test_didchange_refresh.wl";
     text = "x = 1\ny[z_] := z + 1\n";
 
@@ -784,7 +1271,16 @@ VerificationTest[
 
       LSPServer`$OpenFilesMap[uri, "LastChange"] = Now - Quantity[1, "Seconds"];
       job = First[LSPServer`$OpenFilesMap[uri, "ScheduledJobs"]];
-      job[LSPServer`$OpenFilesMap[uri]];
+      jobResult = job[LSPServer`$OpenFilesMap[uri]];
+
+      (* The scheduled job now returns {"textDocument/runIndexUpdate"} to be
+         queued, rather than running UpdateFileIndex inline. Simulate the
+         ProcessScheduledJobs path that converts the job result into a queue
+         item, then process it. *)
+      AppendTo[LSPServer`$ContentQueue,
+        <|"method" -> "textDocument/runIndexUpdate",
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>];
+      LSPServer`handleContent[Last[LSPServer`$ContentQueue]];
 
       {
         Count[
@@ -902,6 +1398,7 @@ VerificationTest[
             |>
           |>
         |>],
+        LSPServer`handleContent[LSPServer`Private`takeFirstContentQueueItem[]],
         LSPServer`$ContentQueue,
         Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]],
         LSPServer`$PendingTokenRefresh
@@ -909,13 +1406,16 @@ VerificationTest[
     ]
   ],
   {
-    {<|"jsonrpc" -> "2.0", "id" -> 42, "result" -> KeyValuePattern["data" -> _List]|>},
     {},
-    Missing["NotFound"],
+    {},
+    {
+      <|"method" -> "textDocument/semanticTokens/fullFencepost", "id" -> 42, "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/test_didopen_pending_refresh.wl"|>|>, "priority" -> False, "deferrable" -> True|>,
+      <|"method" -> "textDocument/runFastDiagnostics", "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/test_didopen_pending_refresh.wl"|>|>|>
+    },
+    {42},
     False
   },
-  SameTest -> MatchQ,
-  TestID -> "DidOpen-Recovers-Pending-SemanticToken-Requests-Without-Refresh"
+  TestID -> "DidOpen-Queues-Pending-SemanticToken-Requests-And-FastDiagnostics"
 ]
 
 
@@ -957,6 +1457,52 @@ VerificationTest[
 
 VerificationTest[
   Module[{uri, result},
+    uri = "file:///tmp/test_semantic_tokens_after_didopen_before_index.wl";
+
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "x = 1\n",
+        "LastChange" -> Now,
+        "ScheduledJobs" -> {},
+        "IndexUpdatePending" -> True
+      |>|>,
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$PendingSemanticTokenRequests = <||>
+    },
+      result = LSPServer`expandContent[
+        <|
+          "method" -> "textDocument/semanticTokens/full",
+          "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+        |>,
+        {0}
+      ];
+
+      {
+        Lookup[result, "method", Missing["NotFound"]],
+        Lookup[result, "id", Missing["NotFound"]],
+        Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]]
+      }
+    ]
+  ],
+  {
+    {
+      "textDocument/concreteParse",
+      "textDocument/aggregateParse",
+      "textDocument/abstractParse",
+      "textDocument/semanticTokens/fullFencepost"
+    },
+    {42, 42, 42, 42},
+    {42}
+  },
+  TestID -> "SemanticTokens-Open-Entry-Builds-Parse-Pipeline-Before-IndexUpdate"
+]
+
+
+VerificationTest[
+  Module[{uri, result},
     uri = "file:///tmp/test_semantic_tokens_wait_for_reindex.wl";
 
     Block[{
@@ -984,8 +1530,63 @@ VerificationTest[
       }
     ]
   ],
-  {{}, {42}},
-  TestID -> "SemanticTokens-Changed-Open-Request-Waits-For-Reindex"
+  {
+    {
+      <|"method" -> "textDocument/concreteParse", "id" -> 42, "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/test_semantic_tokens_wait_for_reindex.wl"|>|>|>,
+      <|"method" -> "textDocument/aggregateParse", "id" -> 42, "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/test_semantic_tokens_wait_for_reindex.wl"|>|>|>,
+      <|"method" -> "textDocument/abstractParse", "id" -> 42, "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/test_semantic_tokens_wait_for_reindex.wl"|>|>|>,
+      <|"method" -> "textDocument/semanticTokens/fullFencepost", "id" -> 42, "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/test_semantic_tokens_wait_for_reindex.wl"|>|>|>
+    },
+    {42}
+  },
+  TestID -> "SemanticTokens-Changed-Open-Request-Builds-Parse-Pipeline"
+]
+
+
+VerificationTest[
+  Module[{uri, text, cst, agg, ast, result},
+    uri = "file:///tmp/test_semantic_tokens_open_entry_expand_pending_index_ready.wl";
+    text = "x = 1\ny[z_] := z + 1\n";
+
+    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst[[1]] = File;
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> text,
+        "CST" -> cst,
+        "Agg" -> agg,
+        "AST" -> ast,
+        "IndexUpdatePending" -> True,
+        "ScheduledJobs" -> {Function[{entry}, {{}, False}]}
+      |>|>,
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$PendingSemanticTokenRequests = <||>
+    },
+      result = LSPServer`expandContent[
+        <|
+          "method" -> "textDocument/semanticTokens/full",
+          "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+        |>,
+        {0}
+      ];
+
+      {
+        result,
+        Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]]
+      }
+    ]
+  ],
+  {
+    {<|"method" -> "textDocument/semanticTokens/fullFencepost", "id" -> 42, "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/test_semantic_tokens_open_entry_expand_pending_index_ready.wl"|>|>|>},
+    {42}
+  },
+  TestID -> "SemanticTokens-Ready-Entry-Queues-Fencepost-Even-When-IndexUpdatePending"
 ]
 
 
@@ -1152,18 +1753,105 @@ VerificationTest[
     },
       LSPServer`Private`queuePendingSemanticTokenFenceposts[uri];
 
-      Take[
+      {
         Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
-        3
+        Lookup[Last[LSPServer`$ContentQueue], "priority", Missing["NotFound"]],
+        Lookup[Last[LSPServer`$ContentQueue], "deferrable", Missing["NotFound"]]
+      }
+    ]
+  ],
+  {
+    {
+      "textDocument/runFastDiagnostics",
+      "textDocument/documentSymbolFencepost",
+      "textDocument/semanticTokens/fullFencepost"
+    },
+    False,
+    True
+  },
+  TestID -> "SemanticTokens-Recovered-Fencepost-Appends-As-Deferrable"
+]
+
+
+VerificationTest[
+  Module[{uri},
+    uri = "file:///tmp/test_recovered_semantic_tokens_fold_priority.wl";
+
+    Block[{
+      LSPServer`$SemanticTokens = True,
+      LSPServer`$ContentQueue = {
+        <|"method" -> "textDocument/concreteParse", "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>,
+        <|"method" -> "textDocument/aggregateParse", "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>,
+        <|"method" -> "textDocument/abstractParse", "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>,
+        <|"method" -> "textDocument/documentNodeList", "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>,
+        <|"method" -> "textDocument/foldingRangeFencepost", "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>
+      },
+      LSPServer`$PendingSemanticTokenRequests = <|uri -> {99}|>
+    },
+      LSPServer`Private`queuePendingSemanticTokenFenceposts[uri];
+
+      {
+        Lookup[First[LSPServer`$ContentQueue], "method", Missing["NotFound"]],
+        Lookup[Last[LSPServer`$ContentQueue], "method", Missing["NotFound"]],
+        Lookup[Last[LSPServer`$ContentQueue], "priority", Missing["NotFound"]],
+        Lookup[Last[LSPServer`$ContentQueue], "deferrable", Missing["NotFound"]]
+      }
+    ]
+  ],
+  {
+    "textDocument/concreteParse",
+    "textDocument/semanticTokens/fullFencepost",
+    False,
+    True
+  },
+  TestID -> "SemanticTokens-Recovered-Fencepost-Defers-To-Folding-Pipeline"
+]
+
+
+VerificationTest[
+  Module[{uri},
+    uri = "file:///tmp/test_recovered_semantic_tokens_later_folding_pipeline.wl";
+
+    Block[{
+      LSPServer`$SemanticTokens = True,
+      LSPServer`$ContentQueue = {
+        <|"method" -> "textDocument/runFastDiagnostics"|>
+      },
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$CancelMap = <||>,
+      LSPServer`$PendingSemanticTokenRequests = <|uri -> {99}|>
+    },
+      LSPServer`Private`queuePendingSemanticTokenFenceposts[uri];
+
+      LSPServer`expandContentsAndAppendToContentQueue[{
+        <|
+          "method" -> "textDocument/foldingRange",
+          "id" -> 42,
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+        |>
+      }];
+
+      Table[
+        Lookup[LSPServer`Private`takeFirstContentQueueItem[], "method", Missing["NotFound"]],
+        7
       ]
     ]
   ],
   {
-    "textDocument/semanticTokens/fullFencepost",
+    "textDocument/concreteParse",
+    "textDocument/aggregateParse",
+    "textDocument/abstractParse",
+    "textDocument/documentNodeList",
+    "textDocument/foldingRangeFencepost",
     "textDocument/runFastDiagnostics",
-    "textDocument/documentSymbolFencepost"
+    "textDocument/semanticTokens/fullFencepost"
   },
-  TestID -> "SemanticTokens-Recovered-Fencepost-Prioritized"
+  TestID -> "SemanticTokens-Recovered-Fencepost-Does-Not-Block-Later-Folding-Pipeline"
 ]
 
 
@@ -1423,6 +2111,70 @@ VerificationTest[
 ]
 
 
+VerificationTest[
+  Module[{uri, text, cst, agg, ast, parseCalled = False, aggCalled = False, astCalled = False},
+    uri = "file:///tmp/test_runindexupdate_reuses_cached_parse_artifacts.wl";
+    text = "f[x_] := x + 1\n";
+
+    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst[[1]] = File;
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+
+    Block[{
+      LSPServer`$SemanticTokens = False,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$ClosedFileDiagnosticsNotifications = <||>,
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> text,
+        "LastChange" -> Now,
+        "ScheduledJobs" -> {},
+        "IndexUpdatePending" -> True,
+        "CST" -> cst,
+        "Agg" -> agg,
+        "AST" -> ast,
+        "PreviousAST" -> ast,
+        "PreviousUserSymbols" -> {}
+      |>|>,
+      LSPServer`$TryQueueThunk = Function[Null],
+      LSPServer`$WriteLSPResultThunk = Function[{contentsArg}, Null],
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      LSPServer`PacletIndex`Private`$WorkspaceIndexCache = <||>,
+      LSPServer`PacletIndex`Private`$WorkspaceIndexCacheDirty = False,
+      LSPServer`PacletIndex`Private`structuredPackageMetadata = Function[{filePathArg, astArg}, <||>],
+      LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics = (Null &),
+      LSPServer`Private`openFilesAffectedByDefinitions = ({} &),
+      LSPServer`Private`queueWorkspaceDiagnosticsSweep = (Null &),
+      CodeParser`CodeConcreteParse = (parseCalled = True; Failure["ParseCalled", <||>]) &,
+      CodeParser`Abstract`Aggregate = (aggCalled = True; Failure["AggregateCalled", <||>]) &,
+      CodeParser`Abstract`Abstract = (astCalled = True; Failure["AbstractCalled", <||>]) &
+    },
+      LSPServer`handleContent[<|
+        "method" -> "textDocument/runIndexUpdate",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      {
+        parseCalled,
+        aggCalled,
+        astCalled,
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "IndexUpdatePending"],
+        MatchQ[Lookup[LSPServer`PacletIndex`$PacletIndex["Files"], uri, Missing["NotFound"]], _Association],
+        ListQ[Lookup[LSPServer`$OpenFilesMap[uri], "UserSymbols", Missing["NotFound"]]]
+      }
+    ]
+  ],
+  {False, False, False, False, True, True},
+  TestID -> "RunIndexUpdate-Reuses-Cached-Parse-Artifacts"
+]
+
+
 (* ================================================================
   DidChange reindex -> pending ids exist -> fenceposts queued, no refresh
    If there ARE pending token request ids when the reindex job fires,
@@ -1466,6 +2218,13 @@ VerificationTest[
       If[!FunctionQ[job], Return[{"no-job", {}, {}}]];
 
       job[entry];
+
+      (* The scheduled job queues "textDocument/runIndexUpdate" instead of
+         running inline. Simulate processing it. *)
+      AppendTo[LSPServer`$ContentQueue,
+        <|"method" -> "textDocument/runIndexUpdate",
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>];
+      LSPServer`handleContent[Last[LSPServer`$ContentQueue]];
 
       {
         Count[
@@ -1581,7 +2340,7 @@ VerificationTest[
           LSPServer`StdIO`Private`writeLSPResult = Function[Null],
           Pause = Function[Null]
         },
-        } &) /@ Lookup[First[result], "result", {}],
+          LSPServer`readEvalWriteLoop["StdIO", None]
         ],
         "queue"
       ],
@@ -2265,8 +3024,20 @@ VerificationTest[
       ];
       LSPServer`handleContent[
         <|
+          "method" -> "textDocument/runOpenIndexUpdate",
+          "params" -> <|"textDocument" -> <|"uri" -> providerUri|>|>
+        |>
+      ];
+      LSPServer`handleContent[
+        <|
           "method" -> "textDocument/didOpenFencepost",
           "params" -> <|"textDocument" -> <|"uri" -> consumerUri, "text" -> consumerText|>|>
+        |>
+      ];
+      LSPServer`handleContent[
+        <|
+          "method" -> "textDocument/runOpenIndexUpdate",
+          "params" -> <|"textDocument" -> <|"uri" -> consumerUri|>|>
         |>
       ];
 
@@ -2321,6 +3092,12 @@ VerificationTest[
         <|
           "method" -> "textDocument/didOpenFencepost",
           "params" -> <|"textDocument" -> <|"uri" -> uri, "text" -> text|>|>
+        |>
+      ];
+      LSPServer`handleContent[
+        <|
+          "method" -> "textDocument/runOpenIndexUpdate",
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
         |>
       ];
 
@@ -2397,4 +3174,75 @@ VerificationTest[
   ],
   "_List",
   TestID -> "InferredReturnPattern-Block-Local-Binding-Apply-Join"
+]
+
+
+VerificationTest[
+  Block[{
+    LSPServer`PacletIndex`Private`$WorkspaceSymbolSearchEntries = {
+      <|"name" -> "alphaFn", "kind" -> "function", "location" -> <||>, "containerName" -> "Pkg`"|>,
+      <|"name" -> "betaValue", "kind" -> "constant", "location" -> <||>, "containerName" -> "Pkg`"|>
+    }
+  },
+    {
+      LSPServer`PacletIndex`GetAllWorkspaceSymbols[],
+      LSPServer`PacletIndex`SearchWorkspaceSymbols["alpha"],
+      LSPServer`PacletIndex`SearchWorkspaceSymbols[""]
+    }
+  ],
+  {
+    {
+      <|"name" -> "alphaFn", "kind" -> "function", "location" -> <||>, "containerName" -> "Pkg`"|>,
+      <|"name" -> "betaValue", "kind" -> "constant", "location" -> <||>, "containerName" -> "Pkg`"|>
+    },
+    {
+      <|"name" -> "alphaFn", "kind" -> "function", "location" -> <||>, "containerName" -> "Pkg`"|>
+    },
+    {
+      <|"name" -> "alphaFn", "kind" -> "function", "location" -> <||>, "containerName" -> "Pkg`"|>,
+      <|"name" -> "betaValue", "kind" -> "constant", "location" -> <||>, "containerName" -> "Pkg`"|>
+    }
+  },
+  TestID -> "WorkspaceSymbols-Search-Uses-Cached-Entries"
+]
+
+
+VerificationTest[
+  Module[{uri = "file:///tmp/WorkspaceSymbolCache.wl", defs},
+    defs = {
+      <|"name" -> "alphaFn", "uri" -> uri, "source" -> {{2, 1}, {2, 8}}, "kind" -> "function", "context" -> "Pkg`"|>,
+      <|"name" -> "betaValue", "uri" -> uri, "source" -> {{4, 1}, {4, 10}}, "kind" -> "constant", "context" -> "Pkg`"|>
+    };
+    Block[{
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      LSPServer`PacletIndex`Private`$WorkspaceSymbolIndex = <||>,
+      LSPServer`PacletIndex`Private`$WorkspaceSymbolSearchEntries = {}
+    },
+      LSPServer`PacletIndex`Private`addFileToIndex[
+        uri,
+        defs,
+        {},
+        {},
+        {},
+        {},
+        {},
+        "Pkg`",
+        None,
+        None,
+        {}
+      ];
+      {
+        Sort[Lookup[LSPServer`PacletIndex`SearchWorkspaceSymbols[""], "name", {}]],
+        Lookup[First[LSPServer`PacletIndex`SearchWorkspaceSymbols["alpha"]], "containerName", Missing["NotFound"]]
+      }
+    ]
+  ],
+  {{"alphaFn", "betaValue"}, "Pkg`"},
+  TestID -> "AddFileToIndex-Upserts-WorkspaceSymbol-Cache"
 ]
