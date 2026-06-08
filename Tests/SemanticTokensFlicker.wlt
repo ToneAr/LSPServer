@@ -190,3 +190,58 @@ VerificationTest[
   True,
   TestID -> "runScopingData-keeps-cache-populated"
 ]
+
+(* deliverFreshSemanticTokens: no pending request + wasStale=True =>
+   exactly one coalesced workspace/semanticTokens/refresh is queued. *)
+VerificationTest[
+  Module[{uri = "file:///deliver1.wl", methods},
+    LSPServer`$SemanticTokens = True;
+    LSPServer`$ContentQueue = {};
+    LSPServer`$PendingSemanticTokenRequests = <||>;
+    LSPServer`$PendingTokenRefresh = False;
+    LSPServer`$OpenFilesMap = <|
+      uri -> <|"SemanticTokens" -> {0, 0, 1, 2, 0}|>
+    |>;
+    LSPServer`Private`deliverFreshSemanticTokens[uri, "", True];
+    methods = Lookup[#, "method", None]& /@ LSPServer`$ContentQueue;
+    Count[methods, "workspace/semanticTokens/refresh"]
+  ],
+  1,
+  TestID -> "deliverFresh-queues-one-refresh-when-no-pending"
+]
+
+(* deliverFreshSemanticTokens: a pending (unanswered, not-yet-queued) request is
+   recovered directly, so NO refresh is queued even when wasStale=True. *)
+VerificationTest[
+  Module[{uri = "file:///deliver2.wl", methods},
+    LSPServer`$SemanticTokens = True;
+    LSPServer`$ContentQueue = {};
+    LSPServer`$PendingTokenRefresh = False;
+    LSPServer`$PendingSemanticTokenRequests = <|uri -> {99}|>;
+    LSPServer`$OpenFilesMap = <|
+      uri -> <|"SemanticTokens" -> {0, 0, 1, 2, 0}|>
+    |>;
+    LSPServer`Private`deliverFreshSemanticTokens[uri, "", True];
+    methods = Lookup[#, "method", None]& /@ LSPServer`$ContentQueue;
+    {Count[methods, "workspace/semanticTokens/refresh"],
+     Count[methods, "textDocument/semanticTokens/fullFencepost"]}
+  ],
+  {0, 1},
+  TestID -> "deliverFresh-recovers-pending-without-refresh"
+]
+
+(* deliverFreshSemanticTokens: wasStale=False and no pending => nothing queued
+   (tokens already current; no client churn). *)
+VerificationTest[
+  Module[{uri = "file:///deliver3.wl"},
+    LSPServer`$SemanticTokens = True;
+    LSPServer`$ContentQueue = {};
+    LSPServer`$PendingSemanticTokenRequests = <||>;
+    LSPServer`$PendingTokenRefresh = False;
+    LSPServer`$OpenFilesMap = <|uri -> <|"SemanticTokens" -> {0, 0, 1, 2, 0}|>|>;
+    LSPServer`Private`deliverFreshSemanticTokens[uri, "", False];
+    Length[LSPServer`$ContentQueue]
+  ],
+  0,
+  TestID -> "deliverFresh-no-op-when-not-stale-and-no-pending"
+]

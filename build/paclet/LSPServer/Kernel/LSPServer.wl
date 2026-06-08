@@ -2583,8 +2583,33 @@ semanticTokensRefreshQueuedQ[] :=
   ]
 
 
-(* Stub — real implementation lands in the fresh-token delivery task. *)
-deliverFreshSemanticTokens[args___] := Null
+(*
+deliverFreshSemanticTokens[uri, reason, wasStale]
+
+Called after fresh semantic tokens have been written to $OpenFilesMap[uri].
+`wasStale` says whether the tokens the client is currently displaying were the
+stale, carried-across-the-edit set (callers capture this BEFORE the recompute,
+which clears the SemanticTokensStale flag). Delivery is gap-free:
+  1. If pending (unanswered, not-yet-queued) fencepost requests exist for uri,
+     recover them directly with the fresh tokens (no global churn).
+  2. Otherwise, if the displayed tokens were stale, queue ONE coalesced refresh
+     so the client re-fetches. Because the refresh handler no longer drops the
+     cache, the re-fetch is an instant cache-hit.
+*)
+deliverFreshSemanticTokens[uri_String, reason_String:"", wasStale_:False] :=
+Module[{recovered},
+  If[!TrueQ[$SemanticTokens],
+    Return[Null]
+  ];
+
+  recovered = queuePendingSemanticTokenFenceposts[uri, reason];
+
+  If[recovered == 0 && TrueQ[wasStale],
+    queueSemanticTokensRefresh[reason]
+  ];
+
+  Null
+]
 
 queueSemanticTokensRefresh[reason_String:""] :=
   If[$SemanticTokens && !TrueQ[$PendingTokenRefresh] && !semanticTokensRefreshQueuedQ[],
@@ -3552,9 +3577,14 @@ Module[{params, doc, uri, entry, text, parseResult, curEntry,
       ];
       queueWorkspaceDiagnosticsSweep[];
       If[$SemanticTokens,
-        queuePendingSemanticTokenFenceposts[
-          uri,
-          "DBG-ST: didChange indexed; queuing pending semantic-token fenceposts"
+        Module[{wasStaleBefore},
+          wasStaleBefore = TrueQ[Lookup[
+            Lookup[$OpenFilesMap, uri, <||>], "SemanticTokensStale", False]];
+          deliverFreshSemanticTokens[
+            uri,
+            "DBG-ST: didChange indexed; delivering fresh semantic tokens",
+            wasStaleBefore
+          ]
         ]
       ];
       appendContentsToContentQueue[{
