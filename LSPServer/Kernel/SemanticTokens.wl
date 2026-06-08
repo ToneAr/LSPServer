@@ -842,7 +842,7 @@ Catch[
 Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbols,
   scopedSources, globalSymbolTokens, stringTemplateTokens, localTokens, transformed,
   line, char, oldLine, oldChar, needsScopingFollowupQ, scopingEligibleQ,
-  fastOnlyQ, classifySymbol},
+  fastOnlyQ, classifySymbol, staleQ},
 
   log[1, "textDocument/semanticTokens/fullFencepost: enter"];
 
@@ -898,7 +898,15 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
       Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
     ];
 
-    log[0, "DBG-ST fencepost: DIDCHANGE-STALE waiting for recovery id=", id, " uri=", uri];
+    log[0, "DBG-ST fencepost: DIDCHANGE-STALE id=", id, " uri=", uri];
+    Module[{staleEntry = Lookup[$OpenFilesMap, uri, Null], staleToks},
+      staleToks = If[AssociationQ[staleEntry], Lookup[staleEntry, "SemanticTokens", Null], Null];
+      If[staleToks =!= Null,
+        clearPending[];
+        log[0, "DBG-ST fencepost: SERVE STALE (didChange-stale) id=", id, " tokens=", Length[staleToks], " uri=", uri];
+        Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> staleToks |> |>}]
+      ]
+    ];
     Throw[{}]
   ];
 
@@ -916,14 +924,23 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   ];
 
   semanticTokens = Lookup[entry, "SemanticTokens", Null];
+  staleQ = TrueQ[Lookup[entry, "SemanticTokensStale", False]];
 
-  If[semanticTokens =!= Null,
+  (* Only treat the cache as a final fresh hit when it is NOT stale. A stale
+     cache falls through so fresh tokens are recomputed, but is still served as
+     a non-blank fallback below if recompute is not yet possible. *)
+  If[semanticTokens =!= Null && !staleQ,
     clearPending[];
     log[0, "DBG-ST fencepost: CACHE HIT id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
   ];
 
   If[semanticTokensEntryWaitingForReindexQ[entry],
+    If[semanticTokens =!= Null,
+      clearPending[];
+      log[0, "DBG-ST fencepost: SERVE STALE (reindex pending) id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
+      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
+    ];
     log[0, "DBG-ST fencepost: WAITING FOR REINDEX id=", id, " uri=", uri];
     Throw[{}]
   ];
