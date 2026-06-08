@@ -245,3 +245,27 @@ VerificationTest[
   0,
   TestID -> "deliverFresh-no-op-when-not-stale-and-no-pending"
 ]
+
+(* The stuck-refresh recovery window is 3 seconds (was 10). A refresh pending for
+   >3s is reset by ProcessScheduledJobs. *)
+VerificationTest[
+  Module[{},
+    LSPServer`$SemanticTokens = True;
+    LSPServer`$ServerState = "running";
+    LSPServer`$ContentQueue = {};
+    LSPServer`$OpenFilesMap = <||>;
+    LSPServer`$DiagnosticsKernel = None;
+    LSPServer`$DiagnosticsKernelLaunchAfter = None;
+    LSPServer`$HoverTask = None;
+    LSPServer`$DiagnosticsTask = None;
+    LSPServer`$WorkspaceBootstrapAfter = None;
+    LSPServer`$WorkspaceDiagnosticsSweepURIs = {};
+    LSPServer`$QueueLastNonEmptyTime = AbsoluteTime[];
+    LSPServer`$PendingTokenRefresh = True;
+    LSPServer`$PendingTokenRefreshTime = AbsoluteTime[] - 5;
+    LSPServer`ProcessScheduledJobs[];
+    TrueQ[LSPServer`$PendingTokenRefresh]
+  ],
+  False,
+  TestID -> "stuck-refresh-resets-after-3s"
+]

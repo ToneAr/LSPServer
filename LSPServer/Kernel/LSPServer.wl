@@ -1600,12 +1600,12 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   If the client never acknowledged the workspace/semanticTokens/refresh request
   (no response received, or the response arrived with an unexpected id), the
   $PendingTokenRefresh flag stays True forever and blocks all future refreshes.
-  Reset it after a 10-second timeout so the server can recover automatically.
+  Reset it after a 3-second timeout so the server can recover automatically.
   *)
   If[TrueQ[$PendingTokenRefresh] &&
      NumberQ[$PendingTokenRefreshTime] &&
-     AbsoluteTime[] - $PendingTokenRefreshTime > 10,
-    log[0, "DBG-ST: workspace/semanticTokens/refresh ack not received within 10s; resetting $PendingTokenRefresh"];
+     AbsoluteTime[] - $PendingTokenRefreshTime > 3,
+    log[0, "DBG-ST: workspace/semanticTokens/refresh ack not received within 3s; resetting $PendingTokenRefresh"];
     $PendingTokenRefresh = False;
     $PendingTokenRefreshTime = None
   ];
@@ -2618,7 +2618,7 @@ queueSemanticTokensRefresh[reason_String:""] :=
     ];
     (* Set the flag immediately so subsequent calls within the same event-loop
        tick don't enqueue a second refresh.  The flag stays True until the
-       client acknowledges the request (or the 10-second timeout fires). *)
+       client acknowledges the request (or the 3-second timeout fires). *)
     $PendingTokenRefresh = True;
     $PendingTokenRefreshTime = AbsoluteTime[];
     AppendTo[$ContentQueue, <|"method" -> "workspace/semanticTokens/refresh"|>]
