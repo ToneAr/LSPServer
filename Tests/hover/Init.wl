@@ -26,6 +26,7 @@ Module[{uri, fileText},
   |>]& /@
   {
     "textDocument/didOpenFencepost",
+    "textDocument/runOpenIndexUpdate",
     "textDocument/concreteParse",
     "textDocument/concreteTabsParse",
     "textDocument/aggregateParse",

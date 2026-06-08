@@ -7,7 +7,24 @@ BeginPackage["LSPServer`PacletIndex`"]
 Paclet-wide Symbol Index
 
 This module provides workspace-wide symbol tracking for the LSP server.
-It indexes all symbol definitions and usages across files in the workspace,
+  Cases[
+    Replace[
+      Lookup[Lookup[$PacletIndex, "Symbols", <||>], symbolName, <||>]["Definitions"],
+      _Missing -> {}
+    ],
+    _Association
+  ]
+  definitions = Replace[
+    Lookup[
+      Lookup[Lookup[$PacletIndex, "Symbols", <||>], symbolName, <||>],
+      "Definitions",
+      {}
+    ],
+    Except[_List] -> {}
+  ];
+
+  Cases[definitions, _Association]
+]
 enabling features like:
 - Cross-file go-to-definition
 - Workspace-wide symbol search
@@ -47,7 +64,10 @@ ProcessPendingIndexFiles
 ExtractDocComments
 ExtractLHSInputPatterns
 ExtractFunctionSignatureInfo
+ExtractOptionsPatternParameterBindings
 DefinitionAcceptsCallArgsQ
+MakeOptionsPatternBinding
+OptionsPatternBindingQ
 GetSymbolInferredPattern
 InferVariablePattern
 GetLoadedDependencySymbols
@@ -134,7 +154,13 @@ consumed by ProcessPendingIndexFiles during idle loop iterations)
 $PendingIndexFiles = {}
 $PendingReferenceFiles = {}
 $PendingExternalDepFiles = {}
+(* Dep contexts whose source files have not yet been discovered via PacletFind/FileNames.
+   Discovery is deferred to the background so PacletFind never blocks the LSP event loop. *)
+$PendingDepDiscovery = {}
 $StructuredPackageLoaderCache = <||>
+$LoadedExternalDependencies = <||>
+$WorkspaceSymbolIndex = <||>
+$WorkspaceSymbolSearchEntries = {}
 
 (*
 ==============================================================================
@@ -292,6 +318,8 @@ Patterns for directories to exclude from indexing
 *)
 $ExcludedDirectoryPatterns = {"build*", "node_modules", ".git", "__pycache__", "*.egg-info"}
 
+$LargeFileIndexTextLengthLimit = 200000;
+
 (*
 Check if a file path should be excluded based on directory patterns
 *)
@@ -301,6 +329,21 @@ Module[{pathParts },
   AnyTrue[pathParts, Function[{part},
     AnyTrue[$ExcludedDirectoryPatterns, StringMatchQ[part, #]&]
   ]]
+]
+
+largeFileIndexTextQ[text_] :=
+  StringQ[text] && StringLength[text] > $LargeFileIndexTextLengthLimit
+
+largeFileIndexPathQ[filePath_String] :=
+Module[{bytes},
+  bytes = Quiet[Check[FileByteCount[filePath], Missing["NotAvailable"]]];
+  NumberQ[bytes] && bytes > $LargeFileIndexTextLengthLimit
+]
+
+backgroundBatchSize[value_, default_Integer] :=
+Module[{n},
+  n = Replace[value, Except[_Integer?Positive] -> default];
+  Max[1, n]
 ]
 
 uriPath[uri_String] := StringReplace[uri, "file://" -> ""]
@@ -329,6 +372,8 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd,
     "Dependencies" -> {},
     "ContextAliases" -> <||>
   |>;
+  $WorkspaceSymbolIndex = <||>;
+  $WorkspaceSymbolSearchEntries = {};
 
   (*
   Load the workspace-level cache from disk - one Import for the whole workspace
@@ -344,7 +389,7 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd,
   (*
   Filter out files in excluded directories (build*, node_modules, .git, etc.)
   *)
-  filteredFiles = Select[files, !shouldExcludeFile[#]&];
+  filteredFiles = Select[files, !shouldExcludeFile[#] && !largeFileIndexPathQ[#]&];
 
   If[$Debug2,
     log["InitializePacletIndex: found ", Length[files], " files, ", Length[filteredFiles], " after filtering"]
@@ -430,9 +475,10 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd,
   $PendingIndexFiles = cacheMisses;
   $PendingReferenceFiles = Map[#[[1]]&, cacheHits];  (* file paths only *)
   $PendingExternalDepFiles = {};
+  $PendingDepDiscovery = {};
 
   If[Length[allDepsFromCache] > 0,
-    loadExternalDependencies[allDepsFromCache]
+    scheduleDepDiscovery[allDepsFromCache]
   ];
 
   If[$Debug2,
@@ -441,21 +487,15 @@ Module[{files, filteredFiles, cacheHits, cacheMisses, allDepsFromCache, uri, cd,
   ];
 
   (*
-  Ingest the full workspace during initialization so cross-file references,
-  workspace symbols, and diagnostics are ready immediately after startup.
-  External dependency files can continue in the background once the workspace
-  itself has been fully indexed.
+  Keep cache-hit restoration synchronous, but leave cache misses, reference
+  extraction, and external dependency files queued for ProcessScheduledJobs.
+  This lets initialized return promptly while indexing continues in the
+  background between requests.
   *)
-  While[
-    Length[$PendingIndexFiles] > 0 ||
-    Length[$PendingReferenceFiles] > 0 ||
-    Length[$PendingExternalDepFiles] > 0,
-    ProcessPendingIndexFiles[]
-  ];
-
   If[$Debug2,
-    log["InitializePacletIndex: fully ingested workspace on init; remaining ext-dep files=",
-      Length[$PendingExternalDepFiles]]
+    log["InitializePacletIndex: returning with ", Length[$PendingIndexFiles],
+      " full + ", Length[$PendingReferenceFiles], " ref + ",
+      Length[$PendingExternalDepFiles], " ext-dep files queued for background indexing"]
   ];
 
   $PacletIndex
@@ -473,8 +513,10 @@ Module[{n, batch},
 
   (* Priority 0: full-parse queue (cache misses need parse+abstract+extract+cache write) *)
   If[Length[$PendingIndexFiles] > 0,
-    (* Parse+abstract is expensive; 20 per batch balances responsiveness vs. throughput. *)
-    n = Min[20, Length[$PendingIndexFiles]];
+    n = Min[
+      backgroundBatchSize[LSPServer`$WorkspaceIndexingBatchSize, 5],
+      Length[$PendingIndexFiles]
+    ];
     batch = $PendingIndexFiles[[;;n]];
     $PendingIndexFiles = $PendingIndexFiles[[n + 1 ;;]];
     Scan[indexFile, batch];
@@ -485,13 +527,59 @@ Module[{n, batch},
     Return[
       Length[$PendingIndexFiles] > 0 ||
       Length[$PendingReferenceFiles] > 0 ||
-      Length[$PendingExternalDepFiles] > 0
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
     ]
   ];
 
-  (* Priority 1: reference-extraction queue (cache hits need only CST parse for refs) *)
+  (* Priority 1: dep discovery — run PacletFind+FileNames for queued dependency contexts.
+     Runs before reference-only files so dep symbols are available for hover quickly. *)
+  If[Length[$PendingDepDiscovery] > 0,
+    n = Min[
+      backgroundBatchSize[LSPServer`$DependencyDiscoveryBatchSize, 2],
+      Length[$PendingDepDiscovery]
+    ];
+    batch = $PendingDepDiscovery[[;;n]];
+    $PendingDepDiscovery = $PendingDepDiscovery[[n + 1 ;;]];
+    loadExternalDependencies[batch];
+    log[0, "DBG-TBDU ProcessPendingIndexFiles: dep discovery done for ", batch,
+      " extDepFiles=", Length[$PendingExternalDepFiles]];
+    Return[
+      Length[$PendingIndexFiles] > 0 ||
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
+    ]
+  ];
+
+  (* Priority 2: external dependency files. Indexed before reference-only workspace
+     files so hover/completion work for dep symbols without waiting for the full
+     workspace reference sweep. *)
+  If[Length[$PendingExternalDepFiles] > 0,
+    n = Min[
+      backgroundBatchSize[LSPServer`$ExternalDependencyIndexingBatchSize, 3],
+      Length[$PendingExternalDepFiles]
+    ];
+    batch = $PendingExternalDepFiles[[;;n]];
+    $PendingExternalDepFiles = $PendingExternalDepFiles[[n + 1 ;;]];
+    Scan[indexFile, batch];
+    log[0, "DBG-TBDU ProcessPendingIndexFiles: indexed ext-dep batch of ", n, ", ",
+      Length[$PendingExternalDepFiles], " ext-dep + ", Length[$PendingIndexFiles],
+      " full + ", Length[$PendingReferenceFiles], " ref files remaining"];
+    Return[
+      Length[$PendingIndexFiles] > 0 ||
+      Length[$PendingReferenceFiles] > 0 ||
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
+    ]
+  ];
+
+  (* Priority 3: reference-extraction queue (cache hits need only CST parse for refs) *)
   If[Length[$PendingReferenceFiles] > 0,
-    n = Min[20, Length[$PendingReferenceFiles]];
+    n = Min[
+      backgroundBatchSize[LSPServer`$WorkspaceReferenceBatchSize, 10],
+      Length[$PendingReferenceFiles]
+    ];
     batch = $PendingReferenceFiles[[;;n]];
     $PendingReferenceFiles = $PendingReferenceFiles[[n + 1 ;;]];
     Scan[extractFileReferences, batch];
@@ -502,28 +590,12 @@ Module[{n, batch},
     Return[
       Length[$PendingIndexFiles] > 0 ||
       Length[$PendingReferenceFiles] > 0 ||
-      Length[$PendingExternalDepFiles] > 0
+      Length[$PendingExternalDepFiles] > 0 ||
+      Length[$PendingDepDiscovery] > 0
     ]
   ];
 
-  (* Priority 2: external dependency files. These are lower priority so a large
-     dependency graph cannot starve workspace indexing and refresh. *)
-  If[Length[$PendingExternalDepFiles] > 0,
-    n = Min[20, Length[$PendingExternalDepFiles]];
-    batch = $PendingExternalDepFiles[[;;n]];
-    $PendingExternalDepFiles = $PendingExternalDepFiles[[n + 1 ;;]];
-    Scan[indexFile, batch];
-    log[0, "DBG-TBDU ProcessPendingIndexFiles: indexed ext-dep batch of ", n, ", ",
-      Length[$PendingExternalDepFiles], " ext-dep + ", Length[$PendingIndexFiles],
-      " full + ", Length[$PendingReferenceFiles], " ref files remaining"];
-    Return[
-      Length[$PendingIndexFiles] > 0 ||
-      Length[$PendingReferenceFiles] > 0 ||
-      Length[$PendingExternalDepFiles] > 0
-    ]
-  ];
-
-  (* Both queues empty - flush any pending cache changes to disk. *)
+  (* All queues empty - flush any pending cache changes to disk. *)
   saveWorkspaceCache[];
   False
 ]
@@ -543,9 +615,11 @@ Module[{text, cst, uri, symbols, refsByName},
 
   (* Skip if the file is no longer in the index (deleted or workspace changed) *)
   If[!KeyExistsQ[$PacletIndex["Files"], uri], Throw[Null]];
+  If[largeFileIndexPathQ[filePath], Throw[Null]];
 
   text = Quiet[Import[filePath, "Text"]];
   If[!StringQ[text], Throw[Null]];
+  If[largeFileIndexTextQ[text], Throw[Null]];
 
   cst = Quiet[CodeConcreteParse[text]];
   If[FailureQ[cst], Throw[Null]];
@@ -609,7 +683,7 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileDeps,
           Join[$PacletIndex["Dependencies"], deps]
         ];
         If[isWorkspaceURI[uri],
-          loadExternalDependencies[deps]
+          scheduleDepDiscovery[deps]
         ]
       ]
     ];
@@ -632,6 +706,23 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileDeps,
   text = Quiet[Import[filePath, "Text"]];
   If[!StringQ[text],
     If[$Debug2, log["indexFile: failed to read file"]];
+    Throw[Null]
+  ];
+
+  If[largeFileIndexTextQ[text],
+    addFileToIndex[
+      uri,
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      None,
+      None,
+      None,
+      {}
+    ];
     Throw[Null]
   ];
 
@@ -670,7 +761,7 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileDeps,
       log["indexFile: found dependencies: ", fileDeps]
     ];
     If[isWorkspaceURI[uri],
-      loadExternalDependencies[fileDeps]
+      scheduleDepDiscovery[fileDeps]
     ]
   ];
 
@@ -749,6 +840,24 @@ Module[{text, cst, ast, uri, definitions, usages, symbols, fileDeps,
   (* Cache miss: read + parse + extract *)
   text = Quiet[Import[filePath, "Text"]];
   If[!StringQ[text], Throw[$Failed]];
+
+  If[largeFileIndexTextQ[text],
+    Throw[<|
+      "URI"                -> uri,
+      "FilePath"           -> filePath,
+      "Definitions"        -> {},
+      "Usages"             -> {},
+      "Symbols"            -> {},
+      "Dependencies"       -> {},
+      "ContextLoads"       -> {},
+      "ExplicitContextRefs"-> {},
+      "PackageContext"     -> None,
+      "PackageScopeContext" -> None,
+      "PrivateContext"     -> None,
+      "ContextAliases"     -> {},
+      "FromCache"          -> False
+    |>]
+  ];
 
   cst = Quiet[CodeConcreteParse[text]];
   If[FailureQ[cst], Throw[$Failed]];
@@ -843,6 +952,55 @@ mergeIndexResult[$Failed] := Null
 mergeIndexResult[_] := Null
 
 
+workspaceSymbolEntryFromDefinition[name_String, def_Association] :=
+  Module[{src},
+    src = Lookup[def, "source", {{1, 1}, {1, 1}}];
+    If[!MatchQ[src, {{_Integer, _Integer}, {_Integer, _Integer}}],
+      src = {{1, 1}, {1, 1}}
+    ];
+    <|
+      "name" -> name,
+      "kind" -> Lookup[def, "kind", "unknown"],
+      "location" -> <|
+        "uri" -> Lookup[def, "uri", ""],
+        "range" -> <|
+          "start" -> <|
+            "line" -> src[[1, 1]] - 1,
+            "character" -> src[[1, 2]] - 1
+          |>,
+          "end" -> <|
+            "line" -> src[[2, 1]] - 1,
+            "character" -> src[[2, 2]] - 1
+          |>
+        |>
+      |>,
+      "containerName" -> Replace[Lookup[def, "context", None], None -> ""]
+    |>
+  ]
+
+
+refreshWorkspaceSymbolEntriesForSymbol[name_String] :=
+Module[{defs, entries},
+  defs = Replace[
+    Lookup[Lookup[$PacletIndex["Symbols"], name, <||>], "Definitions", {}],
+    Except[_List] -> {}
+  ];
+  entries = workspaceSymbolEntryFromDefinition[name, #] & /@ defs;
+  $WorkspaceSymbolIndex[name] = entries;
+  $WorkspaceSymbolSearchEntries = Flatten[Values[$WorkspaceSymbolIndex], 1]
+]
+
+
+dropWorkspaceSymbolEntriesForSymbol[name_String] :=
+(
+  If[AssociationQ[$WorkspaceSymbolIndex],
+    $WorkspaceSymbolIndex = KeyDrop[$WorkspaceSymbolIndex, name],
+    $WorkspaceSymbolIndex = <||>
+  ];
+  $WorkspaceSymbolSearchEntries = Flatten[Values[$WorkspaceSymbolIndex], 1]
+)
+
+
 (*
 Batch add a file's data to the PacletIndex.
 Uses grouped-by-name operations instead of per-item AppendTo to avoid O(n^2).
@@ -891,6 +1049,8 @@ Module[{fileSymbolsBag, defsByName, usagesByName, refsByName},
     ],
     defsByName
   ];
+
+  Scan[refreshWorkspaceSymbolEntriesForSymbol, Keys[defsByName]];
 
   (*
   Group usages by symbol name for batch insert
@@ -1058,9 +1218,9 @@ Module[{inner, lines, descLines, returnLine, description, returnStr, returnExpr}
     Check[
       ToExpression[returnStr, InputForm, HoldComplete],
       None,
-      {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx}
+      {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx, ToExpression::sntxi, ToExpression::sntxb}
     ],
-    {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx}
+    {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx, ToExpression::sntxi, ToExpression::sntxb}
   ];
 
   If[MatchQ[returnExpr, HoldComplete[_]],
@@ -1168,6 +1328,37 @@ Module[{inner},
 ]
 
 
+rulesPatternSymbolNameQ[name_String] := MemberQ[{"Rule", "RuleDelayed", "Rules"}, name]
+
+
+rulesBlankSequenceNodeQ[node_] :=
+  MatchQ[node,
+    CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _],
+      {LeafNode[Symbol, sym_String, _]}, _] /; rulesPatternSymbolNameQ[sym]
+  ]
+
+
+rulesOptionPatternNodeQ[argNode_] :=
+Module[{inner},
+  inner = stripNamedPatternWrapper[argNode];
+
+  Which[
+    rulesBlankSequenceNodeQ[inner],
+      True,
+    MatchQ[inner,
+      CallNode[LeafNode[Symbol, "List", _], {seq_}, _] /; rulesBlankSequenceNodeQ[seq]
+    ],
+      True,
+    True,
+      False
+  ]
+]
+
+
+optionLikePatternNodeQ[argNode_] :=
+  optionsPatternNodeQ[argNode] || rulesOptionPatternNodeQ[argNode]
+
+
 extractOptionsPatternTargets[argNode_, defaultName_String] :=
 Module[{inner, args, targets},
   inner = stripNamedPatternWrapper[argNode];
@@ -1189,6 +1380,86 @@ Module[{inner, args, targets},
     targets
   ]
 ]
+
+
+makeOptionsPatternBinding[targets_List] :=
+Module[{names},
+  names = DeleteDuplicates[Cases[targets, _String]];
+  Which[
+    Length[names] === 0,
+      OptionsPattern[],
+    Length[names] === 1,
+      OptionsPattern[Symbol[names[[1]]]],
+    True,
+      OptionsPattern[Symbol /@ names]
+  ]
+]
+
+
+makeOptionsPatternBinding[target_String] := makeOptionsPatternBinding[{target}]
+
+
+rulesPatternExprName[expr_] :=
+  If[MemberQ[{Blank, BlankSequence, BlankNullSequence}, Head[expr]] &&
+      Length[expr] === 1 && MatchQ[expr[[1]], _Symbol] &&
+      rulesPatternSymbolNameQ[SymbolName[expr[[1]]]],
+    SymbolName[expr[[1]]],
+    None
+  ]
+
+
+rulesPatternExprQ[expr_] := StringQ[rulesPatternExprName[expr]]
+
+
+rulesListPatternExprQ[expr_] :=
+  ListQ[expr] && Length[expr] === 1 && rulesPatternExprQ[First[expr]]
+
+
+optionsPatternBindingQ[expr_] :=
+  MatchQ[expr, _OptionsPattern] || rulesPatternExprQ[expr] || rulesListPatternExprQ[expr]
+
+
+definitionConditionLHSCallNode[lhsNode_] :=
+  FixedPoint[
+    Replace[#, CallNode[
+      LeafNode[Symbol, "Condition", _],
+      {inner:CallNode[_, _, _], _},
+      _] :> inner] &,
+    lhsNode
+  ]
+
+
+extractOptionsPatternParameterBindings[funcName_String, lhsNode_] :=
+Module[{lhsCallNode, args},
+  lhsCallNode = definitionConditionLHSCallNode[lhsNode];
+
+  If[!MatchQ[lhsCallNode, CallNode[_, _List, _]],
+    Return[<||>]
+  ];
+
+  args = lhsCallNode[[2]];
+
+  Association[
+    Cases[args,
+      arg:CallNode[LeafNode[Symbol, "Pattern", _],
+        {LeafNode[Symbol, varName_String, _], _}, _] /; optionLikePatternNodeQ[arg] :>
+        (varName -> makeOptionsPatternBinding[
+          If[optionsPatternNodeQ[arg],
+            extractOptionsPatternTargets[arg, funcName],
+            {funcName}
+          ]
+        ]),
+      {1}
+    ]
+  ]
+]
+
+
+MakeOptionsPatternBinding = makeOptionsPatternBinding;
+
+OptionsPatternBindingQ = optionsPatternBindingQ;
+
+ExtractOptionsPatternParameterBindings = extractOptionsPatternParameterBindings;
 
 
 extractOptionDefinitionEntries[node_] :=
@@ -1286,6 +1557,20 @@ extractArgPatternExpr[argNode_] :=
     MatchQ[argNode, CallNode[LeafNode[Symbol, "BlankNullSequence", _], _, _]],
       BlankNullSequence[]
     ,
+    (* OptionsPattern[] and equivalent rules sequences/lists.  These are normally
+       stripped from function signatures, but keeping a structural pattern here
+       makes hover/type displays and any direct callers consistent. *)
+    optionsPatternNodeQ[argNode],
+      OptionsPattern[]
+    ,
+    rulesOptionPatternNodeQ[argNode],
+      Module[{inner = stripNamedPatternWrapper[argNode]},
+        If[MatchQ[inner, CallNode[LeafNode[Symbol, "List", _], {seq_}, _]],
+          {BlankNullSequence[Symbol["Rules"]]},
+          BlankNullSequence[Symbol["Rules"]]
+        ]
+      ]
+    ,
     (* Named complex pattern not covered above (e.g. x:KeyValuePattern[...]): strip name, recurse *)
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Pattern", _], {_, _}, _]],
       extractArgPatternExpr[argNode[[2, 2]]]
@@ -1323,34 +1608,45 @@ extractLHSInputPatterns[lhsCallNode]
   Returns {} if lhsCallNode is not a CallNode.
 *)
 extractLHSInputPatterns[lhsNode_] :=
-  If[MatchQ[lhsNode, CallNode[_, _List, _]],
-    extractArgPatternExpr /@ lhsNode[[2]],
+Module[{lhsCallNode = definitionConditionLHSCallNode[lhsNode]},
+  If[MatchQ[lhsCallNode, CallNode[_, _List, _]],
+    extractArgPatternExpr /@ lhsCallNode[[2]],
     {}
   ]
+]
 
 extractFunctionSignatureInfo[funcName_String, lhsNode_] :=
-Module[{args, inputPatterns, variadic, hasOptionsPattern, optionTargets},
-  If[!MatchQ[lhsNode, CallNode[_, _List, _]],
+Module[{lhsCallNode, args, inputPatterns, variadic, hasOptionsPattern, optionTargets, optionPatternBindings},
+  lhsCallNode = definitionConditionLHSCallNode[lhsNode];
+
+  If[!MatchQ[lhsCallNode, CallNode[_, _List, _]],
     Return[<|
       "InputPatterns" -> {},
       "Variadic" -> False,
       "HasOptionsPattern" -> False,
-      "OptionTargets" -> {}
+      "OptionTargets" -> {},
+      "OptionsPatternBindings" -> <||>
     |>]
   ];
 
-  args = lhsNode[[2]];
+  args = lhsCallNode[[2]];
   inputPatterns = {};
   variadic = False;
   hasOptionsPattern = False;
   optionTargets = {};
+  optionPatternBindings = extractOptionsPatternParameterBindings[funcName, lhsCallNode];
 
   Scan[
     Function[{arg},
-      If[optionsPatternNodeQ[arg],
+      If[optionLikePatternNodeQ[arg],
         hasOptionsPattern = True;
         optionTargets = DeleteDuplicates[
-          Join[optionTargets, extractOptionsPatternTargets[arg, funcName]]
+          Join[optionTargets,
+            If[optionsPatternNodeQ[arg],
+              extractOptionsPatternTargets[arg, funcName],
+              {funcName}
+            ]
+          ]
         ],
         AppendTo[inputPatterns, extractArgPatternExpr[arg]];
         If[MatchQ[arg,
@@ -1373,13 +1669,23 @@ Module[{args, inputPatterns, variadic, hasOptionsPattern, optionTargets},
     "OptionTargets" -> If[hasOptionsPattern,
       DeleteDuplicates[Replace[optionTargets, {} :> {funcName}]],
       {}
-    ]
+    ],
+    "OptionsPatternBindings" -> optionPatternBindings
   |>
 ]
 
 ExtractFunctionSignatureInfo = extractFunctionSignatureInfo;
 
 ExtractLHSInputPatterns = extractLHSInputPatterns;
+
+
+$InferLiteralPatternMaxElements = 128;
+
+
+largeLiteralPatternNodeQ[node_] :=
+  MatchQ[node, CallNode[LeafNode[Symbol, "List" | "Association", _], _List, _]] &&
+    Length[node[[2]]] > $InferLiteralPatternMaxElements
+
 
 (*
 inferLiteralNodePattern[node]
@@ -1407,6 +1713,14 @@ inferLiteralNodePattern[node_] :=
     MatchQ[node, LeafNode[Rational, _, _]], Blank[Rational],
     MatchQ[node, LeafNode[Symbol, "True" | "False", _]], _?BooleanQ,
 
+    largeLiteralPatternNodeQ[node],
+      None,
+
+    (* List of rules: treat as the option-list counterpart of OptionsPattern[]. *)
+    MatchQ[node, CallNode[LeafNode[Symbol, "List", _], {_, ___}, _]] &&
+        AllTrue[node[[2]], optionRuleNodeQ],
+      {BlankNullSequence[Symbol["Rules"]]}
+    ,
     (* List literal: recurse into elements, build {___T} or {(T1|T2)..} *)
     MatchQ[node, CallNode[LeafNode[Symbol, "List", _], _List, _]],
       Module[{elemPats, deduped},
@@ -1454,6 +1768,8 @@ sampleToPattern[s_] :=
     IntegerQ[s],          _Integer,
     MatchQ[s, _Real],     _Real,
     StringQ[s],           _String,
+    ruleLikeSampleQ[s],    Blank[Symbol["Rules"]],
+    ruleListSampleQ[s],    {BlankNullSequence[Symbol["Rules"]]},
     ListQ[s],             _List,
     AssociationQ[s],      _Association,
     MatchQ[s, _Complex],  _Complex,
@@ -1461,6 +1777,7 @@ sampleToPattern[s_] :=
     s === True || s === False, _?BooleanQ,
     True,                 None
   ];
+
 
 (*
 inferArgSampleValueForRHS[argNode]
@@ -1476,6 +1793,15 @@ inferArgSampleValueForRHS[argNode_] :=
     MatchQ[argNode, LeafNode[Rational,  _, _]], 1/2,
     MatchQ[argNode, LeafNode[Symbol, "True",  _]], True,
     MatchQ[argNode, LeafNode[Symbol, "False", _]], False,
+    MatchQ[argNode, CallNode[LeafNode[Symbol, "Rule", _], {_, _}, _]], Rule[Null, Null],
+    MatchQ[argNode, CallNode[LeafNode[Symbol, "RuleDelayed", _], {_, _}, _]], RuleDelayed[Null, Null],
+    MatchQ[argNode, CallNode[LeafNode[Symbol, "OptionsPattern", _], _, _]], OptionsPattern[],
+    optionRuleProducerArgNodeQ[argNode], {Rule[Null, Null]},
+    optionRuleSequenceArgNodeQ[argNode], OptionsPattern[],
+    MatchQ[argNode, LeafNode[Symbol, _String, _]] &&
+        KeyExistsQ[$InferPatternLocalBindings, argNode[[2]]] &&
+        optionsPatternBindingQ[$InferPatternLocalBindings[argNode[[2]]]],
+      $InferPatternLocalBindings[argNode[[2]]],
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
       Module[{pairs},
         pairs = Cases[argNode[[2]],
@@ -1507,16 +1833,331 @@ inferArgSampleValueForRHS[argNode_] :=
 ruleLikeArgNodeQ[argNode_] := optionRuleNodeQ[argNode]
 
 
-splitTrailingOptionArgs[argNodes_List] :=
-Module[{splitPos},
-  splitPos = Length[argNodes];
+ruleListArgNodeQ[argNode_] :=
+  MatchQ[argNode, CallNode[LeafNode[Symbol, "List", _], _List, _]] &&
+    AllTrue[argNode[[2]], ruleLikeArgNodeQ]
 
-  While[splitPos >= 1 && ruleLikeArgNodeQ[argNodes[[splitPos]]],
+
+optionRuleProducerArgNodeQ[argNode_] :=
+  MatchQ[argNode, CallNode[LeafNode[Symbol, "FilterRules" | "Options", _], _, _]]
+
+
+optionRuleSequenceArgNodeQ[argNode_] :=
+  Which[
+    MatchQ[argNode, CallNode[LeafNode[Symbol, "Sequence", _], _List, _]],
+      AllTrue[argNode[[2]],
+        ruleLikeArgNodeQ[#] || ruleListArgNodeQ[#] || optionRuleProducerArgNodeQ[#] &],
+    MatchQ[argNode,
+      CallNode[LeafNode[Symbol, "Apply", _], {LeafNode[Symbol, "Sequence", _], _, ___}, _]
+    ],
+      Module[{inner = argNode[[2, 2]]},
+        ruleListArgNodeQ[inner] || optionRuleProducerArgNodeQ[inner]
+      ],
+    True,
+      False
+  ]
+
+
+ruleLikeSampleQ[sample_] := MatchQ[sample, _Rule | _RuleDelayed]
+
+
+ruleListSampleQ[sample_] := ListQ[sample] && Length[sample] > 0 && AllTrue[sample, ruleLikeSampleQ]
+
+
+(*
+Sequence-return inference patterns
+
+  ___[All]     - infer a BlankNullSequence / PatternSequence from all call args
+  __[All]      - same, but with BlankSequence as the homogeneous/empty fallback
+  ___[1, All]  - infer from the elements of call argument 1 (and similarly for
+                 deeper paths like ___[1, All, All])
+
+These forms parse as expressions whose head is BlankNullSequence[] or
+BlankSequence[] applied to selector arguments; they are not ordinary WL patterns.
+*)
+sequenceInferencePatternSpec[expr_String] :=
+Module[{s = StringTrim[expr], held},
+  If[!StringStartsQ[s, "___["] && !StringStartsQ[s, "__["],
+    Return[Missing["NotSequenceInferencePattern"]]
+  ];
+
+  held = Quiet[
+    Check[
+      ToExpression[s, InputForm, HoldComplete],
+      None,
+      {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx, ToExpression::sntxi, ToExpression::sntxb}
+    ],
+    {Syntax::sntxi, Syntax::sntxb, ToExpression::sntx, ToExpression::sntxi, ToExpression::sntxb}
+  ];
+
+  If[MatchQ[held, HoldComplete[_]],
+    sequenceInferencePatternSpec[First[held]],
+    Missing["NotSequenceInferencePattern"]
+  ]
+]
+
+sequenceInferencePatternSpec[expr_] :=
+Module[{head = Head[Unevaluated[expr]]},
+  Which[
+    head === BlankNullSequence[],
+      <|"Kind" -> BlankNullSequence, "Selectors" -> List @@ expr|>,
+    head === BlankSequence[],
+      <|"Kind" -> BlankSequence, "Selectors" -> List @@ expr|>,
+    True,
+      Missing["NotSequenceInferencePattern"]
+  ]
+]
+
+
+sequenceInferenceSelectIndex[list_List, n_Integer] :=
+  If[(n > 0 && n <= Length[list]) || (n < 0 && -n <= Length[list]),
+    {list[[n]]},
+    {}
+  ]
+
+
+sequenceInferenceNodeChildren[node_] :=
+  Which[
+    MatchQ[node, CallNode[LeafNode[Symbol, "List", _], _List, _]],
+      node[[2]],
+    MatchQ[node, CallNode[LeafNode[Symbol, "Association", _], _List, _]],
+      Cases[node[[2]],
+        CallNode[LeafNode[Symbol, "Rule" | "RuleDelayed", _], {_, valueNode_}, _] :> valueNode,
+        {1}
+      ],
+    MatchQ[node, CallNode[_, _List, _]],
+      node[[2]],
+    True,
+      {}
+  ]
+
+
+sequenceInferenceSelectNodes[argNodes_List, selectors_List] :=
+Module[{current = argNodes, atTopLevel = True},
+  If[selectors === {},
+    Return[current]
+  ];
+
+  Scan[
+    Function[{selector},
+      current = Which[
+        selector === All,
+          If[atTopLevel,
+            current,
+            Flatten[sequenceInferenceNodeChildren /@ current, 1]
+          ],
+        IntegerQ[selector],
+          If[atTopLevel,
+            sequenceInferenceSelectIndex[current, selector],
+            Flatten[
+              sequenceInferenceSelectIndex[sequenceInferenceNodeChildren[#], selector] & /@ current,
+              1
+            ]
+          ],
+        True,
+          {}
+      ];
+      atTopLevel = False;
+    ],
+    selectors
+  ];
+
+  current
+]
+
+
+sequenceInferenceAtomicNumericNodeQ[node_] :=
+  MatchQ[node, LeafNode[Integer | Real | Rational, _, _]]
+
+
+sequenceInferenceNumericLikeNodeQ[node_] :=
+  sequenceInferenceAtomicNumericNodeQ[node] || sequenceInferenceComplexLiteralNodeQ[node]
+
+
+sequenceInferenceComplexLiteralNodeQ[node_] :=
+  MatchQ[node, LeafNode[Symbol, "I", _]] ||
+    MatchQ[node, CallNode[LeafNode[Symbol, "Complex", _], {_, _}, _]] ||
+    (MatchQ[node, CallNode[LeafNode[Symbol, "Plus" | "Times", _], _List, _]] &&
+      Module[{args = node[[2]]},
+        Length[args] > 0 &&
+          AnyTrue[args, sequenceInferenceComplexLiteralNodeQ] &&
+          AllTrue[args, sequenceInferenceNumericLikeNodeQ]
+      ])
+
+
+sequenceInferenceNodePattern[node_, docComments_Association, uri_String, localFuncDefs_:None] :=
+Module[{samplePat, pat},
+  If[sequenceInferenceComplexLiteralNodeQ[node],
+    Return[Blank[Complex]]
+  ];
+
+  samplePat = sampleToPattern[inferArgSampleValueForRHS[node]];
+  If[samplePat =!= None,
+    Return[samplePat]
+  ];
+
+  pat = If[AssociationQ[localFuncDefs] &&
+      MatchQ[node, CallNode[LeafNode[Symbol, _String, _], _List, _]],
+    resolveCallReturnPattern[node[[1, 2]], node[[2]], localFuncDefs],
+    None
+  ];
+
+  If[MatchQ[pat, None | _Missing],
+    pat = inferPatternFromRHS[node, docComments, uri]
+  ];
+
+  If[MatchQ[pat, None | _Missing],
+    Blank[],
+    pat
+  ]
+]
+
+
+sequenceInferenceBasePattern[kind_] :=
+  If[kind === BlankSequence, BlankSequence[], BlankNullSequence[]]
+
+
+sequenceInferenceTypedBlankSymbol[pat_] :=
+  If[Head[pat] === Blank && Length[pat] === 1 && MatchQ[pat[[1]], _Symbol],
+    pat[[1]],
+    None
+  ]
+
+
+sequenceInferenceBuildPattern[kind_, elemPats_List] :=
+Module[{normalized, deduped, only, sym},
+  normalized = Replace[elemPats, None | _Missing -> Blank[], {1}];
+
+  If[Length[normalized] === 0,
+    Return[sequenceInferenceBasePattern[kind]]
+  ];
+
+  deduped = DeleteDuplicates[normalized];
+
+  If[Length[deduped] === 1,
+    only = First[deduped];
+
+    If[only === Blank[],
+      Return[sequenceInferenceBasePattern[kind]]
+    ];
+
+    sym = sequenceInferenceTypedBlankSymbol[only];
+    If[sym =!= None,
+      Return[If[kind === BlankSequence, BlankSequence[sym], BlankNullSequence[sym]]]
+    ]
+  ];
+
+  PatternSequence @@ normalized
+]
+
+
+inferSequenceReturnPatternFromDocComment[dc_, argNodes_List, docComments_Association, uri_String, localFuncDefs_:None] :=
+Module[{retPat, retStr, spec, selectedNodes, elemPats},
+  If[!AssociationQ[dc],
+    Return[Missing["NotSequenceInferencePattern"]]
+  ];
+
+  retPat = Lookup[dc, "ReturnPattern", None];
+  spec = sequenceInferencePatternSpec[retPat];
+
+  If[MissingQ[spec],
+    retStr = Lookup[dc, "ReturnPatternString", None];
+    If[StringQ[retStr],
+      spec = sequenceInferencePatternSpec[retStr]
+    ]
+  ];
+
+  If[MissingQ[spec],
+    Return[Missing["NotSequenceInferencePattern"]]
+  ];
+
+  selectedNodes = sequenceInferenceSelectNodes[argNodes, Lookup[spec, "Selectors", {}]];
+  elemPats = sequenceInferenceNodePattern[#, docComments, uri, localFuncDefs] & /@ selectedNodes;
+
+  sequenceInferenceBuildPattern[spec["Kind"], elemPats]
+]
+
+
+applyHeadReplacementLevelSpecZeroQ[node_] :=
+  MatchQ[node, LeafNode[Integer, "0", _]] ||
+    MatchQ[node, CallNode[LeafNode[Symbol, "List", _], {LeafNode[Integer, "0", _]}, _]]
+
+
+applyHeadReplacementLevelZeroQ[argNodes_List] :=
+  Length[argNodes] === 2 ||
+    (Length[argNodes] >= 3 && applyHeadReplacementLevelSpecZeroQ[argNodes[[3]]])
+
+
+applyHeadReplacementArgumentNodes[exprNode_] :=
+  If[MatchQ[exprNode, CallNode[_, _List, _]],
+    sequenceInferenceNodeChildren[exprNode],
+    Missing["AtomicExpression"]
+  ]
+
+
+inferApplyHeadReplacementPattern[headNode_, exprNode_, docComments_Association, uri_String, localFuncDefs_:None] :=
+Module[{headName, appliedArgs, pat},
+  (* Apply leaves atoms unchanged. *)
+  If[!MatchQ[exprNode, CallNode[_, _List, _]],
+    Return[inferPatternFromRHS[exprNode, docComments, uri]]
+  ];
+
+  If[!MatchQ[headNode, LeafNode[Symbol, _String, _]],
+    Return[None]
+  ];
+
+  headName = headNode[[2]];
+  If[headName === "Apply",
+    Return[None]
+  ];
+
+  appliedArgs = applyHeadReplacementArgumentNodes[exprNode];
+  If[MissingQ[appliedArgs],
+    Return[None]
+  ];
+
+  If[AssociationQ[localFuncDefs],
+    pat = resolveCallReturnPattern[headName, appliedArgs, localFuncDefs];
+    If[!MatchQ[pat, None | _Missing],
+      Return[pat]
+    ]
+  ];
+
+  inferPatternFromRHS[CallNode[headNode, appliedArgs, <||>], docComments, uri]
+]
+
+
+optionForwardingArgQ[argNode_, argSample_] :=
+  ruleLikeArgNodeQ[argNode] || ruleListArgNodeQ[argNode] ||
+    optionRuleProducerArgNodeQ[argNode] || optionRuleSequenceArgNodeQ[argNode] ||
+    optionsPatternBindingQ[argSample] || ruleListSampleQ[argSample]
+
+
+splitTrailingOptionArgsWithSamples[argNodes_List, argSamples_List] :=
+Module[{splitPos, samples},
+  splitPos = Length[argNodes];
+  samples = PadRight[argSamples, Length[argNodes], Missing["Unknown"]];
+
+  While[
+    splitPos >= 1 &&
+      optionForwardingArgQ[argNodes[[splitPos]], samples[[splitPos]]],
     splitPos--
   ];
 
-  {Take[argNodes, splitPos], Drop[argNodes, splitPos]}
+  {
+    Take[argNodes, splitPos],
+    Drop[argNodes, splitPos],
+    Take[samples, splitPos],
+    Drop[samples, splitPos]
+  }
 ]
+
+
+splitTrailingOptionArgs[argNodes_List] :=
+  splitTrailingOptionArgsWithSamples[
+    argNodes,
+    ConstantArray[Missing["Unknown"], Length[argNodes]]
+  ][[{1, 2}]]
 
 
 extractCallOptionName[argNode_] :=
@@ -1526,19 +2167,32 @@ extractCallOptionName[argNode_] :=
   ]
 
 
+extractCallOptionNames[argNode_] :=
+  Which[
+    ruleLikeArgNodeQ[argNode],
+      {extractCallOptionName[argNode]},
+    ruleListArgNodeQ[argNode],
+      Flatten[extractCallOptionNames /@ argNode[[2]]],
+    True,
+      {}
+  ]
+
+
 getIndexedSymbolOptionNames[symbolName_String, visited_List:{}] :=
-Module[{defs, directNames, inheritedTargets},
+Module[{defs, optionDefs, functionDefs, directNames, inheritedTargets},
   If[MemberQ[visited, symbolName],
     Return[{}]
   ];
 
-  defs = Select[
-    Lookup[Lookup[$PacletIndex["Symbols"], symbolName, <||>], "Definitions", {}],
-    Lookup[#, "kind", None] === "option" &
-  ];
+  defs = Lookup[Lookup[$PacletIndex["Symbols"], symbolName, <||>], "Definitions", {}];
+  optionDefs = Select[defs, Lookup[#, "kind", None] === "option" &];
+  functionDefs = Select[defs, TrueQ[Lookup[#, "HasOptionsPattern", False]] &];
 
-  directNames = DeleteDuplicates[Flatten[Lookup[defs, "OptionNames", {}]]];
-  inheritedTargets = DeleteDuplicates[Flatten[Lookup[defs, "OptionTargets", {}]]];
+  directNames = DeleteDuplicates[Flatten[Lookup[optionDefs, "OptionNames", {}]]];
+  inheritedTargets = DeleteDuplicates[Flatten[{
+    Lookup[optionDefs, "OptionTargets", {}],
+    Lookup[functionDefs, "OptionTargets", {}]
+  }]];
 
   DeleteDuplicates[
     Join[
@@ -1560,37 +2214,78 @@ Module[{targets},
 ]
 
 
+ruleSampleMatchesRulesPatternQ[sample_, pat_] :=
+Module[{name = rulesPatternExprName[pat]},
+  Which[
+    name === "Rules",
+      ruleLikeSampleQ[sample] || optionsPatternBindingQ[sample],
+    name === "Rule",
+      MatchQ[sample, _Rule],
+    name === "RuleDelayed",
+      MatchQ[sample, _RuleDelayed],
+    True,
+      False
+  ]
+]
+
+
+rulesListPatternAcceptsLengthQ[seqPat_, len_Integer] :=
+  Head[seqPat] =!= BlankSequence || len >= 1
+
+
+argSampleMatchesPatternQ[sample_, pat_] :=
+  sample === Missing["Unknown"] ||
+    Which[
+      optionsPatternBindingQ[sample] && optionsPatternBindingQ[pat],
+        True,
+      rulesPatternExprQ[pat],
+        ruleSampleMatchesRulesPatternQ[sample, pat],
+      rulesListPatternExprQ[pat],
+        Module[{seqPat = First[pat]},
+          optionsPatternBindingQ[sample] ||
+            (ListQ[sample] && rulesListPatternAcceptsLengthQ[seqPat, Length[sample]] &&
+              AllTrue[sample, ruleSampleMatchesRulesPatternQ[#, seqPat] &])
+        ],
+      True,
+        MatchQ[sample, pat]
+    ]
+
+
 definitionAcceptsCallArgsQ[funcName_String, def_Association, argNodes_List, argSamples_List, validateOptionNames_:False] :=
 Module[{pats, isVar, hasOptionsPattern, positionalNodes, optionNodes,
-  positionalSamples, fixedN, varElemPat, optionNames, allowedOptionNames},
+  positionalSamples, optionSamples, fixedN, varElemPat, optionNames,
+  explicitOptionNames, allowedOptionNames},
 
   pats = Lookup[def, "InputPatterns", {}];
   isVar = Lookup[def, "Variadic", False];
   hasOptionsPattern = TrueQ[Lookup[def, "HasOptionsPattern", False]];
 
-  {positionalNodes, optionNodes} = If[hasOptionsPattern,
-    splitTrailingOptionArgs[argNodes],
-    {argNodes, {}}
+  {positionalNodes, optionNodes, positionalSamples, optionSamples} = If[hasOptionsPattern,
+    splitTrailingOptionArgsWithSamples[argNodes, argSamples],
+    {
+      argNodes,
+      {},
+      PadRight[argSamples, Length[argNodes], Missing["Unknown"]],
+      {}
+    }
   ];
 
-  positionalSamples = Take[argSamples, Length[positionalNodes]];
-
   If[hasOptionsPattern,
-    optionNames = extractCallOptionName /@ optionNodes;
+    optionNames = Flatten[extractCallOptionNames /@ optionNodes];
 
     If[TrueQ[validateOptionNames],
-      If[MemberQ[optionNames, None],
-        Return[False]
-      ];
+      explicitOptionNames = Cases[optionNames, _String];
 
-      allowedOptionNames = definitionOptionNames[funcName, def];
+      If[Length[explicitOptionNames] > 0,
+        allowedOptionNames = definitionOptionNames[funcName, def];
 
-      If[Length[allowedOptionNames] === 0 && Length[optionNodes] > 0,
-        Return[False]
-      ];
+        If[Length[allowedOptionNames] === 0,
+          Return[False]
+        ];
 
-      If[!AllTrue[optionNames, MemberQ[allowedOptionNames, #] &],
-        Return[False]
+        If[!AllTrue[explicitOptionNames, MemberQ[allowedOptionNames, #] &],
+          Return[False]
+        ]
       ]
     ]
   ];
@@ -1605,14 +2300,14 @@ Module[{pats, isVar, hasOptionsPattern, positionalNodes, optionNodes,
     Length[positionalSamples] >= fixedN &&
     (fixedN === 0 || AllTrue[
       Transpose[{Take[positionalSamples, fixedN], Take[pats, fixedN]}],
-      (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+      argSampleMatchesPatternQ[#[[1]], #[[2]]] &
     ]) &&
     AllTrue[Drop[positionalSamples, fixedN],
-      (# === Missing["Unknown"] || MatchQ[#, varElemPat]) &
+      argSampleMatchesPatternQ[#, varElemPat] &
     ],
     Length[pats] === Length[positionalSamples] &&
     AllTrue[Transpose[{positionalSamples, pats}],
-      (#[[1]] === Missing["Unknown"] || MatchQ[#[[1]], #[[2]]]) &
+      argSampleMatchesPatternQ[#[[1]], #[[2]]] &
     ]
   ]
 ]
@@ -1954,9 +2649,18 @@ Module[{head, headName, calleeDefs, retPat},
           Head[exprPat] === List, _List,
           Head[exprPat] === Alternatives && AllTrue[List @@ exprPat,
             # === Blank[List] || Head[#] === List &], _List,
+          applyHeadReplacementLevelZeroQ[rhsNode[[2]]],
+            inferApplyHeadReplacementPattern[rhsNode[[2, 1]], rhsNode[[2, 2]], docComments, uri],
           True, None
         ]
       ]
+    ,
+    (*
+    Apply[f, expr] / f @@ expr: replace the head of expr with f, then infer the
+    resulting f[args...] expression.  Atoms are unchanged by Apply.
+    *)
+    CallNode[LeafNode[Symbol, "Apply", _], _List, _] /; applyHeadReplacementLevelZeroQ[rhsNode[[2]]],
+      inferApplyHeadReplacementPattern[rhsNode[[2, 1]], rhsNode[[2, 2]], docComments, uri]
     ,
     (*
     Part[expr, i] — propagate the element type of the collection.
@@ -2087,63 +2791,77 @@ Module[{head, headName, calleeDefs, retPat},
 
         If[AssociationQ[matchingDef],
           With[{dc = Lookup[matchingDef, "DocComment", None]},
-            Which[
-              (* "_<N>" / "_<N>|_<M>" / "_<N>|Null" passthrough: return type = inferred type of the
-                 Nth call arg (or a union of multiple args, possibly including Null for
-                 branching functions like If[t,a] 2-arg form).  When the argument is itself
-                 a function call (not a literal), we recurse into inferPatternFromRHS so
-                 that chains like  var = Echo @ f[{1., 1.}]  resolve transitively.
-                 Note: use ___ wildcard suffix to match trailing "|..." union parts. *)
-              AssociationQ[dc] && StringMatchQ[Lookup[dc, "ReturnPatternString", ""],
-                "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
-                Module[{retStr, argIdxs, hasNull, argNodes, argPats},
-                  retStr   = dc["ReturnPatternString"];
-                  (* Parse all arg indices out of e.g. "_<2>|_<3>" or "_<2>|Null" *)
-                  argIdxs  = ToExpression /@ StringCases[retStr,
-                                "_<" ~~ n:DigitCharacter.. ~~ ">" :> n];
-                  hasNull  = StringContainsQ[retStr, "|Null"];
-                  argNodes = rhsNode[[2]];
-                  (* For each referenced arg, try literal fast path then full recursion *)
-                  argPats = DeleteCases[
-                    Map[
-                      Function[{n},
-                        If[n > Length[argNodes], None,
-                          With[{sp = sampleToPattern[
-                                  If[n <= Length[callArgSamples],
-                                    callArgSamples[[n]], Missing["Unknown"]]]},
-                            If[sp =!= None,
-                              sp,
-                              (* Recursive: arg is a call like f[{1.,1.}] *)
-                              inferPatternFromRHS[argNodes[[n]], docComments, uri]
+            Module[{sequenceRetPat},
+              sequenceRetPat = inferSequenceReturnPatternFromDocComment[
+                dc, rhsNode[[2]], docComments, uri
+              ];
+
+              Which[
+                !MissingQ[sequenceRetPat],
+                  sequenceRetPat,
+                (* "_<N>" / "_<N>|_<M>" / "_<N>|Null" passthrough: return type = inferred type of the
+                   Nth call arg (or a union of multiple args, possibly including Null for
+                   branching functions like If[t,a] 2-arg form).  When the argument is itself
+                   a function call (not a literal), we recurse into inferPatternFromRHS so
+                   that chains like  var = Echo @ f[{1., 1.}]  resolve transitively.
+                   Note: use ___ wildcard suffix to match trailing "|..." union parts. *)
+                AssociationQ[dc] && StringMatchQ[Lookup[dc, "ReturnPatternString", ""],
+                  "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
+                  Module[{retStr, argIdxs, hasNull, argNodes, argPats},
+                    retStr   = dc["ReturnPatternString"];
+                    (* Parse all arg indices out of e.g. "_<2>|_<3>" or "_<2>|Null" *)
+                    argIdxs  = ToExpression /@ StringCases[retStr,
+                                  "_<" ~~ n:DigitCharacter.. ~~ ">" :> n];
+                    hasNull  = StringContainsQ[retStr, "|Null"];
+                    argNodes = rhsNode[[2]];
+                    (* For each referenced arg, try literal fast path then full recursion *)
+                    argPats = DeleteCases[
+                      Map[
+                        Function[{n},
+                          If[n > Length[argNodes], None,
+                            With[{sp = sampleToPattern[
+                                    If[n <= Length[callArgSamples],
+                                      callArgSamples[[n]], Missing["Unknown"]]]},
+                              If[sp =!= None,
+                                sp,
+                                (* Recursive: arg is a call like f[{1.,1.}] *)
+                                inferPatternFromRHS[argNodes[[n]], docComments, uri]
+                              ]
                             ]
                           ]
-                        ]
+                        ],
+                        argIdxs
                       ],
-                      argIdxs
-                    ],
-                    None
-                  ];
-                  If[hasNull, AppendTo[argPats, Null]];
-                  With[{deduped = DeleteDuplicates[argPats]},
-                    Switch[Length[deduped],
-                      0, None,
-                      1, deduped[[1]],
-                      _, Apply[Alternatives, deduped]
+                      None
+                    ];
+                    If[hasNull, AppendTo[argPats, Null]];
+                    With[{deduped = DeleteDuplicates[argPats]},
+                      Switch[Length[deduped],
+                        0, None,
+                        1, deduped[[1]],
+                        _, Apply[Alternatives, deduped]
+                      ]
                     ]
-                  ]
-                ],
-              (* Normal fixed return type *)
-              AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing],
-                dc["ReturnPattern"],
-              True, None
+                  ],
+                (* Normal fixed return type *)
+                AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing],
+                  dc["ReturnPattern"],
+                True, None
+              ]
             ]
           ],
           (* No overload matched arguments - fall back to first definition with ReturnPattern *)
           Catch[
             Scan[
               Function[{def},
-                Module[{dc},
+                Module[{dc, sequenceRetPat},
                   dc = Lookup[def, "DocComment", None];
+                  sequenceRetPat = inferSequenceReturnPatternFromDocComment[
+                    dc, rhsNode[[2]], docComments, uri
+                  ];
+                  If[!MissingQ[sequenceRetPat],
+                    Throw[sequenceRetPat]
+                  ];
                   If[AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing]
                        && !StringMatchQ[Lookup[dc, "ReturnPatternString", ""],
                             "_<" ~~ DigitCharacter.. ~~ ">" ~~ ___],
@@ -2279,34 +2997,38 @@ Module[{localFuncDefs},
         (* Retry constant definitions whose RHS was a function call unresolvable on first pass *)
         def["kind"] === "constant" &&
             (MatchQ[def["InferredPattern"], None | _Missing] ||
-             (* Also retry branching builtins: their first-pass may have resolved
-                only some arg branches (those that were literals), missing call-based
-                args whose return types become available only after the second pass. *)
-             (StringQ[def["rhsCallHead"]] &&
-              MemberQ[{"If","Which","Switch","Check","Catch","Quiet","Module","Block","With"},
-                      def["rhsCallHead"]]) ||
-             (* Retry when callee has user-defined overloads (e.g. TagSetDelayed) that
-                may provide a more specific return type than the builtin default. *)
-             (StringQ[def["rhsCallHead"]] &&
-              Length[Lookup[localFuncDefs, def["rhsCallHead"], {}]] > 0)),
-          Module[{resolved},
-            resolved = resolveCallReturnPattern[def["rhsCallHead"], def["rhsCallArgs"], localFuncDefs];
-            If[resolved =!= None,
-              Append[def, "InferredPattern" -> resolved],
-              def
-            ]
-          ],
-        (* Retry function definitions whose body return type was unresolved on first pass *)
-        def["kind"] === "function" &&
-            MatchQ[def["InferredReturnPattern"], None | _Missing] &&
-            StringQ[def["rhsCallHead"]],
-          Module[{resolved},
-            resolved = resolveCallReturnPattern[def["rhsCallHead"], def["rhsCallArgs"], localFuncDefs];
-            If[resolved =!= None,
-              Append[def, "InferredReturnPattern" -> resolved],
-              def
-            ]
-          ],
+	             (* Also retry branching builtins: their first-pass may have resolved
+	                only some arg branches (those that were literals), missing call-based
+	                args whose return types become available only after the second pass. *)
+	             (StringQ[def["rhsCallHead"]] &&
+	              MemberQ[{"If","Which","Switch","Check","Catch","Quiet","Module","Block","With"},
+	                      def["rhsCallHead"]]) ||
+	             (* Retry when callee has user-defined overloads (e.g. TagSetDelayed) that
+	                may provide a more specific return type than the builtin default. *)
+	             (StringQ[def["rhsCallHead"]] &&
+	              Length[Lookup[localFuncDefs, def["rhsCallHead"], {}]] > 0)),
+	          Module[{resolved},
+	            resolved = Block[{$InferPatternLocalBindings = Lookup[def, "LocalPatternBindings", <||>]},
+	              resolveCallReturnPattern[def["rhsCallHead"], def["rhsCallArgs"], localFuncDefs]
+	            ];
+	            If[resolved =!= None,
+	              Append[def, "InferredPattern" -> resolved],
+	              def
+	            ]
+	          ],
+	        (* Retry function definitions whose body return type was unresolved on first pass *)
+	        def["kind"] === "function" &&
+	            MatchQ[def["InferredReturnPattern"], None | _Missing] &&
+	            StringQ[def["rhsCallHead"]],
+	          Module[{resolved},
+	            resolved = Block[{$InferPatternLocalBindings = Lookup[def, "LocalPatternBindings", <||>]},
+	              resolveCallReturnPattern[def["rhsCallHead"], def["rhsCallArgs"], localFuncDefs]
+	            ];
+	            If[resolved =!= None,
+	              Append[def, "InferredReturnPattern" -> resolved],
+	              def
+	            ]
+	          ],
         True, def
       ]
     ],
@@ -2360,12 +3082,18 @@ Module[{argSamples, localDefs, defs},
   Catch[
     Scan[
       Function[{def},
-        Module[{dc, retStr},
+        Module[{dc, retStr, sequenceRetPat},
           dc     = Lookup[def, "DocComment", None];
           retStr = If[AssociationQ[dc], Lookup[dc, "ReturnPatternString", ""], ""];
           If[
             definitionAcceptsCallArgsQ[headName, def, argNodes, argSamples] &&
             AssociationQ[dc] && !MatchQ[dc["ReturnPattern"], None | _Missing],
+            sequenceRetPat = inferSequenceReturnPatternFromDocComment[
+              dc, argNodes, <||>, "", localFuncDefs
+            ];
+            If[!MissingQ[sequenceRetPat],
+              Throw[sequenceRetPat]
+            ];
             (* _<N> / _<N>|_<M> / _<N>|Null: recurse into the referenced call argument.
                Also handles "|Null" suffix for branching functions like If[t,a] which may
                return Null when the condition is False and no else-branch is given.
@@ -2432,6 +3160,13 @@ Module[{argSamples, localDefs, defs},
     None
   ]
 ]
+
+(* Apply[f, expr] / f @@ expr: infer the expression produced by replacing expr's head with f. *)
+resolveCallReturnPattern["Apply", argNodes_List, localFuncDefs_Association] :=
+  If[applyHeadReplacementLevelZeroQ[argNodes],
+    inferApplyHeadReplacementPattern[argNodes[[1]], argNodes[[2]], <||>, "", localFuncDefs],
+    None
+  ]
 
 (* CompoundExpression: resolve the type of its last element *)
 resolveCallReturnPattern["CompoundExpression", argNodes_List, localFuncDefs_Association] :=
@@ -2917,7 +3652,7 @@ Uses PacletFind to locate paclet-based packages; falls back to FindFile for
 packages on $Path.
 *)
 queueExternalPackageFiles[dep_String] :=
-Module[{pacletName, paclets, loc, kernelDir, searchDirs, files, newFiles},
+Module[{pacletName, paclets, loc, kernelDir, searchDirs, files, newFiles, limit},
   pacletName = First[StringSplit[dep, "`"], dep];
 
   paclets = Quiet[PacletFind[pacletName]];
@@ -2937,7 +3672,7 @@ Module[{pacletName, paclets, loc, kernelDir, searchDirs, files, newFiles},
   If[Length[searchDirs] == 0, Return[]];
 
   files = Flatten[FileNames["*.wl" | "*.m", #, Infinity]& /@ searchDirs];
-  files = Select[files, !shouldExcludeFile[#] &];
+  files = Select[files, !shouldExcludeFile[#] && !largeFileIndexPathQ[#] &];
 
   (* Batch-append new files, skipping already-indexed and already-queued entries *)
   newFiles = Select[files,
@@ -2947,9 +3682,43 @@ Module[{pacletName, paclets, loc, kernelDir, searchDirs, files, newFiles},
       !MemberQ[$PendingIndexFiles, fp]
     ]
   ];
+  limit = backgroundBatchSize[LSPServer`$ExternalDependencyFileLimit, 80];
+  If[Length[newFiles] > limit,
+    log[1, "queueExternalPackageFiles: limiting ", dep, " from ",
+      Length[newFiles], " files to ", limit];
+    newFiles = Take[newFiles, UpTo[limit]]
+  ];
   If[Length[newFiles] > 0,
     log[0, "DBG-TBDU queueExternalPackageFiles: dep=", dep, " queuing ", Length[newFiles], " files"];
     $PendingExternalDepFiles = Join[$PendingExternalDepFiles, newFiles]
+  ]
+]
+
+
+(*
+Queue external dependency contexts for background discovery.
+Replaces direct calls to loadExternalDependencies in hot paths (UpdateFileIndex,
+indexFile) so that PacletFind + FileNames never block the LSP event loop.
+Deps that are already loaded, already queued, or already being discovered are skipped.
+The actual file-list discovery happens in ProcessPendingIndexFiles Priority 1.
+*)
+scheduleDepDiscovery[deps_List] :=
+Module[{workspaceContexts, newDeps},
+  workspaceContexts = Keys[$PacletIndex["Contexts"]];
+  newDeps = Select[deps,
+    Function[{dep},
+      And[
+        validContextStringQ[dep],
+        !MemberQ[workspaceContexts, dep],
+        !AnyTrue[workspaceContexts, StringStartsQ[dep, #] &],
+        !TrueQ[Lookup[$LoadedExternalDependencies, dep, False]],
+        !MemberQ[$PendingDepDiscovery, dep]
+      ]
+    ]
+  ];
+  If[Length[newDeps] > 0,
+    log[0, "DBG-TBDU scheduleDepDiscovery: queuing discovery for ", newDeps];
+    $PendingDepDiscovery = DeleteDuplicates[Join[$PendingDepDiscovery, newDeps]]
   ]
 ]
 
@@ -3104,13 +3873,9 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
         is considered adjacent and belongs to this definition.
         *)
         docComment = Lookup[docComments, defStartLine - 1, None];
-        Module[{lhsNode, rhsNode, inferredRetPat, rhsCallHead, rhsCallArgs},
+        Module[{lhsNode, rhsNode, rhsCallHead, rhsCallArgs},
           lhsNode = node[[2, 1]];
           rhsNode = node[[2, 2]];
-          (* Infer return pattern from the function body, even without a DocComment.
-             This allows callers to chain return-type inference across functions that
-             lack explicit Return: doc-comment annotations. *)
-          inferredRetPat = inferPatternFromRHS[rhsNode, docComments, uri];
           (* Record call head/args so resolveInferredPatterns can retry using local defs *)
           {rhsCallHead, rhsCallArgs} = If[
             MatchQ[rhsNode, CallNode[LeafNode[Symbol, _String, _], _List, _]],
@@ -3120,8 +3885,17 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
           Scan[
             Function[{def},
               If[MatchQ[def, LeafNode[Symbol, _String, _]],
-                Module[{signatureInfo},
+                Module[{signatureInfo, localPatternBindings, inferredRetPat},
                   signatureInfo = extractFunctionSignatureInfo[def[[2]], lhsNode];
+                  localPatternBindings = Lookup[signatureInfo, "OptionsPatternBindings", <||>];
+                  (* Infer return pattern from the function body, even without a DocComment.
+                     Named OptionsPattern parameters are available inside the body as
+                     forwarded option sequences, so calls like target[x, opts] match
+                     option-aware definitions. *)
+                  inferredRetPat = Block[{$InferPatternLocalBindings =
+                      Join[$InferPatternLocalBindings, localPatternBindings]},
+                    inferPatternFromRHS[rhsNode, docComments, uri]
+                  ];
                 Internal`StuffBag[bag, <|
                   "name" -> def[[2]],
                   "uri" -> uri,
@@ -3134,6 +3908,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
                   "Variadic" -> signatureInfo["Variadic"],
                   "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
                   "OptionTargets" -> signatureInfo["OptionTargets"],
+                  "OptionsPatternBindings" -> signatureInfo["OptionsPatternBindings"],
+                  "LocalPatternBindings" -> localPatternBindings,
                   "InferredReturnPattern" -> inferredRetPat,
                   "rhsCallHead" -> rhsCallHead,
                   "rhsCallArgs" -> rhsCallArgs
@@ -3154,7 +3930,7 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
     MatchQ[node, CallNode[LeafNode[Symbol, "TagSetDelayed" | "TagSet", _],
       {LeafNode[Symbol, _, _], CallNode[LeafNode[Symbol, _, _], _, _], _},
       _]],
-      Module[{src, defStartLine, docComment, lhsNode, rhsNode, lhsHead, signatureInfo, inferredRetPat, rhsCallHead, rhsCallArgs},
+      Module[{src, defStartLine, docComment, lhsNode, rhsNode, lhsHead, signatureInfo, inferredRetPat, rhsCallHead, rhsCallArgs, localPatternBindings},
         src = node[[3, Key[Source]]];
         defStartLine = src[[1, 1]];
         docComment = Lookup[docComments, defStartLine - 1, None];
@@ -3162,7 +3938,11 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
         rhsNode = node[[2, 3]];
         lhsHead = lhsNode[[1, 2]];
         signatureInfo = extractFunctionSignatureInfo[lhsHead, lhsNode];
-        inferredRetPat = inferPatternFromRHS[rhsNode, docComments, uri];
+        localPatternBindings = Lookup[signatureInfo, "OptionsPatternBindings", <||>];
+        inferredRetPat = Block[{$InferPatternLocalBindings =
+            Join[$InferPatternLocalBindings, localPatternBindings]},
+          inferPatternFromRHS[rhsNode, docComments, uri]
+        ];
         {rhsCallHead, rhsCallArgs} = If[
           MatchQ[rhsNode, CallNode[LeafNode[Symbol, _String, _], _List, _]],
           {rhsNode[[1, 2]], rhsNode[[2]]},
@@ -3180,6 +3960,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
           "Variadic" -> signatureInfo["Variadic"],
           "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
           "OptionTargets" -> signatureInfo["OptionTargets"],
+          "OptionsPatternBindings" -> signatureInfo["OptionsPatternBindings"],
+          "LocalPatternBindings" -> localPatternBindings,
           "InferredReturnPattern" -> inferredRetPat,
           "rhsCallHead" -> rhsCallHead,
           "rhsCallArgs" -> rhsCallArgs
@@ -3257,6 +4039,11 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
         "visibility" -> definitionVisibilityFor[node[[2, 1, 2, 1, 2]]],
         "DocComment" -> None
       |>]
+  ];
+
+  If[MatchQ[node, CallNode[LeafNode[Symbol, "Set" | "SetDelayed", _],
+      {_, rhs_}, _] /; largeLiteralPatternNodeQ[rhs]],
+    Return[Null]
   ];
 
   (*
@@ -3415,6 +4202,51 @@ stringNodeValue[
   LeafNode[String, value_String, _]
 ] := StringTrim[value, "\""]
 stringNodeValue[_] := Missing["NotAvailable"]
+
+
+decodeStringNodeValue[
+  LeafNode[String, value_String, _]
+] :=
+Module[{decoded},
+  decoded = Quiet[
+    Check[
+      ToExpression[value],
+      Missing["NotAvailable"],
+      {
+        Syntax::sntunc,
+        Syntax::sntxi,
+        Syntax::sntxb,
+        Syntax::stresc,
+        Syntax::snthex,
+        Syntax::sntoct1,
+        Syntax::sntoct2,
+        Syntax::snthex32,
+        ToExpression::sntx,
+        ToExpression::sntxi,
+        ToExpression::sntxb
+      }
+    ],
+    {
+      Syntax::sntunc,
+      Syntax::sntxi,
+      Syntax::sntxb,
+      Syntax::stresc,
+      Syntax::snthex,
+      Syntax::sntoct1,
+      Syntax::sntoct2,
+      Syntax::snthex32,
+      ToExpression::sntx,
+      ToExpression::sntxi,
+      ToExpression::sntxb
+    }
+  ];
+
+  If[StringQ[decoded],
+    decoded,
+    stringNodeValue[LeafNode[String, value, <||>]]
+  ]
+]
+decodeStringNodeValue[_] := Missing["NotAvailable"]
 
 
 symbolNodeValue[
@@ -3750,10 +4582,10 @@ Module[{usages},
           },
           _
         ],
-        LeafNode[String, msg_String, _]
+        msgNode:LeafNode[String, _String, _]
       },
       _
-    ] :> <| "name" -> name, "usage" -> Quiet[ToExpression[msg], Syntax::stresc] |>,
+    ] :> <| "name" -> name, "usage" -> decodeStringNodeValue[msgNode] |>,
     Infinity
   ];
 
@@ -3786,7 +4618,7 @@ Catch[
 Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
   contextLoads, explicitContextRefs, structuredMetadata, mergedStructuredData,
   packageContext, packageScopeContext, privateContext, fileAliases, fileFormat,
-  isIPWL, ipwlAnnotations, sourceText},
+  isIPWL, ipwlAnnotations, sourceText, openEntry, reusedCachedArtifacts = False},
 
   filePath = StringReplace[uri, "file://" -> ""];
   If[shouldExcludeFile[filePath],
@@ -3817,31 +4649,70 @@ Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
 
   RemoveFileFromIndex[uri];
 
+  openEntry = Lookup[LSPServer`$OpenFilesMap, uri, Missing["NotAvailable"]];
+
+  If[
+    AssociationQ[openEntry] &&
+    Lookup[openEntry, "Text", Missing["NotAvailable"]] === text &&
+    Lookup[openEntry, "PreprocessedText", text] === sourceText,
+    cst = Lookup[openEntry, "CST", Missing["NotAvailable"]];
+    agg = Lookup[openEntry, "Agg", Missing["NotAvailable"]];
+    ast = Lookup[openEntry, "AST", Missing["NotAvailable"]];
+
+    reusedCachedArtifacts =
+      cst =!= Null && !MissingQ[cst] && !FailureQ[cst] &&
+      agg =!= Null && !MissingQ[agg] && !FailureQ[agg] &&
+      ast =!= Null && !MissingQ[ast] && !FailureQ[ast];
+  ];
+
   (*
   Parse the new content.
   Match the FileFormat option used by textDocument/concreteParse so the CST
   can be shared with the diagnostics pipeline and avoid a duplicate parse.
   *)
-  fileFormat = LSPServer`SourceFileFormat[filePath];
-  cst = Quiet[CodeConcreteParse[sourceText, "FileFormat" -> fileFormat]];
+  If[!reusedCachedArtifacts,
+    fileFormat = LSPServer`SourceFileFormat[filePath];
+    cst = Quiet[CodeConcreteParse[sourceText, "FileFormat" -> fileFormat]];
 
-  If[FailureQ[cst],
-    If[$Debug2, log["UpdateFileIndex: failed to parse"]];
-    Throw[Null]
+    If[FailureQ[cst],
+      If[$Debug2, log["UpdateFileIndex: failed to parse"]];
+      Throw[Null]
+    ];
+
+    (*
+    Apply the same ContainerNode head mutation that textDocument/concreteParse does
+    so the stored CST is in the expected form for the diagnostics pipeline.
+    *)
+    cst[[1]] = File;
+
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+
+    If[FailureQ[ast],
+      If[$Debug2, log["UpdateFileIndex: failed to abstract"]];
+      Throw[Null]
+    ];
+  ,
+    If[cst[[1]] =!= File,
+      cst[[1]] = File
+    ]
   ];
 
-  (*
-  Apply the same ContainerNode head mutation that textDocument/concreteParse does
-  so the stored CST is in the expected form for the diagnostics pipeline.
-  *)
-  cst[[1]] = File;
-
-  agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
-  ast = Quiet[CodeParser`Abstract`Abstract[agg]];
-
-  If[FailureQ[ast],
-    If[$Debug2, log["UpdateFileIndex: failed to abstract"]];
-    Throw[Null]
+  If[largeFileIndexTextQ[sourceText],
+    addFileToIndex[
+      uri,
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      None,
+      None,
+      None,
+      {}
+    ];
+    Throw[{cst, agg, ast}]
   ];
 
   definitions = extractDefinitions[ast, cst, uri];
@@ -3863,7 +4734,7 @@ Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
     $PacletIndex["Dependencies"] = DeleteDuplicates[
       Join[$PacletIndex["Dependencies"], fileDeps]
     ];
-    Scan[queueExternalPackageFiles, fileDeps]
+    scheduleDepDiscovery[fileDeps]
   ];
 
   addFileToIndex[
@@ -3970,6 +4841,7 @@ Module[{fileEntry, fileSymbols},
           DeleteCases[$PacletIndex["Symbols", symName, "Definitions"], KeyValuePattern["uri" -> uri]];
         $PacletIndex["Symbols", symName, "References"] =
           DeleteCases[$PacletIndex["Symbols", symName, "References"], KeyValuePattern["uri" -> uri]];
+        refreshWorkspaceSymbolEntriesForSymbol[symName];
 
         (*
         Remove symbol entry if empty
@@ -3977,7 +4849,8 @@ Module[{fileEntry, fileSymbols},
         If[$PacletIndex["Symbols", symName, "Definitions"] === {} &&
            $PacletIndex["Symbols", symName, "References"] === {} &&
            $PacletIndex["Symbols", symName, "Usages"] === {},
-          $PacletIndex["Symbols", symName] =.
+          $PacletIndex["Symbols", symName] =.;
+          dropWorkspaceSymbolEntriesForSymbol[symName]
         ]
       ]
     ],
@@ -4216,6 +5089,62 @@ Module[{},
 
 
 (*
+Resolve the defining context for a bare symbol name (no backtick).
+First checks $PacletIndex["Symbols"] for indexed definitions with an explicit context.
+Falls back to kernel Names["*`name"] to find a loaded symbol with that short name.
+Returns the context string (e.g. "CodeParser`") or None if unknown.
+
+IMPORTANT: Do NOT use Context[name] on a bare string — that creates the symbol
+in the current $Context instead of looking up its defining context.
+*)
+resolveSymbolContext[name_String] :=
+Module[{defs, ctx, matches},
+  (* 1. Check the paclet index for definitions that have a context *)
+  defs = Lookup[$PacletIndex["Symbols"], name, {}];
+  If[ListQ[defs] && Length[defs] > 0,
+    (* Look for a definition with an explicit context field *)
+    Do[
+      ctx = Lookup[def, "context", None];
+      If[StringQ[ctx] && ctx =!= "Global`",
+        Return[ctx, Module]
+      ],
+      {def, defs}
+    ];
+    (* If definitions exist but no context field, try to extract from qualified name *)
+    Do[
+      With[{qname = Lookup[def, "qualifiedName", None]},
+        If[StringQ[qname] && StringContainsQ[qname, "`"],
+          ctx = StringJoin[Riffle[Most[StringSplit[qname, "`"]], "`"]] <> "`";
+          If[ctx =!= "Global`",
+            Return[ctx, Module]
+          ]
+        ]
+      ],
+      {def, defs}
+    ]
+  ];
+
+  (* 2. Fall back to kernel Names[] which is safe — it only queries existing symbols,
+     does not create new ones. *)
+  matches = Quiet[Names["*`" <> name]];
+  If[ListQ[matches] && Length[matches] > 0,
+    (* Pick the first non-Global, non-System match *)
+    Do[
+      If[StringContainsQ[m, "`"],
+        ctx = StringJoin[Riffle[Most[StringSplit[m, "`"]], "`"]] <> "`";
+        If[ctx =!= "Global`" && ctx =!= "System`",
+          Return[ctx, Module]
+        ]
+      ],
+      {m, matches}
+    ]
+  ];
+
+  None
+]
+
+
+(*
 Get short-name symbols from dependency contexts that are actually loaded in the kernel.
 Used by UndefinedSymbol diagnostics to suppress false positives for symbols
 from BeginPackage/Needs dependencies that are available at runtime.
@@ -4254,34 +5183,7 @@ Module[{fileData, contextLoads, depContexts, explicitImports, kernelContexts, lo
 Get all workspace symbols for workspace/symbol search
 *)
 GetAllWorkspaceSymbols[] :=
-Module[{bag},
-  bag = Internal`Bag[];
-
-  KeyValueMap[
-    Function[{name, data},
-      Scan[
-        Function[{def},
-          Internal`StuffBag[bag, <|
-            "name" -> name,
-            "kind" -> def["kind"],
-            "location" -> <|
-              "uri" -> def["uri"],
-              "range" -> <|
-                "start" -> <| "line" -> def["source"][[1, 1]] - 1, "character" -> def["source"][[1, 2]] - 1 |>,
-                "end" -> <| "line" -> def["source"][[2, 1]] - 1, "character" -> def["source"][[2, 2]] - 1 |>
-              |>
-            |>,
-            "containerName" -> Replace[def["context"], None -> ""]
-          |>]
-        ],
-        data["Definitions"]
-      ]
-    ],
-    $PacletIndex["Symbols"]
-  ];
-
-  Internal`BagPart[bag, All]
-]
+  Replace[$WorkspaceSymbolSearchEntries, Except[_List] -> {}]
 
 
 (*

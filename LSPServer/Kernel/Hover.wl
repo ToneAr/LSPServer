@@ -43,6 +43,68 @@ $obsoleteSet := $obsoleteSet = Association[Thread[
 ]]
 
 
+definitionPatternASTs[astIn_, tokenSymbol_String, directHeads_List, tagHeads_List] :=
+Module[{direct, tagged},
+  direct = Cases[astIn,
+    CallNode[
+      LeafNode[Symbol, head_String /; MemberQ[directHeads, head], _],
+      {
+        lhs:CallNode[_, _, _],
+        rhs:_
+      },
+      KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
+    ] :> lhs,
+    8
+  ];
+
+  tagged = Cases[astIn,
+    CallNode[
+      LeafNode[Symbol, head_String /; MemberQ[tagHeads, head], _],
+      {
+        LeafNode[Symbol, tokenSymbol, _],
+        lhs:CallNode[_, _, _],
+        rhs:_
+      },
+      KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
+    ] :> lhs,
+    8
+  ];
+
+  DeleteCases[Join[direct, tagged], $messageNamePattern]
+]
+
+
+definitionPatternCSTsFromASTs[cstIn_, patternASTs_List] :=
+Module[{sources},
+  sources = Quiet[#[[3, Key[Source]]]]& /@ patternASTs;
+  DeleteCases[
+    FirstCase[cstIn, _[_, _, KeyValuePattern[Source -> #]], $Failed, 6]& /@ sources,
+    $Failed
+  ]
+]
+
+
+definitionPatternStringsFromCSTs[patternCSTs_List] :=
+Module[{patterns},
+  If[Length[patternCSTs] === 0,
+    {},
+    patterns = CodeFormatCST[#, "LineWidth" -> $HoverLineWidth]& /@ patternCSTs;
+    patterns = DeleteDuplicates[patterns];
+    StringReplace[#, RegularExpression["\\s+$"] -> ""]& /@ patterns
+  ]
+]
+
+
+definitionPatternStringFromCSTs[patternCSTs_List] :=
+Module[{patterns},
+  patterns = definitionPatternStringsFromCSTs[patternCSTs];
+  If[Length[patterns] > 0,
+    StringRiffle[patterns, "\n"],
+    None
+  ]
+]
+
+
 hoverEntryReadyQ[entry_Association] :=
 Module[{ast},
   ast = Lookup[entry, "AST", Null];
@@ -110,7 +172,7 @@ Module[{params, id, doc, uri, entry, res},
 handleContent[content: KeyValuePattern["method" -> "textDocument/hoverFencepost"]] :=
 Catch[
 Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char, pre, ast, cstTabs, syms, toks, nums, slots,
-  res, snapshot, task},
+  res},
 
 
   log[1, "textDocument/hoverFencepost: enter"];
@@ -139,29 +201,6 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
   ];
 
   position = params["position"];
-
-  (* Only borrow the shared worker when diagnostics are idle. Otherwise fall
-     back to the main-kernel path instead of aborting the in-flight diagnostics. *)
-  If[ValueQ[$DiagnosticsKernel] && $DiagnosticsKernel =!= None && $DiagnosticsKernel =!= $Failed &&
-     $DiagnosticsTask === None,
-    snapshot = buildHoverWorkerSnapshot[uri, position, id];
-    If[AssociationQ[snapshot] && snapshot =!= <||>,
-      cancelCurrentHoverTask[];
-      task = Quiet[Check[
-        ParallelSubmit[{$DiagnosticsKernel}, runHoverWorker[snapshot]],
-        $Failed
-      ]];
-      If[task =!= $Failed,
-        $HoverTask = task;
-        $HoverTaskURI = uri;
-        $HoverTaskID = id;
-        $HoverTaskResult = None;
-        $HoverTaskStartTime = AbsoluteTime[];
-        Throw[{}]
-      ]
-    ]
-  ];
-
 
   line = position["line"];
   char = position["character"];
@@ -263,106 +302,6 @@ Module[{id, params, doc, uri, position, entry, text, textLines, strs, line, char
 ]]
 
 
-buildHoverWorkerSnapshot[uri_String, position_Association, id_Integer] :=
-Module[{entry, ast},
-  entry = Lookup[$OpenFilesMap, uri, Null];
-  If[!AssociationQ[entry],
-    Return[<||>]
-  ];
-
-  ast = Lookup[entry, "AST", Null];
-  If[ast === Null || MissingQ[ast] || FailureQ[ast],
-    Return[<||>]
-  ];
-
-  <|
-    "URI" -> uri,
-    "ID" -> id,
-    "Position" -> position,
-    "LastChange" -> Lookup[entry, "LastChange", None],
-    "OpenFileEntry" -> entry,
-    "PacletIndex" -> $PacletIndex,
-    "WorkspaceRootPath" -> $WorkspaceRootPath,
-    "ConfidenceLevel" -> $ConfidenceLevel
-  |>
-]
-
-
-runHoverWorker[snapshot_?AssociationQ] :=
-Module[{uri, id, position, entry, response},
-  uri = Lookup[snapshot, "URI", None];
-  id = Lookup[snapshot, "ID", None];
-  position = Lookup[snapshot, "Position", <||>];
-  entry = Lookup[snapshot, "OpenFileEntry", Null];
-
-  If[!StringQ[uri] || !IntegerQ[id] || !AssociationQ[position] || !AssociationQ[entry],
-    Return[$Failed]
-  ];
-
-  response = Quiet[Check[
-    Block[{
-      LSPServer`$OpenFilesMap = <|uri -> entry|>,
-      LSPServer`$ContentQueue = {},
-      LSPServer`$WorkspaceRootPath = Lookup[snapshot, "WorkspaceRootPath", None],
-      LSPServer`$ConfidenceLevel = Lookup[snapshot, "ConfidenceLevel", 0.50],
-      LSPServer`PacletIndex`$PacletIndex = Lookup[snapshot, "PacletIndex", <||>],
-      LSPServer`$CancelMap = <||>
-    },
-      finalizeHoverWorkerResponse[
-        hoverResponseResult[id, uri, position]
-      ]
-    ],
-    $Failed
-  ]];
-
-  If[AssociationQ[response],
-    Join[response, <|
-      "URI" -> uri,
-      "ID" -> id,
-      "LastChange" -> Lookup[snapshot, "LastChange", None]
-    |>],
-    $Failed
-  ]
-]
-
-
-handleContent[content: KeyValuePattern["method" -> "textDocument/publishHoverResult"]] :=
-Catch[
-Module[{id, params, doc, uri, taskResult, entry, taskLastChange},
-
-  id = Lookup[content, "id", None];
-  params = Lookup[content, "params", <||>];
-  doc = Lookup[params, "textDocument", <||>];
-  uri = Lookup[doc, "uri", None];
-
-  If[!IntegerQ[id] || !StringQ[uri] || isStale[$ContentQueue, uri],
-    Throw[{}]
-  ];
-
-  taskResult = $HoverTaskResult;
-  $HoverTaskResult = None;
-
-  If[!AssociationQ[taskResult] ||
-     Lookup[taskResult, "URI", None] =!= uri ||
-     Lookup[taskResult, "ID", None] =!= id,
-    Throw[{}]
-  ];
-
-  entry = Lookup[$OpenFilesMap, uri, Null];
-  If[!AssociationQ[entry],
-    Throw[{}]
-  ];
-
-  taskLastChange = Lookup[taskResult, "LastChange", Missing["NotAvailable"]];
-  If[taskLastChange =!= Missing["NotAvailable"] &&
-     Lookup[entry, "LastChange", Missing["NotAvailable"]] =!= taskLastChange,
-    Throw[{}]
-  ];
-
-  {<|"jsonrpc" -> "2.0", "id" -> id, "result" -> Lookup[taskResult, "Result", Null]|>}
-]]
-
-
 hoverResponseResult[id_, uri_, position_Association] :=
 Module[{entry, text, ast, cstTabs, textLines, line, char, pre, toks, strs, syms, nums, slots, res},
 
@@ -425,10 +364,6 @@ Module[{entry, text, ast, cstTabs, textLines, line, char, pre, toks, strs, syms,
 
   res
 ]
-
-
-finalizeHoverWorkerResponse[result_] :=
-  <|"Result" -> result|>
 
 
 (*
@@ -748,8 +683,9 @@ For symbols, display their usage message
 
 handleUserSymbols[uri_, astIn_, cstIn_, symsIn_, cursorLine_] :=
 Module[{tokenSymbol, functionSource,
-  functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,
-  functionCallPatternCST, functionCallPattern, functionInformationAssoc, requiredUsage,
+  definitionPatternAST, delayedDefinitionPatternAST, functionCallPatternAST,
+  definitionPatternCST, delayedDefinitionPatternCST, functionCallPatternCST,
+  definitionPattern, delayedDefinitionPattern, functionInformationAssoc, requiredUsage,
   symbolContext, docComments, defSources, docCommentsBySource, perDefDocComments,
   inferredPattern, hasVarDefsInFile, declaredType, declaredTypeSource},
 
@@ -810,53 +746,24 @@ Module[{tokenSymbol, functionSource,
 
 
   (*
-  Get functionCallPattern AST for functions with SetDelayed & UpSetDelayed
+  Get definition LHS ASTs for immediate Set-style definitions and delayed
+  SetDelayed-style definitions separately so hover can label them distinctly.
   *)
-  functionCallPatternAST1 = Cases[astIn, CallNode[
-    LeafNode[Symbol, "Set" | "SetDelayed" | "UpSet" | "UpSetDelayed", _],
-    {
-      lhs:CallNode[_, _, _],
-      rhs:_
-    },
-    KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
-
-    (*
-    Test case:
-      A function is defined in a Package inside Private context and
-      the function usage is defined in the Package.
-
-      To get the function-call-pattern right, depth of 8 is sufficient, because the function-call-pattern is within
-
-        ContainerNode[{                       (adds 2 levels)
-            PackageNode[{                     (adds 2 levels)
-                ContextNode[{                 (adds 2 levels)
-                    CallNode[{                (adds 2 levels)
-    *)
-    ] :> lhs, 8
+  definitionPatternAST = definitionPatternASTs[
+    astIn,
+    tokenSymbol,
+    {"Set", "UpSet"},
+    {"TagSet"}
   ];
 
-  (*
-  Delete LHS of the usage messages from the functionCallPattern
-  *)
-
-  functionCallPatternAST1 = DeleteCases[functionCallPatternAST1, $messageNamePattern];
-
-  (*
-    Get functionCallPattern AST for functions with TagSetDelayed
-  *)
-  functionCallPatternAST2 = Cases[astIn, CallNode[
-    LeafNode[Symbol, "TagSet" | "TagSetDelayed", _],
-    {
-      LeafNode[Symbol, tokenSymbol, _],
-      lhs:CallNode[_, _, _],
-      rhs:_
-    },
-    KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
-
-    ] :> lhs, 8
+  delayedDefinitionPatternAST = definitionPatternASTs[
+    astIn,
+    tokenSymbol,
+    {"SetDelayed", "UpSetDelayed"},
+    {"TagSetDelayed"}
   ];
 
-  functionCallPatternAST = Join[functionCallPatternAST1, functionCallPatternAST2];
+  functionCallPatternAST = Join[definitionPatternAST, delayedDefinitionPatternAST];
 
   functionSource = #[[3, Key[Source]]]& /@ functionCallPatternAST;
 
@@ -871,7 +778,9 @@ Module[{tokenSymbol, functionSource,
               InfixNode[{                   (adds 2 levels)
                     BinaryNode[{            (adds 2 levels)
   *)
-  functionCallPatternCST = FirstCase[cstIn, _[_, _, KeyValuePattern[Source -> #]], $Failed, 6]& /@ functionSource;
+  definitionPatternCST = definitionPatternCSTsFromASTs[cstIn, definitionPatternAST];
+  delayedDefinitionPatternCST = definitionPatternCSTsFromASTs[cstIn, delayedDefinitionPatternAST];
+  functionCallPatternCST = Join[definitionPatternCST, delayedDefinitionPatternCST];
 
   (*
   Build a doc-comment lookup keyed by definition start-line.
@@ -1045,7 +954,8 @@ Module[{tokenSymbol, functionSource,
   *)
   If[inferredPattern === None,
     inferredPattern = Module[
-      {cstBlankToPattern, argNodePattern},
+      {cstBlankToPattern, argNodePattern, functionNamesForDefinition,
+       optionsPatternForParameter},
 
       (* Convert Blank[T]/BlankSequence[T] CST node -> WL expression e.g. Blank[Integer] *)
       cstBlankToPattern = Function[{bn},
@@ -1088,11 +998,48 @@ Module[{tokenSymbol, functionSource,
         ]
       ];
 
+      functionNamesForDefinition = Function[{defNode},
+        DeleteDuplicates @ Cases[
+          Replace[
+            Quiet[Check[defNode[[3, Key["Definitions"]]], {}]],
+            Except[_List] -> {}
+          ],
+          LeafNode[Symbol, s_String, _] :> s,
+          Infinity
+        ]
+      ];
+
+      optionsPatternForParameter = Function[{defNode},
+        Module[{lhs = defNode[[2, 1]], binding},
+          Catch[
+            Scan[
+              Function[{funcName},
+                binding = Lookup[
+                  LSPServer`PacletIndex`ExtractOptionsPatternParameterBindings[
+                    funcName,
+                    lhs
+                  ],
+                  tokenSymbol,
+                  None
+                ];
+                If[binding =!= None && !MatchQ[binding, _Missing],
+                  Throw[binding]
+                ]
+              ],
+              functionNamesForDefinition[defNode]
+            ];
+            None
+          ]
+        ]
+      ];
+
       Catch[
         (* Case A: SetDelayed/Set  f[…, x_T, …] := …  *)
         Scan[Function[{defNode},
-          Module[{s = Quiet[defNode[[3, Key[Source]]]]},
+          Module[{s = Quiet[defNode[[3, Key[Source]]]], p},
             If[MatchQ[s, {{l1_, _}, {l2_, _}} /; l1 <= cursorLine <= l2],
+              p = optionsPatternForParameter[defNode];
+              If[p =!= None, Throw[p]];
               Cases[defNode[[2,1,2]],
                 CallNode[LeafNode[Symbol, "Pattern", _],
                   {LeafNode[Symbol, tokenSymbol, _], bn_}, _] :>
@@ -1436,6 +1383,7 @@ Module[{tokenSymbol, functionSource,
       "Usage" -> None,
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> None,
+      "DelayedFunctionDefinitionPatterns" -> None,
       "FunctionInformation" -> If[hasVarDefsInFile || inferredPattern =!= None ||
                                   !MatchQ[declaredType, None | _Missing], True, False],
       "Context" -> symbolContext,
@@ -1445,15 +1393,8 @@ Module[{tokenSymbol, functionSource,
       "DeclaredTypeSource" -> declaredTypeSource
     |>
     ,
-    If[Length[functionCallPatternCST] == 0,
-      functionCallPattern = None
-      ,
-      functionCallPattern = CodeFormatCST[#, "LineWidth" -> $HoverLineWidth]& /@ functionCallPatternCST;
-      functionCallPattern = DeleteDuplicates[functionCallPattern];
-      (* Trim trailing whitespace/newlines from each formatted pattern *)
-      functionCallPattern = StringReplace[#, RegularExpression["\\s+$"] -> ""]& /@ functionCallPattern;
-      functionCallPattern = StringRiffle[functionCallPattern, "\n"];
-    ];
+    definitionPattern = definitionPatternStringFromCSTs[definitionPatternCST];
+    delayedDefinitionPattern = definitionPatternStringFromCSTs[delayedDefinitionPatternCST];
 
     If[Length[requiredUsage] == 0,
       requiredUsage = None
@@ -1465,7 +1406,8 @@ Module[{tokenSymbol, functionSource,
       "SymbolType" -> "UserDefined",
       "Usage" -> requiredUsage,
       "DocumentationLink" -> None,
-      "FunctionDefinitionPatterns" -> functionCallPattern,
+      "FunctionDefinitionPatterns" -> definitionPattern,
+      "DelayedFunctionDefinitionPatterns" -> delayedDefinitionPattern,
       "FunctionInformation" -> True,
       "Context" -> symbolContext,
       (*
@@ -1561,10 +1503,11 @@ the definition file to extract function call patterns.
 handleCrossFileSymbols[uri_, symIn_] :=
 Catch[
 Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
-  defText, defAST, defCST, fileEntry, defFilePath,
-  functionCallPatternAST1, functionCallPatternAST2, functionCallPatternAST,
-  functionCallPatternCST, functionSource, functionCallPattern, aliasContext,
-  preferredContext, aliasMap},
+  defText, defAST, defCST, fileEntry, defFilePath, defUris,
+  definitionPatternAST, delayedDefinitionPatternAST,
+  definitionPatternCST, delayedDefinitionPatternCST,
+  definitionPatterns, delayedDefinitionPatterns, definitionPattern,
+  delayedDefinitionPattern, aliasContext, preferredContext, aliasMap},
 
   (* Strip explicit context prefix if present to get the bare name *)
   (* Also detect if the prefix is a known alias context *)
@@ -1598,6 +1541,17 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
   ];
 
   defs = LSPServer`PacletIndex`GetVisibleSymbolDefinitions[uri, tokenSymbol, preferredContext];
+  If[!AnyTrue[defs, Lookup[#, "kind", None] === "function" &],
+    defs = DeleteDuplicates[Join[
+      defs,
+      Select[
+        LSPServer`PacletIndex`GetSymbolDefinitions[tokenSymbol],
+        Lookup[#, "uri", None] =!= uri &&
+          Lookup[#, "kind", None] === "function" &&
+          (!StringQ[preferredContext] || Lookup[#, "context", None] === preferredContext) &
+      ]
+    ]]
+  ];
   usages = Replace[symData["Usages"], _Missing -> {}];
 
   If[Length[defs] === 0,
@@ -1623,100 +1577,105 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
   ];
 
   (*
-  Extract function definition patterns from the definition file.
+  Extract function definition patterns from the definition files.
   Try the open file cache first, then read from disk.
   *)
-  functionCallPattern = None;
+  definitionPatterns = {};
+  delayedDefinitionPatterns = {};
+  definitionPattern = None;
+  delayedDefinitionPattern = None;
 
-  If[kind === "function" || kind === "declaration",
+  If[AnyTrue[defs, MemberQ[{"function", "declaration"}, Lookup[#, "kind", None]] &],
 
-    (* Try to get the file - check if it's currently open first *)
-    fileEntry = Lookup[$OpenFilesMap, defUri, Null];
-
-    If[fileEntry =!= Null,
-      (* File is open - use its cached AST and CST *)
-      defAST = fileEntry["AST"];
-      defCST = Lookup[fileEntry, "CSTTabs", Null];
-      If[defCST === Null,
-        defText = fileEntry["Text"];
-        defCST = Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]]
-      ],
-
-      (* File is not open - read from disk *)
-      defFilePath = StringReplace[defUri, "file://" -> ""];
-      defText = Quiet[Import[defFilePath, "Text"]];
-      If[StringQ[defText],
-        Module[{rawCST},
-          rawCST = Quiet[CodeConcreteParse[defText]];
-          (* Only re-parse with TabWidth if file actually contains tabs *)
-          defCST = If[StringContainsQ[defText, "\t"],
-            Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]],
-            rawCST
-          ];
-          defAST = If[!FailureQ[rawCST],
-            Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[rawCST]]],
-            $Failed
-          ]
-        ],
-        (* File not readable *)
-        defCST = Null;
-        defAST = Null
+    defUris = DeleteDuplicates[
+      Lookup[
+        Select[defs, MemberQ[{"function", "declaration"}, Lookup[#, "kind", None]] &],
+        "uri",
+        {}
       ]
     ];
 
-    If[defAST =!= Null && !FailureQ[defAST] && defCST =!= Null && !FailureQ[defCST],
-      (* Extract function call patterns - same approach as handleUserSymbols *)
-      functionCallPatternAST1 = Cases[defAST, CallNode[
-        LeafNode[Symbol, "Set" | "SetDelayed" | "UpSet" | "UpSetDelayed", _],
-        {
-          lhs:CallNode[_, _, _],
-          rhs:_
-        },
-        KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
-        ] :> lhs, 8
-      ];
+    Scan[
+      Function[{currentDefUri},
+        (* Try to get the file - check if it's currently open first *)
+        fileEntry = Lookup[$OpenFilesMap, currentDefUri, Null];
 
-      (* Also try TagSetDelayed *)
-      functionCallPatternAST2 = Cases[defAST, CallNode[
-        LeafNode[Symbol, "TagSet" | "TagSetDelayed", _],
-        {
-          LeafNode[Symbol, tokenSymbol, _],
-          lhs:CallNode[_, _, _],
-          rhs:_
-        },
-        KeyValuePattern["Definitions" -> {___, LeafNode[Symbol, tokenSymbol, _], ___}]
-        ] :> lhs, 8
-      ];
+        If[fileEntry =!= Null,
+          (* File is open - use its cached AST and CST *)
+          defAST = fileEntry["AST"];
+          defCST = Lookup[fileEntry, "CSTTabs", Null];
+          If[defCST === Null,
+            defText = fileEntry["Text"];
+            defCST = Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]]
+          ],
 
-      functionCallPatternAST = Join[functionCallPatternAST1, functionCallPatternAST2];
+          (* File is not open - read from disk *)
+          defFilePath = StringReplace[currentDefUri, "file://" -> ""];
+          defText = Quiet[Import[defFilePath, "Text"]];
+          If[StringQ[defText],
+            Module[{rawCST},
+              rawCST = Quiet[CodeConcreteParse[defText]];
+              (* Only re-parse with TabWidth if file actually contains tabs *)
+              defCST = If[StringContainsQ[defText, "\t"],
+                Quiet[CodeConcreteParse[defText, "TabWidth" -> 4]],
+                rawCST
+              ];
+              defAST = If[!FailureQ[rawCST],
+                Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[rawCST]]],
+                $Failed
+              ]
+            ],
+            (* File not readable *)
+            defCST = Null;
+            defAST = Null
+          ]
+        ];
 
-      (* Remove usage message LHS from patterns *)
-      functionCallPatternAST = DeleteCases[functionCallPatternAST, $messageNamePattern];
+        If[defAST =!= Null && !FailureQ[defAST] && defCST =!= Null && !FailureQ[defCST],
+          definitionPatternAST = definitionPatternASTs[
+            defAST,
+            tokenSymbol,
+            {"Set", "UpSet"},
+            {"TagSet"}
+          ];
+          delayedDefinitionPatternAST = definitionPatternASTs[
+            defAST,
+            tokenSymbol,
+            {"SetDelayed", "UpSetDelayed"},
+            {"TagSetDelayed"}
+          ];
 
-      If[Length[functionCallPatternAST] > 0,
-        functionSource = #[[3, Key[Source]]]& /@ functionCallPatternAST;
-        functionCallPatternCST = FirstCase[defCST, _[_, _, KeyValuePattern[Source -> #]], $Failed, 6]& /@ functionSource;
-        functionCallPatternCST = DeleteCases[functionCallPatternCST, $Failed];
+          definitionPatternCST = definitionPatternCSTsFromASTs[defCST, definitionPatternAST];
+          delayedDefinitionPatternCST = definitionPatternCSTsFromASTs[defCST, delayedDefinitionPatternAST];
 
-        If[Length[functionCallPatternCST] > 0,
-          functionCallPattern = CodeFormatCST /@ functionCallPatternCST;
-          functionCallPattern = DeleteDuplicates[functionCallPattern];
-          (* Trim trailing whitespace/newlines from each formatted pattern *)
-          functionCallPattern = StringReplace[#, RegularExpression["\\s+$"] -> ""]& /@ functionCallPattern;
-          functionCallPattern = StringRiffle[functionCallPattern, "\n"]
+          definitionPatterns = Join[
+            definitionPatterns,
+            definitionPatternStringsFromCSTs[definitionPatternCST]
+          ];
+          delayedDefinitionPatterns = Join[
+            delayedDefinitionPatterns,
+            definitionPatternStringsFromCSTs[delayedDefinitionPatternCST]
+          ];
         ]
-      ]
-    ]
+      ],
+      defUris
+    ];
+
+    definitionPatterns = DeleteDuplicates[definitionPatterns];
+    delayedDefinitionPatterns = DeleteDuplicates[delayedDefinitionPatterns];
+    definitionPattern = If[Length[definitionPatterns] > 0, StringRiffle[definitionPatterns, "\n"], None];
+    delayedDefinitionPattern = If[Length[delayedDefinitionPatterns] > 0, StringRiffle[delayedDefinitionPatterns, "\n"], None]
   ];
 
   (* Build the result *)
-  If[!StringQ[usage] && !StringQ[functionCallPattern],
+  If[!StringQ[usage] && !StringQ[definitionPattern] && !StringQ[delayedDefinitionPattern],
     (* No info at all - but we know it exists, show basic info *)
     <|
       "SymbolType" -> "CrossFile",
       "Usage" -> "Defined in workspace (" <> kind <> ")",
       "DocumentationLink" -> None,
       "FunctionDefinitionPatterns" -> None,
+      "DelayedFunctionDefinitionPatterns" -> None,
       "FunctionInformation" -> True,
       "Context" -> context,
       "AliasContext" -> aliasContext,
@@ -1738,7 +1697,8 @@ Module[{tokenSymbol, symData, defs, usages, context, kind, defUri, usage,
       "SymbolType" -> "CrossFile",
       "Usage" -> If[StringQ[usage], usage, "No usage message."],
       "DocumentationLink" -> None,
-      "FunctionDefinitionPatterns" -> functionCallPattern,
+      "FunctionDefinitionPatterns" -> definitionPattern,
+      "DelayedFunctionDefinitionPatterns" -> delayedDefinitionPattern,
       "FunctionInformation" -> True,
       "Context" -> context,
       "AliasContext" -> aliasContext,
@@ -1911,6 +1871,62 @@ Module[{str},
 ]
 
 
+mergePatternStrings[primary_, secondary_] :=
+Module[{patterns},
+  patterns = DeleteDuplicates[Join[
+    If[StringQ[primary], StringSplit[primary, "\n"], {}],
+    If[StringQ[secondary], StringSplit[secondary, "\n"], {}]
+  ]];
+  If[Length[patterns] > 0,
+    StringRiffle[patterns, "\n"],
+    None
+  ]
+]
+
+
+mergeCrossFileSymbolInfo[local_Association, cross_Association] :=
+Module[{merged = local},
+  If[Lookup[cross, "SymbolType", "INVALID"] === "INVALID",
+    Return[merged]
+  ];
+
+  merged["FunctionDefinitionPatterns"] = mergePatternStrings[
+    Lookup[local, "FunctionDefinitionPatterns", None],
+    Lookup[cross, "FunctionDefinitionPatterns", None]
+  ];
+  merged["DelayedFunctionDefinitionPatterns"] = mergePatternStrings[
+    Lookup[local, "DelayedFunctionDefinitionPatterns", None],
+    Lookup[cross, "DelayedFunctionDefinitionPatterns", None]
+  ];
+
+  If[!StringQ[Lookup[merged, "Usage", None]] && StringQ[Lookup[cross, "Usage", None]],
+    merged["Usage"] = cross["Usage"]
+  ];
+  If[!StringQ[Lookup[merged, "Context", None]] && StringQ[Lookup[cross, "Context", None]],
+    merged["Context"] = cross["Context"]
+  ];
+  If[!KeyExistsQ[merged, "AliasContext"] && KeyExistsQ[cross, "AliasContext"],
+    merged["AliasContext"] = cross["AliasContext"]
+  ];
+  If[!ListQ[Lookup[merged, "DocComments", None]],
+    merged["DocComments"] = {}
+  ];
+  merged["DocComments"] = DeleteDuplicates[Join[
+    Select[Lookup[merged, "DocComments", {}], AssociationQ],
+    Select[Lookup[cross, "DocComments", {}], AssociationQ]
+  ]];
+  If[MatchQ[Lookup[merged, "InferredPattern", None], None | _Missing],
+    merged["InferredPattern"] = Lookup[cross, "InferredPattern", None]
+  ];
+  If[MatchQ[Lookup[merged, "DeclaredType", None], None | _Missing],
+    merged["DeclaredType"] = Lookup[cross, "DeclaredType", None];
+    merged["DeclaredTypeSource"] = Lookup[cross, "DeclaredTypeSource", None]
+  ];
+
+  merged
+]
+
+
 symbolHasOnlyCurrentFileDefinitions[uri_String, symIn_String] :=
 Module[{tokenSymbol, preferredContext, aliasMap, defs},
   preferredContext = None;
@@ -1930,7 +1946,7 @@ Module[{tokenSymbol, preferredContext, aliasMap, defs},
 
 handleSymbols[id_, uri_, astIn_, cstIn_, symsIn_, cursorLine_] :=
 Catch[
-Module[{lines, result, syms, functionInformationAssoc},
+Module[{lines, result, syms, functionInformationAssoc, crossFileInformationAssoc},
 
   syms = symsIn;
 
@@ -1965,6 +1981,22 @@ Module[{lines, result, syms, functionInformationAssoc},
          !TrueQ[functionInformationAssoc["FunctionInformation"]] &&
          !symbolHasOnlyCurrentFileDefinitions[uri, sym]),
       functionInformationAssoc = handleCrossFileSymbols[uri, sym];
+    ];
+    (*
+    A local usage/declaration can make handleUserSymbols succeed even when the
+    callable definitions live in another indexed file. Merge visible cross-file
+    definition patterns into that local hover result.
+    *)
+    If[functionInformationAssoc["SymbolType"] == "UserDefined" &&
+       TrueQ[functionInformationAssoc["FunctionInformation"]] &&
+       !symbolHasOnlyCurrentFileDefinitions[uri, sym],
+      crossFileInformationAssoc = handleCrossFileSymbols[uri, sym];
+      If[Lookup[crossFileInformationAssoc, "SymbolType", "INVALID"] =!= "INVALID",
+        functionInformationAssoc = mergeCrossFileSymbolInfo[
+          functionInformationAssoc,
+          crossFileInformationAssoc
+        ]
+      ]
     ];
     (*
     If cross-file information is not available, try to find external package symbol information
@@ -2395,8 +2427,30 @@ Module[{str},
 ]
 
 
+appendDefinitionSections[parts_List, assoc_Association] :=
+Module[{res = parts, patternsBlock, delayedPatternsBlock},
+  patternsBlock = formatDefinitionPatterns[
+    Lookup[assoc, "FunctionDefinitionPatterns", None]
+  ];
+  If[StringQ[patternsBlock],
+    AppendTo[res, "**Definitions**"];
+    AppendTo[res, patternsBlock]
+  ];
+
+  delayedPatternsBlock = formatDefinitionPatterns[
+    Lookup[assoc, "DelayedFunctionDefinitionPatterns", None]
+  ];
+  If[StringQ[delayedPatternsBlock],
+    AppendTo[res, "**Delayed Definitions**"];
+    AppendTo[res, delayedPatternsBlock]
+  ];
+
+  res
+]
+
+
 formatUsageCallPatterns[assoc_] :=
-Module[{res, parts, contextLine, patternsBlock, docSection, inferredPatLine},
+Module[{res, parts, contextLine, docSection, declaredTypeLine, inferredPatLine},
 
   (* Build context line if available - show alias mapping when accessed via an alias context *)
   contextLine = With[{ctx = Lookup[assoc, "Context", None], alias = Lookup[assoc, "AliasContext", None]},
@@ -2445,12 +2499,7 @@ Module[{res, parts, contextLine, patternsBlock, docSection, inferredPatLine},
         (* Inferred type for variable assignments *)
         If[StringQ[inferredPatLine], AppendTo[parts, inferredPatLine]];
 
-        (* Definition patterns in a fenced code block *)
-        patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
-        If[StringQ[patternsBlock],
-          AppendTo[parts, "**Definitions**"];
-          AppendTo[parts, patternsBlock]
-        ];
+        parts = appendDefinitionSections[parts, assoc];
 
         If[StringQ[docSection], AppendTo[parts, docSection]];
 
@@ -2461,12 +2510,7 @@ Module[{res, parts, contextLine, patternsBlock, docSection, inferredPatLine},
         If[StringQ[contextLine], AppendTo[parts, contextLine]];
         AppendTo[parts, StringJoin[linearToMDSyntax[assoc["Usage"]]]];
 
-        (* Definition patterns in a fenced code block *)
-        patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
-        If[StringQ[patternsBlock],
-          AppendTo[parts, "**Definitions**"];
-          AppendTo[parts, patternsBlock]
-        ];
+        parts = appendDefinitionSections[parts, assoc];
 
         (* Documentation link *)
         If[assoc["DocumentationLink"] =!= None,
@@ -2490,12 +2534,7 @@ Module[{res, parts, contextLine, patternsBlock, docSection, inferredPatLine},
         (* Inferred type for variable assignments *)
         If[StringQ[inferredPatLine], AppendTo[parts, inferredPatLine]];
 
-        (* Definition patterns in a fenced code block *)
-        patternsBlock = formatDefinitionPatterns[assoc["FunctionDefinitionPatterns"]];
-        If[StringQ[patternsBlock],
-          AppendTo[parts, "**Definitions**"];
-          AppendTo[parts, patternsBlock]
-        ];
+        parts = appendDefinitionSections[parts, assoc];
 
         If[StringQ[docSection], AppendTo[parts, docSection]];
 

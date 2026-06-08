@@ -32,8 +32,12 @@ VerificationTest[
     value = result[[1]]["result"]["contents"]["value"];
     (* Should contain usage message from provider *)
     StringContainsQ[value, "crossFileFunc[x] computes x squared."] &&
-    (* Should contain function definition patterns *)
-    StringContainsQ[value, "crossFileFunc"]
+    (* Should contain cross-file Set and SetDelayed definition sections *)
+    StringContainsQ[value, "**Definitions**"] &&
+    StringContainsQ[value, "crossFileFunc[]"] &&
+    StringContainsQ[value, "**Delayed Definitions**"] &&
+    StringContainsQ[value, "crossFileFunc[x_]"] &&
+    StringContainsQ[value, "crossFileFunc[x_, y_]"]
   ]
   ,
   True, 
@@ -69,7 +73,10 @@ VerificationTest[
       |>];
     value = result[[1]]["result"]["contents"]["value"];
     (* Should still get usage info from in-file resolution *)
-    StringContainsQ[value, "crossFileFunc[x] computes x squared."]
+    StringContainsQ[value, "crossFileFunc[x] computes x squared."] &&
+    StringContainsQ[value, "**Definitions**"] &&
+    StringContainsQ[value, "crossFileFunc[]"] &&
+    StringContainsQ[value, "**Delayed Definitions**"]
   ]
   ,
   True, 

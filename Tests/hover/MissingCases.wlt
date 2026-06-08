@@ -12,7 +12,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "**Definitions**\n\n```wolfram\nnoFunctionUsage[x_Integer]\n```\n\n---\n**Doc Comments**\n\n**Parameters:** `_Integer`  \n**Returns:** `_?NumericQ`"
+    value == "**Delayed Definitions**\n\n```wolfram\nnoFunctionUsage[x_Integer]\n```\n\n---\n**Doc Comments**\n\n**Parameters:** `_Integer`  \n**Returns:** `_?NumericQ`"
   ],
   True,
 TestID -> "IDE-Test-NoUsage"

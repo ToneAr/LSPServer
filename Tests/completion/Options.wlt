@@ -13,34 +13,33 @@ consumerLines = StringSplit[consumerText, {"\r\n", "\n", "\r"}, All];
 initFunction[consumerPath];
 consumerUri = LocalObjects`PathToURI[consumerPath];
 
-completionLabels[line0_Integer, character_Integer] :=
+completionItems[line0_Integer, character_Integer] :=
   Lookup[
     Lookup[
-      Lookup[
-        First[
-          Flatten[
-            LSPServer`handleContent /@
-              LSPServer`expandContents[{
-                <|
-                  "method" -> "textDocument/completion",
-                  "id" -> line0 * 100 + character,
-                  "params" -> <|
-                    "textDocument" -> <|"uri" -> consumerUri|>,
-                    "position" -> <|"line" -> line0, "character" -> character|>
-                  |>
+      First[
+        Flatten[
+          LSPServer`handleContent /@
+            LSPServer`expandContents[{
+              <|
+                "method" -> "textDocument/completion",
+                "id" -> line0 * 100 + character,
+                "params" -> <|
+                  "textDocument" -> <|"uri" -> consumerUri|>,
+                  "position" -> <|"line" -> line0, "character" -> character|>
                 |>
-              }]
-          ]
-        ],
-        "result",
-        <||>
+              |>
+            }]
+        ]
       ],
-      "items",
-      {}
+      "result",
+      <||>
     ],
-    "label",
+    "items",
     {}
   ];
+
+completionLabels[line0_Integer, character_Integer] :=
+  Lookup[completionItems[line0, character], "label", {}];
 
 
 VerificationTest[
@@ -50,4 +49,26 @@ VerificationTest[
   ],
   True,
   TestID -> "IDE-Test-Project-Option-Completion"
+]
+
+
+VerificationTest[
+  SubsetQ[
+    Sort[completionLabels[1, StringLength[consumerLines[[2]]]]],
+    {"ProjectChoice", "ProjectFlag"}
+  ],
+  True,
+  TestID -> "IDE-Test-Project-Option-Completion-Inherited-OptionsPattern"
+]
+
+
+VerificationTest[
+  Module[{items = completionItems[2, StringLength[consumerLines[[3]]]], plotRangeItems},
+    plotRangeItems = Select[items, Lookup[#, "label", ""] === "PlotRange" &];
+    AnyTrue[plotRangeItems,
+      Lookup[#, "detail", ""] === "Option" &&
+        Lookup[#, "insertText", ""] === "PlotRange -> " &]
+  ],
+  True,
+  TestID -> "IDE-Test-Builtin-Option-Completion-UsesOptionInsertText"
 ]

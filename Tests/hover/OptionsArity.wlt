@@ -67,3 +67,104 @@ VerificationTest[
   True,
   TestID -> "IDE-Test-OptionsArity-TypeMismatchStillFires"
 ]
+
+
+(* ── Test 4: Case D – forwarded OptionsPattern variable should NOT count as arity ── *)
+VerificationTest[
+  Module[{result, diags},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/publishDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>
+    ];
+    diags = result[[1, "params", "diagnostics"]];
+    Select[diags,
+      StringStartsQ[Lookup[#, "code", ""], "DocCommentArityMismatch"] &&
+        StringContainsQ[Lookup[#, "message", ""], "optionForwardTarget"] &]
+  ]
+  ,
+  {},
+  TestID -> "IDE-Test-OptionsArity-NoArityWarnForwardedOptionsPattern"
+]
+
+
+(* Test 5: assigned/aliased OptionsPattern variable should NOT count as arity *)
+VerificationTest[
+  Module[{result, diags},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/publishDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>
+    ];
+    diags = result[[1, "params", "diagnostics"]];
+    Select[diags,
+      StringStartsQ[Lookup[#, "code", ""], "DocCommentArityMismatch"] &&
+        StringContainsQ[Lookup[#, "message", ""], "optionForwardTarget"] &&
+        #["range"]["start"]["line"] >= 25 &]
+  ]
+  ,
+  {},
+  TestID -> "IDE-Test-OptionsArity-NoArityWarnAliasedOptionsPattern"
+]
+
+
+(* Test 6: Case E - conditioned overload definition should NOT be treated as a call *)
+VerificationTest[
+  Module[{result, diags},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/publishDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>
+    ];
+    diags = result[[1, "params", "diagnostics"]];
+    Select[diags,
+      StringStartsQ[Lookup[#, "code", ""], "DocCommentArityMismatch"] &&
+        StringContainsQ[Lookup[#, "message", ""], "conditionedOverloadFn"] &]
+  ]
+  ,
+  {},
+  TestID -> "IDE-Test-OptionsArity-NoArityWarnConditionedOverloadDefinition"
+]
+
+
+(* Test 7: a named OptionsPattern[] parameter should infer OptionsPattern[owningHead] *)
+VerificationTest[
+  Module[{result},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/hoverFencepost",
+        "id" -> 7,
+        "params" -> <|
+          "textDocument" -> <|"uri" -> uri|>,
+          "position" -> <|"line" -> 43, "character" -> 5|>
+        |>
+      |>
+    ];
+    result[[1]]["result"]["contents"]["value"]
+  ],
+  "**Inferred Pattern:** `OptionsPattern[discoverDomainRoots]`",
+  TestID -> "IDE-Test-OptionsArity-HoverNamedDefaultOptionsPattern"
+]
+
+
+(* Test 8: OptionsPattern[] and ___Rules/{___Rules} captures should forward equivalently. *)
+VerificationTest[
+  Module[{result, diags, names},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/publishDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>
+    ];
+    diags = result[[1, "params", "diagnostics"]];
+    names = {
+      "optionsTargetForRules",
+      "rulesSequenceTarget",
+      "rulesListTarget",
+      "sequenceFilterRulesTarget"
+    };
+    Select[diags,
+      StringStartsQ[Lookup[#, "code", ""], "DocCommentArityMismatch"] &&
+        AnyTrue[names, StringContainsQ[Lookup[#, "message", ""], #] &] &]
+  ],
+  {},
+  TestID -> "IDE-Test-OptionsArity-RulesAndOptionsPatternForwardingEquivalent"
+]

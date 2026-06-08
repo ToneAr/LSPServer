@@ -37,25 +37,6 @@ exitSemiGracefully
 shutdownLSPComm
 
 
-(* Do not launch the diagnostics worker during Needs["LSPServer`"].
-   StartServer[] schedules it lazily after initialize so package load stays
-   below editor startup timeouts. *)
-
-
-LSPServer`distributeDiagnosticsWorkerDefinitions[] :=
-  Module[{},
-    loadFeatureModule["Diagnostics"];
-    loadFeatureModule["Hover"];
-    Quiet[DistributeDefinitions[
-      LSPServer`buildWorkerSnapshot,
-      LSPServer`Diagnostics`Private`runWorkspaceDiagnosticsWorker,
-      LSPServer`Diagnostics`Private`runClosedFileDiagnosticsWorker,
-      LSPServer`Hover`Private`buildHoverWorkerSnapshot,
-      LSPServer`Hover`Private`runHoverWorker,
-      LSPServer`Hover`Private`finalizeHoverWorkerResponse
-    ]]
-  ]
-
 $BracketMatcherUseDesignColors
 
 
@@ -94,19 +75,12 @@ $ImplicitTokensDelayAfterLastChange
 $WorkspaceRootPath
 
 $DiagnosticsKernel
-
 $DiagnosticsKernelBin
-
 $DiagnosticsTask
-
 $DiagnosticsTaskURI
-
 $DiagnosticsTaskKind
-
 $DiagnosticsTaskResult
-
 $DiagnosticsTaskStartTime
-
 $DiagnosticsKernelLaunchAfter
 $HoverTask
 $HoverTaskURI
@@ -123,6 +97,18 @@ $QueueLastNonEmptyTime
 $PendingTokenRefresh
 $PendingTokenRefreshTime
 $WorkspaceIndexingQueued
+$WorkspaceIndexingInterval
+$WorkspaceIndexingLastRun
+$WorkspaceIndexingBatchSize
+$WorkspaceReferenceBatchSize
+$ExternalDependencyIndexingBatchSize
+$DependencyDiscoveryBatchSize
+$ExternalDependencyFileLimit
+$ClosedFileDiagnosticsIdleDelay
+$ClosedFileDiagnosticsInterval
+$ClosedFileDiagnosticsLastRun
+$ClosedFileDiagnosticsMaxTextLength
+$IdleLoopPause
 
 $startupMessagesText
 
@@ -178,7 +164,7 @@ Modules like Completion.wl, Diagnostics.wl, and Hover.wl use these data variable
 (* wl-disable *)
 WolframLanguageSyntax`Generate`$options :=
 	WolframLanguageSyntax`Generate`$options =
-	EntityClass["WolframLanguageSymbol", "OptionName"]["Name"]
+	Get[FileNameJoin[{location, "Resources", "Data", "Options.wl"}]]
 
 WolframLanguageSyntax`Generate`$experimentalSymbols =
 	Get[FileNameJoin[{location, "Resources", "Data", "ExperimentalSymbols.wl"}]]
@@ -280,7 +266,6 @@ $FeatureExpandMethods = <|
 
 $FeatureHandleMethods = <|
   "textDocument/runFastDiagnostics" -> {"Diagnostics"},
-  "textDocument/mergeWorkspaceLints" -> {"Diagnostics"},
   "textDocument/runClosedFileDiagnostics" -> {"Diagnostics"},
   "textDocument/suppressedRegions" -> {"Diagnostics"},
   "textDocument/parseIgnoreComments" -> {"Diagnostics"},
@@ -289,8 +274,10 @@ $FeatureHandleMethods = <|
   "textDocument/runAbstractDiagnostics" -> {"Diagnostics"},
   "textDocument/runScopingDiagnostics" -> {"Diagnostics"},
   "textDocument/runWorkspaceDiagnostics" -> {"Diagnostics"},
+  "textDocument/mergeWorkspaceLints" -> {"Diagnostics"},
   "textDocument/clearDiagnostics" -> {"Diagnostics"},
   "textDocument/publishDiagnostics" -> {"Diagnostics"},
+  "textDocument/publishClosedFileDiagnostics" -> {"Diagnostics"},
   "textDocument/documentNodeList" -> {"DocumentSymbol"},
   "textDocument/documentSymbolFencepost" -> {"DocumentSymbol"},
   "textDocument/runBracketMismatchesFencepost" -> {"BracketMismatches"},
@@ -307,7 +294,6 @@ $FeatureHandleMethods = <|
   "textDocument/formatting" -> {"Formatting"},
   "textDocument/rangeFormatting" -> {"Formatting"},
   "textDocument/hoverFencepost" -> {"Hover"},
-  "textDocument/publishHoverResult" -> {"Hover"},
   "textDocument/runImplicitTokensFencepost" -> {"ImplicitTokens"},
   "textDocument/clearImplicitTokens" -> {"ImplicitTokens"},
   "textDocument/publishImplicitTokens" -> {"ImplicitTokens"},
@@ -450,6 +436,25 @@ $ErrorCodes = <|
 |>
 
 
+Clear[jsonRPCErrorResponse]
+jsonRPCErrorResponse[content_, codeName_String, message_String] :=
+Module[{id},
+  If[!AssociationQ[content] || !KeyExistsQ[content, "id"],
+    Return[{}]
+  ];
+
+  id = content["id"];
+  {<|
+    "jsonrpc" -> "2.0",
+    "id" -> id,
+    "error" -> <|
+      "code" -> Lookup[$ErrorCodes, codeName, $ErrorCodes["InternalError"]],
+      "message" -> message
+    |>
+  |>}
+]
+
+
 $TextDocumentSyncKind = <|
   "None" -> 0,
   "Full" -> 1,
@@ -521,7 +526,6 @@ Diagnostic-tier methods that can be deferred when interactive requests are waiti
 $DeferrableDiagnosticMethods = {
   "textDocument/runFastDiagnostics",
   "textDocument/runWorkspaceDiagnostics",
-  "textDocument/mergeWorkspaceLints",
   "textDocument/publishClosedFileDiagnostics",
   "textDocument/runIndexUpdate",
   "textDocument/runOpenIndexUpdate",
@@ -774,7 +778,7 @@ Module[{contents, ignoredResponses},
     log[1, "Ignoring client responses without method: ids=",
       InputForm[Lookup[ignoredResponses, "id", Missing["NotFound"]]]]
   ];
-  contents = Select[contents, KeyExistsQ[#, "method"] &];
+  contents = Select[contents, AssociationQ[#] && KeyExistsQ[#, "method"] &];
 
   If[contents === {},
     Return[Null]
@@ -800,6 +804,8 @@ Module[{contents, ignoredResponses},
 
   contents = expandContents[contents];
 
+  contents = Select[contents, AssociationQ[#] && KeyExistsQ[#, "method"] &];
+
   appendContentsToContentQueue[contents];
 
   log[1, "$ContentQueue methods (after expansion & joining new content) :> ", InputForm[#["method"]& /@ $ContentQueue]];
@@ -822,6 +828,34 @@ $DiagnosticsDelayAfterLastChange = 0.4
 $ImplicitTokensDelayAfterLastChange = 3.0
 
 $BracketMatcherDelayAfterLastChange = 4.0
+
+(* Background work must not monopolize the LSP kernel while the editor is idle. *)
+$IdleLoopPause = 0.03
+$WorkspaceIndexingInterval = 0.25
+$WorkspaceIndexingLastRun = 0
+$WorkspaceIndexingBatchSize = 5
+$WorkspaceReferenceBatchSize = 10
+$ExternalDependencyIndexingBatchSize = 3
+$DependencyDiscoveryBatchSize = 2
+$ExternalDependencyFileLimit = 80
+$ClosedFileDiagnosticsIdleDelay = 1.0
+$ClosedFileDiagnosticsInterval = 2.0
+$ClosedFileDiagnosticsLastRun = 0
+$ClosedFileDiagnosticsMaxTextLength = 200000
+
+$DiagnosticsKernel = None
+$DiagnosticsKernelBin = None
+$DiagnosticsTask = None
+$DiagnosticsTaskURI = None
+$DiagnosticsTaskKind = None
+$DiagnosticsTaskResult = None
+$DiagnosticsTaskStartTime = None
+$DiagnosticsKernelLaunchAfter = None
+$HoverTask = None
+$HoverTaskURI = None
+$HoverTaskID = None
+$HoverTaskResult = None
+$HoverTaskStartTime = None
 
 
 
@@ -875,22 +909,20 @@ Module[{logFile, logFileStream,
   *)
   $Output = Streams["stderr"];
 
-  (* Background kernel for async workspace diagnostics. *)
-  (* Kernel is launched lazily ~5s after "initialized" to avoid blocking startup. *)
+  $WorkspaceBootstrapAfter      = None;
+  $DiagnosticsKernel            = None;
+  $DiagnosticsKernelBin         = None;
   $DiagnosticsTask              = None;
   $DiagnosticsTaskURI           = None;
   $DiagnosticsTaskKind          = None;
   $DiagnosticsTaskResult        = None;
   $DiagnosticsTaskStartTime     = None;
-  $DiagnosticsKernel            = None;
-  $DiagnosticsKernelBin         = None;
   $DiagnosticsKernelLaunchAfter = None;
   $HoverTask                    = None;
   $HoverTaskURI                 = None;
   $HoverTaskID                  = None;
   $HoverTaskResult              = None;
   $HoverTaskStartTime           = None;
-  $WorkspaceBootstrapAfter      = None;
   $IndexingWasActive            = False;
   $InternalRequestId            = -1;
   $PendingSemanticTokenRequests = <||>;
@@ -900,6 +932,8 @@ Module[{logFile, logFileStream,
   $PendingTokenRefresh          = False;
   $PendingTokenRefreshTime      = None;
   $WorkspaceIndexingQueued      = False;
+  $WorkspaceIndexingLastRun     = 0;
+  $ClosedFileDiagnosticsLastRun = 0;
 
 
   If[(logDir != ""),
@@ -1132,88 +1166,131 @@ Module[{contents, lastContents},
 
 
 launchDiagnosticsKernel[] :=
-Module[{addonsApps, kernelObjDir, kernelBin, startupWl, ok, kernel = $Failed, setupResult = $Failed},
+Module[{kernel = $Failed, setupResult = $Failed},
   If[$DiagnosticsKernel =!= None || $DiagnosticsTask =!= None,
     cleanupDiagnosticsWorker[True]
   ];
 
-  addonsApps   = FileNameJoin[{$InstallationDirectory, "AddOns", "Applications"}];
-  kernelObjDir = FileNameJoin[{$InstallationDirectory, "SystemFiles",
-                                "Components", "KernelObjects", "Kernel"}];
-  kernelBin    = FileNameJoin[{$InstallationDirectory, "SystemFiles", "Kernel",
-                                "Binaries", $SystemID, "WolframKernel"}];
-  startupWl    = FileNameJoin[{kernelObjDir, "KernelObjectsStartup.wl"}];
-  ok = DirectoryQ[addonsApps] && DirectoryQ[kernelObjDir] &&
-       FileExistsQ[kernelBin] && FileExistsQ[startupWl];
-  If[ok,
-    If[!MemberQ[$Path, kernelObjDir], PrependTo[$Path, kernelObjDir]];
-    If[!MemberQ[$Path, addonsApps],   PrependTo[$Path, addonsApps]];
-    Quiet[Get[startupWl]];
-    Quiet[Needs["Parallel`"]];
-    CheckAbort[
-      kernel = Quiet[Check[
-        Module[{kernels = LaunchKernels[1]},
-          If[ListQ[kernels] && Length[kernels] > 0, First[kernels], $Failed]
+  Quiet[Needs["Parallel`"]];
+  CheckAbort[
+    kernel = Quiet[Check[
+      Module[{kernels = LaunchKernels[1]},
+        If[ListQ[kernels] && Length[kernels] > 0, First[kernels], $Failed]
+      ],
+      $Failed
+    ]];
+    If[kernel =!= $Failed,
+      setupResult = Quiet[Check[
+        ParallelEvaluate[
+          Needs["CodeParser`"];
+          Needs["CodeInspector`"];
+          Needs["CodeFormatter`"],
+          kernel
         ],
         $Failed
       ]];
-      If[kernel =!= $Failed,
+      If[setupResult =!= $Failed,
         setupResult = Quiet[Check[
-          ParallelEvaluate[
-            Needs["CodeParser`"];
-            Needs["CodeInspector`"];
-            Needs["CodeFormatter`"]
-            ,
+          DistributeDefinitions[
+            "LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
+            "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
+            "LSPServer`Diagnostics`Private`",
             kernel
           ],
           $Failed
-        ]];
-        If[setupResult =!= $Failed && FreeQ[setupResult, $Failed],
-          setupResult = Quiet[Check[
-            DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
-              "LSPServer`PacletIndex`", "LSPServer`Diagnostics`", "LSPServer`Diagnostics`Private`",
-              kernel],
-            $Failed
-          ]]
-        ];
-        If[setupResult =!= $Failed,
-          $DiagnosticsKernelBin = kernelBin;
-          $DiagnosticsKernel = kernel
-          ,
-          Quiet[AbortKernels[kernel]];
-          Quiet[CloseKernels[kernel]];
-          kernel = $Failed;
-          $DiagnosticsKernelBin = $Failed;
-          $DiagnosticsKernel    = $Failed
-        ]
-        ,
-        $DiagnosticsKernelBin = $Failed;
-        $DiagnosticsKernel    = $Failed
-      ]
+        ]]
+      ];
+      If[setupResult =!= $Failed,
+        $DiagnosticsKernel = kernel;
+        $DiagnosticsKernelBin = $CommandLine[[1]]
       ,
-      If[kernel =!= $Failed,
         Quiet[AbortKernels[kernel]];
         Quiet[CloseKernels[kernel]];
-        kernel = $Failed
-      ];
-      $DiagnosticsKernelBin = $Failed;
-      $DiagnosticsKernel    = $Failed
-    ]
+        $DiagnosticsKernel = $Failed;
+        $DiagnosticsKernelBin = $Failed
+      ]
     ,
-    $DiagnosticsKernelBin = $Failed;
-    $DiagnosticsKernel    = $Failed
+      $DiagnosticsKernel = $Failed;
+      $DiagnosticsKernelBin = $Failed
+    ],
+    If[kernel =!= $Failed,
+      Quiet[AbortKernels[kernel]];
+      Quiet[CloseKernels[kernel]]
+    ];
+    $DiagnosticsKernel = $Failed;
+    $DiagnosticsKernelBin = $Failed
   ];
-  If[kernel =!= $Failed && $DiagnosticsKernel =!= kernel,
-    Quiet[AbortKernels[kernel]];
-    Quiet[CloseKernels[kernel]]
-  ];
-  If[$DiagnosticsKernel === None,
-    $DiagnosticsKernelBin = $Failed;
-    $DiagnosticsKernel    = $Failed
-  ];
+
   If[$DiagnosticsKernel === $Failed,
     log[0, "WARNING: LaunchKernels failed - workspace diagnostics will run synchronously"]
   ]
+]
+
+
+clearDiagnosticsTaskState[requeueClosedFileSweep_:False] :=
+Module[{taskKind, taskURI},
+  taskKind = $DiagnosticsTaskKind;
+  taskURI = $DiagnosticsTaskURI;
+
+  If[TrueQ[requeueClosedFileSweep] && taskKind === "closed-file-sweep" && StringQ[taskURI],
+    requeueWorkspaceDiagnosticsSweepURI[taskURI]
+  ];
+
+  $DiagnosticsTask = None;
+  $DiagnosticsTaskURI = None;
+  $DiagnosticsTaskKind = None;
+  $DiagnosticsTaskResult = None;
+  $DiagnosticsTaskStartTime = None;
+  Null
+]
+
+
+clearHoverTaskState[] :=
+(
+  $HoverTask = None;
+  $HoverTaskURI = None;
+  $HoverTaskID = None;
+  $HoverTaskResult = None;
+  $HoverTaskStartTime = None;
+  Null
+)
+
+
+abortDiagnosticsKernel[] :=
+Module[{kernel = $DiagnosticsKernel},
+  If[kernel =!= $Failed && kernel =!= None,
+    Quiet[AbortKernels[kernel]]
+  ];
+  Null
+]
+
+
+closeDiagnosticsKernel[] :=
+Module[{kernel = $DiagnosticsKernel},
+  abortDiagnosticsKernel[];
+  If[kernel =!= $Failed && kernel =!= None,
+    Quiet[CloseKernels[kernel]]
+  ];
+  $DiagnosticsKernel = None;
+  $DiagnosticsKernelBin = None;
+  Null
+]
+
+
+cleanupDiagnosticsWorker[requeueClosedFileSweep_:False] :=
+(
+  clearDiagnosticsTaskState[requeueClosedFileSweep];
+  closeDiagnosticsKernel[]
+)
+
+
+cancelCurrentDiagnosticsTask[] :=
+Module[{},
+  If[$DiagnosticsTask =!= None,
+    clearDiagnosticsTaskState[True];
+    abortDiagnosticsKernel[]
+  ];
+  Null
 ]
 
 
@@ -1233,6 +1310,7 @@ Module[{moreWork},
   ];
 
   moreWork = LSPServer`PacletIndex`ProcessPendingIndexFiles[];
+  $WorkspaceIndexingLastRun = AbsoluteTime[];
 
   If[moreWork,
     $IndexingWasActive = True;
@@ -1246,93 +1324,6 @@ Module[{moreWork},
   log[1, "workspace/processIndexing: exit"];
 
   {}
-]
-
-
-clearDiagnosticsTaskState[requeueClosedFileSweep_:False] :=
-Module[{taskKind, taskURI},
-  taskKind = $DiagnosticsTaskKind;
-  taskURI = $DiagnosticsTaskURI;
-
-  If[TrueQ[requeueClosedFileSweep] && taskKind === "closed-file-sweep" && StringQ[taskURI],
-    requeueWorkspaceDiagnosticsSweepURI[taskURI]
-  ];
-
-  $DiagnosticsTask          = None;
-  $DiagnosticsTaskURI       = None;
-  $DiagnosticsTaskKind      = None;
-  $DiagnosticsTaskResult    = None;
-  $DiagnosticsTaskStartTime = None;
-
-  Null
-]
-
-
-clearHoverTaskState[] :=
-(
-  $HoverTask = None;
-  $HoverTaskURI = None;
-  $HoverTaskID = None;
-  $HoverTaskResult = None;
-  $HoverTaskStartTime = None;
-  Null
-)
-
-
-abortHoverTask[] :=
-Module[{},
-  If[$HoverTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    Quiet[AbortKernels[$DiagnosticsKernel]]
-  ];
-
-  Null
-]
-
-
-cancelCurrentHoverTask[] :=
-Module[{},
-  If[$HoverTask =!= None,
-    clearHoverTaskState[];
-    abortHoverTask[]
-  ];
-
-  Null
-]
-
-
-abortDiagnosticsKernel[] :=
-Module[{kernel},
-  kernel = $DiagnosticsKernel;
-
-  If[kernel =!= $Failed && kernel =!= None,
-    Quiet[AbortKernels[kernel]]
-  ];
-
-  Null
-]
-
-
-closeDiagnosticsKernel[] :=
-Module[{kernel},
-  kernel = $DiagnosticsKernel;
-
-  abortDiagnosticsKernel[];
-
-  If[kernel =!= $Failed && kernel =!= None,
-    Quiet[CloseKernels[kernel]]
-  ];
-
-  $DiagnosticsKernel = None;
-  $DiagnosticsKernelBin = None;
-
-  Null
-]
-
-
-cleanupDiagnosticsWorker[requeueClosedFileSweep_:False] :=
-Module[{},
-  clearDiagnosticsTaskState[requeueClosedFileSweep];
-  closeDiagnosticsKernel[]
 ]
 
 
@@ -1410,9 +1401,20 @@ workspaceIndexingPendingQ[] :=
   Length[LSPServer`PacletIndex`$PendingReferenceFiles] > 0 ||
   Length[LSPServer`PacletIndex`Private`$PendingDepDiscovery] > 0
 
+backgroundIntervalReadyQ[last_, interval_] :=
+Module[{now, nLast, nInterval},
+  now = AbsoluteTime[];
+  nLast = Replace[last, Except[_?NumberQ] -> 0];
+  nInterval = Replace[interval, Except[_?NumberQ] -> 0];
+  now - nLast >= nInterval
+]
+
 
 queueWorkspaceIndexing[reason_String:""] :=
-  If[workspaceIndexingPendingQ[] && !TrueQ[$WorkspaceIndexingQueued],
+  If[
+    workspaceIndexingPendingQ[] &&
+    !TrueQ[$WorkspaceIndexingQueued] &&
+    backgroundIntervalReadyQ[$WorkspaceIndexingLastRun, $WorkspaceIndexingInterval],
     If[reason =!= "",
       log[1, reason]
     ];
@@ -1443,9 +1445,7 @@ finishWorkspaceIndexing[] :=
       Keys[$OpenFilesMap]
     ];
     (* Re-dispatch workspace diagnostics for all open files now that
-       $PacletIndex is fully populated with external dep symbols.
-       dispatchWorkspaceDiagnostics handles both the parallel-kernel path
-       and the sync-fallback path, so no kernel-availability guard needed. *)
+       $PacletIndex is fully populated with external dep symbols. *)
     Scan[
       loadFeatureModule["Diagnostics"];
       LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics,
@@ -1460,17 +1460,6 @@ finishWorkspaceIndexing[] :=
   ]
 
 
-cancelCurrentDiagnosticsTask[] :=
-Module[{},
-  If[$DiagnosticsTask =!= None,
-    clearDiagnosticsTaskState[True];
-    abortDiagnosticsKernel[]
-  ];
-
-  Null
-]
-
-
 ProcessScheduledJobs[] :=
 Catch[
 Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job, toRemoveIndices, contentsToAdd},
@@ -1480,6 +1469,63 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   *)
   If[$ServerState == "shutdown",
     Throw[Null]
+  ];
+
+  If[$DiagnosticsKernel === None &&
+     NumberQ[$DiagnosticsKernelLaunchAfter] &&
+     AbsoluteTime[] >= $DiagnosticsKernelLaunchAfter,
+    $DiagnosticsKernelLaunchAfter = None;
+    launchDiagnosticsKernel[]
+  ];
+
+  If[$HoverTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Module[{taskResult, taskURI, taskID},
+      taskResult = Quiet[
+        TimeConstrained[WaitAll[$HoverTask], 0.001, Missing["StillRunning"]]
+      ];
+      If[taskResult =!= Missing["StillRunning"],
+        taskURI = $HoverTaskURI;
+        taskID = $HoverTaskID;
+        clearHoverTaskState[];
+        $HoverTaskResult = taskResult;
+        appendContentsToContentQueue[{
+          <|
+            "method" -> "textDocument/publishHoverResult",
+            "id" -> taskID,
+            "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>
+          |>
+        }]
+      ]
+    ]
+  ];
+
+  If[$DiagnosticsTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Module[{taskResult, taskKind, taskURI},
+      taskResult = Quiet[
+        TimeConstrained[WaitAll[$DiagnosticsTask], 0.001, Missing["StillRunning"]]
+      ];
+      If[taskResult =!= Missing["StillRunning"],
+        taskKind = $DiagnosticsTaskKind;
+        taskURI = $DiagnosticsTaskURI;
+        $DiagnosticsTask = None;
+        $DiagnosticsTaskURI = None;
+        $DiagnosticsTaskKind = None;
+        $DiagnosticsTaskStartTime = None;
+
+        If[AssociationQ[taskResult] && Lookup[taskResult, "URI", None] === taskURI,
+          $DiagnosticsTaskResult = taskResult;
+          appendContentsToContentQueue[{
+            If[taskKind === "closed-file-sweep",
+              <|"method" -> "textDocument/publishClosedFileDiagnostics",
+                "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>,
+              <|"method" -> "textDocument/mergeWorkspaceLints",
+                "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>
+            ]
+          }],
+          $DiagnosticsTaskResult = None
+        ]
+      ]
+    ]
   ];
 
   (*
@@ -1519,132 +1565,6 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   ];
 
   (*
-  Launch the background diagnostics kernel deferred from startup.
-  Only fire when the queue has been idle for at least 3 seconds — this ensures
-  VS Code has received all pending responses (tokens, diagnostics) before the
-  blocking LaunchKernels + DistributeDefinitions call stalls the event loop.
-  If the queue is busy or recently busy, defer by 2 seconds and retry.
-  *)
-  If[$DiagnosticsKernelLaunchAfter =!= None && AbsoluteTime[] >= $DiagnosticsKernelLaunchAfter,
-    If[Length[$ContentQueue] == 0 && AbsoluteTime[] - $QueueLastNonEmptyTime >= 3,
-      $DiagnosticsKernelLaunchAfter = None;
-      launchDiagnosticsKernel[]
-    ,
-      (* Queue busy or recently busy; defer by 2 seconds and try again *)
-      $DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 2
-    ]
-  ];
-
-  If[$HoverTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    If[NumberQ[$HoverTaskStartTime] &&
-       AbsoluteTime[] - $HoverTaskStartTime > 45,
-      log[0, "WARNING: hover task timed out after 45s; restarting worker kernel"];
-      clearHoverTaskState[];
-      cleanupDiagnosticsWorker[True];
-      $DiagnosticsKernelBin = $Failed;
-      $DiagnosticsKernel    = $Failed
-    ];
-    If[$HoverTask =!= None,
-      Module[{taskResult, taskURI, taskID},
-        taskResult = Quiet[Check[
-          TimeConstrained[WaitAll[$HoverTask], 0.001, Missing["StillRunning"]],
-          $Failed
-        ]];
-        If[!MatchQ[taskResult, _Missing],
-          taskURI = $HoverTaskURI;
-          taskID = $HoverTaskID;
-          clearHoverTaskState[];
-          If[AssociationQ[taskResult] &&
-             Lookup[taskResult, "URI", None] === taskURI &&
-             Lookup[taskResult, "ID", None] === taskID,
-            $HoverTaskResult = taskResult;
-            AppendTo[$ContentQueue,
-              <|"method" -> "textDocument/publishHoverResult",
-                "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>,
-                "id" -> taskID,
-                "priority" -> True|>]
-          ]
-        ]
-      ]
-    ]
-  ];
-
-  (*
-  Consume the background diagnostics task once the event loop is idle.
-
-  TimeConstrained[WaitAll[task], t, alt] is the correct non-blocking pattern:
-  - If the task is already done WaitAll returns immediately (microseconds) and
-    TimeConstrained passes the result through.
-  - If the task is still running WaitAll blocks; TimeConstrained fires an
-    Interrupt[] after t seconds and returns the sentinel alt.
-  Unlike WaitAll[{task}, t] (the timed WaitAll form), a TimeConstrained-
-  interrupted WaitAll does NOT invalidate the EvaluationObject, so we can
-  safely retry on the next event-loop iteration.
-
-  A 45-second timeout guard detects crashed worker kernels (which would cause
-  WaitAll to block permanently) and kills the kernel so the fallback sync path
-  can take over.
-  *)
-  If[$DiagnosticsTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    (* Timeout guard: kill the worker kernel if it has been stuck for too long.
-       NumberQ guards against an unbound or None $DiagnosticsTaskStartTime. *)
-    If[NumberQ[$DiagnosticsTaskStartTime] &&
-       AbsoluteTime[] - $DiagnosticsTaskStartTime > 45,
-      log[0, "WARNING: diagnostics task timed out after 45s; restarting worker kernel"];
-      cleanupDiagnosticsWorker[True];
-      $DiagnosticsKernelBin = $Failed;
-      $DiagnosticsKernel    = $Failed;
-      $DiagnosticsTaskStartTime = None
-    ];
-    If[$DiagnosticsTask =!= None,
-      Module[{taskResult, taskKind, taskURI},
-        (*
-        Poll with a 1 ms TimeConstrained.  If the worker is done the result
-        arrives in microseconds (well within 1 ms); if it is still running we
-        get Missing["StillRunning"] and retry on the next iteration (~10 ms).
-        Previously this poll was guarded by Length[$ContentQueue] == 0, which
-        meant a busy queue (e.g. rapid hover/completion requests) could prevent
-        the diagnostics result from ever being collected, permanently stalling
-        the diagnostics pipeline.  The poll is cheap enough to run always.
-        *)
-        taskResult = Quiet[Check[
-          TimeConstrained[WaitAll[$DiagnosticsTask], 0.001, Missing["StillRunning"]],
-          $Failed
-        ]];
-        If[!MatchQ[taskResult, _Missing],
-          (* Task completed (with a result) or failed ($Failed) *)
-          taskKind = $DiagnosticsTaskKind;
-          taskURI = $DiagnosticsTaskURI;
-          $DiagnosticsTask          = None;
-          $DiagnosticsTaskURI       = None;
-          $DiagnosticsTaskKind      = None;
-          $DiagnosticsTaskStartTime = None;
-          If[AssociationQ[taskResult] &&
-             Lookup[taskResult, "URI", None] === taskURI,
-            $DiagnosticsTaskResult = taskResult;
-            Switch[taskKind,
-              "open-file",
-                AppendTo[$ContentQueue,
-                  <|"method" -> "textDocument/mergeWorkspaceLints",
-                    "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>]
-              ,
-              "closed-file-sweep",
-                AppendTo[$ContentQueue,
-                  <|"method" -> "textDocument/publishClosedFileDiagnostics",
-                    "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>]
-              ,
-              _,
-                $DiagnosticsTaskResult = None
-            ]
-          ]
-        ]
-        (* If Missing["StillRunning"]: task still in flight — leave $DiagnosticsTask
-           intact and retry on the next event-loop iteration. *)
-      ]
-    ]
-  ];
-
-  (*
   When the queue is idle, scan one closed workspace file at a time so the
   Problems view can populate for files that are not currently open. Closed-file
   diagnostics now run on the main-kernel queue, so only inject more sweep work
@@ -1652,11 +1572,11 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   *)
   Module[{canStartSweep},
     canStartSweep =
-      $DiagnosticsTask === None &&
       ListQ[$WorkspaceDiagnosticsSweepURIs] &&
       Length[$WorkspaceDiagnosticsSweepURIs] > 0 &&
       Length[$ContentQueue] == 0 &&
-      AbsoluteTime[] - $QueueLastNonEmptyTime >= 1;
+      backgroundIntervalReadyQ[$QueueLastNonEmptyTime, $ClosedFileDiagnosticsIdleDelay] &&
+      backgroundIntervalReadyQ[$ClosedFileDiagnosticsLastRun, $ClosedFileDiagnosticsInterval];
 
     If[canStartSweep,
       Module[{nextPos, nextURI},
@@ -1668,6 +1588,7 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
         If[IntegerQ[nextPos],
           nextURI = $WorkspaceDiagnosticsSweepURIs[[nextPos]];
           $WorkspaceDiagnosticsSweepURIs = Delete[$WorkspaceDiagnosticsSweepURIs, nextPos];
+          $ClosedFileDiagnosticsLastRun = AbsoluteTime[];
           loadFeatureModule["Diagnostics"];
           LSPServer`Diagnostics`Private`dispatchClosedFileDiagnostics[nextURI]
         ]
@@ -1743,7 +1664,7 @@ returns: a list of JSON RPC assocs
 *)
 LSPEvaluate[content_(*no Association here, allow everything*)] :=
 Catch[
-Module[{contents},
+Module[{contents, methodName},
 
   (*
   (*
@@ -1807,7 +1728,12 @@ Module[{contents},
     log[0, "Internal assert 4 failed: list of Associations: ", contents];
     log[0, "\n\n"];
 
-    exitHard[]
+    methodName = If[AssociationQ[content], Lookup[content, "method", "message"], "message"];
+    contents = jsonRPCErrorResponse[
+      content,
+      "InternalError",
+      "Internal server error while handling " <> ToString[methodName]
+    ]
   ];
 
   contents
@@ -1870,7 +1796,8 @@ handleContent[content:KeyValuePattern["method" -> "initialize"]] :=
 Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSupport, codeActionKind, valueSet,
   codeActionProviderValue, initializationOptions, implicitTokens,
   bracketMatcher, debugBracketMatcher, clientName, semanticTokensProviderValue, inlayHintProviderValue,
-  semanticTokens, contents, documentSymbol, hierarchicalDocumentSymbolSupport},
+  semanticTokens, contents, documentSymbol, hierarchicalDocumentSymbolSupport,
+  performanceOptions, setPositiveNumberOption, setPositiveIntegerOption},
 
   log[1, "initialize: Enter"];
 
@@ -1921,6 +1848,36 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
       ];
       If[KeyExistsQ[initializationOptions, "inlayHints"],
         $InlayHints = TrueQ[initializationOptions["inlayHints"]]
+      ];
+      If[KeyExistsQ[initializationOptions, "performance"] &&
+          AssociationQ[initializationOptions["performance"]],
+        performanceOptions = initializationOptions["performance"];
+        setPositiveNumberOption = Function[{key, sym},
+          If[KeyExistsQ[performanceOptions, key] &&
+              NumberQ[performanceOptions[key]] &&
+              performanceOptions[key] >= 0,
+            sym = performanceOptions[key]
+          ],
+          HoldRest
+        ];
+        setPositiveIntegerOption = Function[{key, sym},
+          If[KeyExistsQ[performanceOptions, key] &&
+              IntegerQ[performanceOptions[key]] &&
+              performanceOptions[key] > 0,
+            sym = performanceOptions[key]
+          ],
+          HoldRest
+        ];
+        setPositiveNumberOption["idleLoopPause", $IdleLoopPause];
+        setPositiveNumberOption["workspaceIndexingInterval", $WorkspaceIndexingInterval];
+        setPositiveIntegerOption["workspaceIndexingBatchSize", $WorkspaceIndexingBatchSize];
+        setPositiveIntegerOption["workspaceReferenceBatchSize", $WorkspaceReferenceBatchSize];
+        setPositiveIntegerOption["externalDependencyIndexingBatchSize", $ExternalDependencyIndexingBatchSize];
+        setPositiveIntegerOption["dependencyDiscoveryBatchSize", $DependencyDiscoveryBatchSize];
+        setPositiveIntegerOption["externalDependencyFileLimit", $ExternalDependencyFileLimit];
+        setPositiveNumberOption["closedFileDiagnosticsIdleDelay", $ClosedFileDiagnosticsIdleDelay];
+        setPositiveNumberOption["closedFileDiagnosticsInterval", $ClosedFileDiagnosticsInterval];
+        setPositiveIntegerOption["closedFileDiagnosticsMaxTextLength", $ClosedFileDiagnosticsMaxTextLength]
       ];
     ];
 
@@ -2248,6 +2205,9 @@ Module[{warningMessages},
        idle briefly so startup didOpen and semantic-token requests land first. *)
     $WorkspaceBootstrapAfter = AbsoluteTime[] + 1
   ];
+  If[$DiagnosticsKernel === None && $DiagnosticsKernelLaunchAfter === None,
+    $DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 5
+  ];
 
   warningMessages = ServerDiagnosticWarningMessages[];
 
@@ -2263,10 +2223,6 @@ Module[{warningMessages},
       |>
   |>& /@ warningMessages;
 
-  (* Schedule background kernel launch for 5 seconds from now.
-     Deferring avoids blocking during VS Code's critical startup window. *)
-  $DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 5;
-
   log[1, "initialized: Exit"];
 
   res
@@ -2280,13 +2236,9 @@ Module[{nextPos, nextURI},
   log[1, "workspace/bootstrapClosedFileDiagnostics: Enter"];
 
 
-  If[$DiagnosticsTask =!= None || !ListQ[$WorkspaceDiagnosticsSweepURIs] || $WorkspaceDiagnosticsSweepURIs === {},
+  If[!ListQ[$WorkspaceDiagnosticsSweepURIs] || $WorkspaceDiagnosticsSweepURIs === {},
     log[1, "workspace/bootstrapClosedFileDiagnostics: Exit"];
     Return[{}]
-  ];
-
-  If[$DiagnosticsKernel === None || $DiagnosticsKernel === $Failed,
-    log[1, "workspace/bootstrapClosedFileDiagnostics: diagnostics kernel not ready; using synchronous fallback"]
   ];
 
   nextPos = SelectFirst[
@@ -2361,10 +2313,10 @@ Module[{id},
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
 
-  $DiagnosticsKernelLaunchAfter = None;
   $WorkspaceBootstrapAfter = None;
+  $DiagnosticsKernelLaunchAfter = None;
   clearHoverTaskState[];
-  cleanupDiagnosticsWorker[];
+  cleanupDiagnosticsWorker[False];
 
   $OpenFilesMap =.;
 
@@ -2464,6 +2416,13 @@ handleContent[content : KeyValuePattern["method" -> method_String]] /;
     loadFeatureModulesForMethod[method];
     handleContent[content]
   ]
+
+
+handleContent[content:KeyValuePattern["method" -> method_String]] :=
+Module[{},
+  log[0, "Unknown LSP method: ", method];
+  jsonRPCErrorResponse[content, "MethodNotFound", "Method Not Found"]
+]
 
 
 (*
@@ -2617,17 +2576,15 @@ Module[{idsToRecover},
 ]
 
 
-(*
-semanticTokensRefreshQueuedQ[] was a linear scan of $ContentQueue used to avoid
-double-queuing a workspace/semanticTokens/refresh.  It has been replaced by the
-$PendingTokenRefresh flag (see queueSemanticTokensRefresh below), so this
-function is kept only as a no-op compatibility stub.
-*)
-semanticTokensRefreshQueuedQ[] := False
+semanticTokensRefreshQueuedQ[] :=
+  AnyTrue[
+    Replace[$ContentQueue, Except[_List] -> {}],
+    AssociationQ[#] && Lookup[#, "method", None] === "workspace/semanticTokens/refresh" &
+  ]
 
 
 queueSemanticTokensRefresh[reason_String:""] :=
-  If[$SemanticTokens && !TrueQ[$PendingTokenRefresh],
+  If[$SemanticTokens && !TrueQ[$PendingTokenRefresh] && !semanticTokensRefreshQueuedQ[],
     If[reason =!= "",
       log[0, reason]
     ];
@@ -2803,6 +2760,11 @@ Module[{params, doc, uri, entry, text, parseResult, curEntry},
 
   text = Lookup[entry, "Text", Missing["NotAvailable"]];
   If[!StringQ[text],
+    Throw[{}]
+  ];
+  If[NumberQ[$ClosedFileDiagnosticsMaxTextLength] &&
+      StringLength[text] > $ClosedFileDiagnosticsMaxTextLength,
+    $OpenFilesMap[uri] = KeyDrop[entry, "IndexUpdatePending"];
     Throw[{}]
   ];
 
@@ -3424,12 +3386,7 @@ Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry,
     Throw[{}]
   ];
 
-  (* Cancel any in-flight slow-tier diagnostics task — its content is now stale *)
   cancelCurrentDiagnosticsTask[];
-
-  If[$HoverTask =!= None && $HoverTaskURI === uri,
-    cancelCurrentHoverTask[]
-  ];
 
   changes = params["contentChanges"];
 
@@ -3515,6 +3472,11 @@ Module[{params, doc, uri, entry, text, parseResult, curEntry,
 
   text = Lookup[entry, "Text", Missing["NotAvailable"]];
   If[!StringQ[text],
+    Throw[{}]
+  ];
+  If[NumberQ[$ClosedFileDiagnosticsMaxTextLength] &&
+      StringLength[text] > $ClosedFileDiagnosticsMaxTextLength,
+    $OpenFilesMap[uri] = KeyDrop[entry, "IndexUpdatePending"];
     Throw[{}]
   ];
 
@@ -3603,7 +3565,6 @@ exitGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING GRACEFULLY"];
   log[0, "\n\n"];
-  cleanupDiagnosticsWorker[];
   shutdownLSPComm[$commProcess, $initializedComm];
   (
   (* :!CodeAnalysis::BeginBlock:: *)
@@ -3629,7 +3590,6 @@ exitSemiGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING SEMI-GRACEFULLY"];
   log[0, "\n\n"];
-  cleanupDiagnosticsWorker[];
   shutdownLSPComm[$commProcess, $initializedComm];
   (
   (* :!CodeAnalysis::BeginBlock:: *)
@@ -3655,7 +3615,6 @@ exitHard[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING HARD"];
   log[0, "\n\n"];
-  cleanupDiagnosticsWorker[];
   shutdownLSPComm[$commProcess, $initializedComm];
   (
   (* :!CodeAnalysis::BeginBlock:: *)

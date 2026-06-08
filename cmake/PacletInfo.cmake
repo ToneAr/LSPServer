@@ -12,22 +12,24 @@ macro(CheckPacletInfo)
     #
     # if not local build, then get Version from PacletInfo.wl
     #
-    execute_process(
-      COMMAND
-        ${WOLFRAMKERNEL} -noinit -noprompt -nopaclet -nostartuppaclets -runfirst Pause[${KERNEL_PAUSE}]\;Print[OutputForm[Row[{Version,\ ";",\ WolframVersion}\ /.\ List\ @@\ Get["${PACLETINFO_IN_SOURCE}"]]]]\;Exit[]
-      OUTPUT_VARIABLE
-        PACLET_VERSIONS_LIST
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      WORKING_DIRECTORY
-        ${PROJECT_SOURCE_DIR}
-      TIMEOUT
-        ${KERNEL_TIMEOUT}
-      RESULT_VARIABLE
-        PACLETINFO_RESULT
+    set(_paclet_info_code
+"pacletInfo = List @@ Get[\"${PACLETINFO_IN_SOURCE}\"]
+Print[OutputForm[Version /. pacletInfo]]
+Print[OutputForm[WolframVersion /. pacletInfo]]"
     )
+
+    RunWolframKernelScript("${_paclet_info_code}" PACLET_VERSIONS_OUTPUT PACLETINFO_RESULT)
 
     if(NOT ${PACLETINFO_RESULT} EQUAL "0")
       message(FATAL_ERROR "Bad exit code from PacletInfo script: ${PACLETINFO_RESULT}")
+    endif()
+
+    string(REPLACE "\r\n" "\n" PACLET_VERSIONS_OUTPUT "${PACLET_VERSIONS_OUTPUT}")
+    string(REPLACE "\n" ";" PACLET_VERSIONS_LIST "${PACLET_VERSIONS_OUTPUT}")
+
+    list(LENGTH PACLET_VERSIONS_LIST PACLET_VERSIONS_LIST_LENGTH)
+    if(NOT ${PACLET_VERSIONS_LIST_LENGTH} EQUAL "2")
+      message(FATAL_ERROR "Could not parse PacletInfo version output: ${PACLET_VERSIONS_OUTPUT}")
     endif()
 
     list(GET PACLET_VERSIONS_LIST 0 PACLET_VERSION)

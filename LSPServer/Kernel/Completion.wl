@@ -244,11 +244,12 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   aliasedCompletions = getAliasedSymbolCompletions[prefix];
 
   (*
-  Combine and deduplicate
-  Priority order: paclet symbols, aliased context symbols, external package symbols,
-  kernel context symbols, system symbols, options, contexts
+  Combine and deduplicate.
+  Put contextual options before system symbols so option names such as PlotRange
+  keep their option insertText (" -> ") instead of being de-duplicated away as
+  ordinary system-symbol completions.
   *)
-  completions = Join[pacletCompletions, aliasedCompletions, externalCompletions, kernelCtxCompletions, systemCompletions, optionCompletions, contextCompletions];
+  completions = Join[pacletCompletions, aliasedCompletions, externalCompletions, kernelCtxCompletions, optionCompletions, systemCompletions, contextCompletions];
   completions = DeleteDuplicatesBy[completions, #["label"]&];
 
   (*
@@ -398,25 +399,85 @@ Module[{chars, i, squareDepth = 0, parenDepth = 0, braceDepth = 0,
 ]
 
 
+optionNameFromHeldLHS[held_] :=
+  Replace[held, {
+    HoldComplete[s_Symbol] :> SymbolName[Unevaluated[s]],
+    HoldComplete[s_String] :> s,
+    HoldComplete[HoldPattern[s_Symbol]] :> SymbolName[Unevaluated[s]],
+    _ :> None
+  }]
+
+
+getKernelOptionNames[headName_String] :=
+Module[{candidates, opts},
+  candidates = DeleteDuplicates[Flatten[{
+    headName,
+    If[StringContainsQ[headName, "`"], Last[StringSplit[headName, "`", All]], Nothing],
+    If[StringContainsQ[headName, "`"], Nothing, "System`" <> headName]
+  }]];
+
+  Catch[
+    Scan[
+      Function[{name},
+        If[NameQ[name],
+          opts = Quiet[Check[
+            Cases[
+              Options[ReleaseHold[ToExpression[name, InputForm, HoldComplete]]],
+              (Rule | RuleDelayed)[lhs_, _] :> optionNameFromHeldLHS[HoldComplete[lhs]],
+              Infinity
+            ],
+            {}
+          ]];
+          opts = DeleteDuplicates[Cases[opts, _String]];
+          If[opts =!= {}, Throw[opts]]
+        ]
+      ],
+      candidates
+    ];
+    {}
+  ]
+]
+
+
+getGlobalOptionNames[] :=
+Module[{opts},
+  opts = If[ListQ[WolframLanguageSyntax`Generate`$options],
+    WolframLanguageSyntax`Generate`$options,
+    {}
+  ];
+  DeleteDuplicates[Join[
+    Cases[opts, _String],
+    SymbolName /@ Cases[opts, _Symbol]
+  ]]
+]
+
+
 getContextualOptionNames[text_String, line_Integer, char_Integer] :=
-Module[{beforeCursor, headName, indexedOptions, bareHeadName},
+Module[{beforeCursor, headName, indexedOptions, bareHeadName, kernelOptions},
 
   beforeCursor = getTextBeforeCursor[text, line, char];
   headName = getEnclosingCallHeadName[beforeCursor];
-  indexedOptions = {};
 
-  If[StringQ[headName],
-    indexedOptions = GetSymbolOptionNames[headName];
-
-    If[indexedOptions === {} && StringContainsQ[headName, "`"],
-      bareHeadName = Last[StringSplit[headName, "`", All]];
-      indexedOptions = GetSymbolOptionNames[bareHeadName]
-    ]
+  If[!StringQ[headName],
+    Return[{}]
   ];
 
-  If[indexedOptions === {},
-    If[ListQ[WolframLanguageSyntax`Generate`$options], WolframLanguageSyntax`Generate`$options, {}],
-    DeleteDuplicates[indexedOptions]
+  indexedOptions = GetSymbolOptionNames[headName];
+
+  If[indexedOptions === {} && StringContainsQ[headName, "`"],
+    bareHeadName = Last[StringSplit[headName, "`", All]];
+    indexedOptions = GetSymbolOptionNames[bareHeadName]
+  ];
+
+  If[indexedOptions =!= {},
+    Return[DeleteDuplicates[indexedOptions]]
+  ];
+
+  kernelOptions = getKernelOptionNames[headName];
+
+  If[kernelOptions =!= {},
+    DeleteDuplicates[kernelOptions],
+    getGlobalOptionNames[]
   ]
 ]
 

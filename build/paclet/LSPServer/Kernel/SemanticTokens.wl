@@ -129,6 +129,88 @@ Check if a symbol is a commonly confused / "bad" symbol name
 *)
 isBadSymbol[name_String] := KeyExistsQ[$badSymbolsSet, name]
 
+
+modifierBits[modifiers_] :=
+Module[{bits},
+  bits = DeleteCases[
+    Lookup[$SemanticTokenModifiers, Replace[modifiers, Except[_List] -> {}], Missing["Unknown"]],
+    Except[_Integer]
+  ];
+  If[bits === {},
+    0,
+    BitOr @@ BitShiftLeft[1, bits]
+  ]
+]
+
+
+normalizeScopingData[data_] :=
+Module[{raw},
+  raw = Replace[data, Except[_List] -> {}];
+  Join[
+    Cases[
+      raw,
+      {source:{{_Integer, _Integer}, {_Integer, _Integer}}, scope_List, modifiers_List} :>
+        {source, scope, modifiers}
+    ],
+    Cases[
+      raw,
+      h_[source:{{_Integer, _Integer}, {_Integer, _Integer}}, scope_List, modifiers_List, ___] /;
+        SymbolName[Unevaluated[h]] === "scopingDataObject" :>
+        {source, scope, modifiers}
+    ]
+  ]
+]
+
+
+$SemanticTokensScopingDataTimeLimit = 1.5;
+$SemanticTokensScopingTextLengthLimit = 200000;
+$LastSemanticTokensScopingTimedOut = False;
+
+
+semanticTokensScopingEligibleQ[entry_Association] :=
+Module[{text},
+  text = Lookup[entry, "Text", ""];
+  !StringQ[text] || StringLength[text] <= $SemanticTokensScopingTextLengthLimit
+]
+
+
+safeScopingData[ast_] :=
+Module[{result},
+  $LastSemanticTokensScopingTimedOut = False;
+  result = TimeConstrained[
+    Module[{scopingData, mathData},
+      scopingData = Quiet[Check[CodeParser`Scoping`ScopingData[ast], {}]];
+      If[!ListQ[scopingData],
+        scopingData = {}
+      ];
+
+      mathData = Quiet[Check[extractMathScopingData[ast], {}]];
+      If[ListQ[mathData],
+        Join[scopingData, mathData],
+        scopingData
+      ]
+    ],
+    $SemanticTokensScopingDataTimeLimit,
+    $TimedOut
+  ];
+
+  If[result === $TimedOut,
+    $LastSemanticTokensScopingTimedOut = True;
+    {},
+    result
+  ]
+]
+
+
+safeClassifySymbol[classify_, name_String] :=
+Module[{classification},
+  classification = Quiet[Check[classify[name], $Failed]];
+  If[MatchQ[classification, {_String, _List}] && KeyExistsQ[$SemanticTokenTypes, classification[[1]]],
+    classification,
+    {"comment", {"error"}}
+  ]
+]
+
 (*
 Check if a symbol is from an external loaded dependency package.
 This checks the actual Context[] of the symbol at runtime.
@@ -197,14 +279,24 @@ Module[{symContext, explicitContext},
       ]
     ];
 
+    (* The explicit context is not a known dep context (could be a CellContext alias
+       or local short name). Fall back to checking the bare symbol name — if the bare
+       symbol is indexed as an external dep symbol, treat it as a dep symbol regardless
+       of the short context prefix. *)
+    symContext = LSPServer`PacletIndex`Private`resolveSymbolContext[Last[StringSplit[name, "`"]]];
+    If[StringQ[symContext] && symContext =!= "Global`" && symContext =!= "System`",
+      Return[KeyExistsQ[$depsSet, symContext] ||
+             AnyTrue[$depsList, StringStartsQ[symContext, #] &]]
+    ];
+
     Return[False]
   ];
 
-  (* For bare symbols, try to get the symbol's context at runtime *)
-  symContext = Quiet[
-    Check[Context[name], None, {Context::notfound}],
-    {Context::notfound}
-  ];
+  (* For bare symbols, look up the symbol's context from the paclet index
+     or via kernel Names[]. Do NOT use Context[name] on a bare string — that
+     creates the symbol in the current package context ($Context) and returns
+     that context instead of the symbol's actual defining context. *)
+  symContext = LSPServer`PacletIndex`Private`resolveSymbolContext[name];
 
   If[!StringQ[symContext] || symContext === "Global`" || symContext === "System`",
     Return[False]
@@ -238,7 +330,17 @@ Module[{bareSymbol},
     isSystemOption[bareSymbol],
       {"property", {"readonly"}}
     ,
-    (* Check paclet symbols using bare name *)
+    (* Symbols with explicit context from built-in Mathematica subcontexts
+       (System`*, Typeset`*, FrontEnd`*, etc.) — treat as system/builtin *)
+    StringContainsQ[name, "`"] &&
+    AnyTrue[{"System`", "Typeset`", "FrontEnd`", "Developer`", "Internal`",
+             "MathLink`", "PackageScope`"},
+      StringStartsQ[name, #] &],
+      {"function", {"readonly", "defaultLibrary"}}
+    ,
+    (* Check paclet symbols using bare name.
+       Also catches workspace symbols accessed via a local cell context alias
+       (e.g. gpl`sortOrder where sortOrder is defined in TDBU`Utilities`GPL`) *)
     isPacletSymbol[bareSymbol],
       {"class", {"definition"}}
     ,
@@ -281,6 +383,41 @@ Module[{bareSymbol},
 ]
 
 
+classifyGlobalSymbolFast[name_String] :=
+Module[{bareSymbol},
+  bareSymbol = If[StringContainsQ[name, "`"],
+    Last[StringSplit[name, "`"]],
+    name
+  ];
+
+  Which[
+    isSystemConstant[bareSymbol],
+      {"constant", {"readonly", "defaultLibrary"}}
+    ,
+    isSystemSymbol[bareSymbol],
+      {"function", {"readonly", "defaultLibrary"}}
+    ,
+    StringContainsQ[name, "`"] &&
+    AnyTrue[{"System`", "Typeset`", "FrontEnd`", "Developer`", "Internal`",
+             "MathLink`", "PackageScope`"},
+      StringStartsQ[name, #] &],
+      {"function", {"readonly", "defaultLibrary"}}
+    ,
+    isPacletSymbol[bareSymbol],
+      {"class", {"definition"}}
+    ,
+    StringEndsQ[name, "`"],
+      {"type", {}}
+    ,
+    StringStartsQ[name, "$"] || StringStartsQ[bareSymbol, "$"],
+      {"variable", {}}
+    ,
+    True,
+      {"comment", {"error"}}
+  ]
+]
+
+
 semanticTokensURIMayOpenQ[uri_String] :=
   AnyTrue[
     Join[
@@ -304,8 +441,25 @@ Module[{cst, ast},
 
 semanticTokensEntryWaitingForReindexQ[entry_] :=
   AssociationQ[entry] &&
-  !semanticTokensEntryReadyQ[entry] &&
-  Lookup[entry, "ScheduledJobs", {}] =!= {}
+  (
+    (
+      TrueQ[Lookup[entry, "IndexUpdatePending", False]] &&
+      !semanticTokensEntryReadyQ[entry]
+    ) ||
+    (
+      !semanticTokensEntryReadyQ[entry] &&
+      Lookup[entry, "ScheduledJobs", {}] =!= {}
+    )
+  )
+
+
+semanticTokensQueuedDidCloseQ[uri_String] :=
+  AnyTrue[
+    Replace[$ContentQueue, Except[_List] -> {}],
+    AssociationQ[#] &&
+    Lookup[#, "method", None] === "textDocument/didCloseFencepost" &&
+    Lookup[Lookup[Lookup[#, "params", <||>], "textDocument", <||>], "uri", None] === uri &
+  ]
 
 
 expandContent[content:KeyValuePattern["method" -> "textDocument/semanticTokens/full"], pos_] :=
@@ -336,12 +490,6 @@ Module[{params, id, doc, uri, entry, res, supersededIDs, supersededFenceposts},
     Throw[supersededFenceposts]
   ];
 
-  If[semanticTokensEntryWaitingForReindexQ[entry],
-    log[0, "DBG-ST expand: WAITING FOR REINDEX id=", id, " uri=", uri];
-    log[1, "textDocument/semanticTokens/full: exit"];
-    Throw[supersededFenceposts]
-  ];
-
   If[Lookup[$CancelMap, id, False],
 
     $CancelMap[id] =.;
@@ -364,6 +512,20 @@ Module[{params, id, doc, uri, entry, res, supersededIDs, supersededFenceposts},
 
     log[0, "DBG-ST expand: STALE id=", id, " uri=", uri];
     Throw[Join[supersededFenceposts, {<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "stale" -> True |>}] ]
+  ];
+
+  If[semanticTokensEntryWaitingForReindexQ[entry],
+    log[0, "DBG-ST expand: BUILDING PARSE PIPELINE id=", id, " uri=", uri];
+    log[1, "textDocument/semanticTokens/full: exit"];
+    Throw[Join[
+      supersededFenceposts,
+      <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
+        "textDocument/concreteParse",
+        "textDocument/aggregateParse",
+        "textDocument/abstractParse",
+        "textDocument/semanticTokens/fullFencepost"
+      }
+    ]]
   ];
 
   res = Join[supersededFenceposts, {<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params |> }];
@@ -465,10 +627,7 @@ Module[{blocks, allTokens},
                 srcColActual - 1,    (* 0-based column *)
                 nodeSrc[[2, 2]] - nodeSrc[[1, 2]],
                 $SemanticTokenTypes[tokenType],
-                If[modifiers === {},
-                  0,
-                  BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers, 0]]
-                ]
+                modifierBits[modifiers]
               }
             ]
           ],
@@ -500,6 +659,44 @@ Module[{templateStrings},
 ]
 
 
+makeSemanticTokenClassifier[entry_Association, mode_String:"full"] :=
+Module[{userSymbolsSet, classificationCache = <||>, classifyGlobal},
+  userSymbolsSet = Association[Thread[
+    Replace[Lookup[entry, "UserSymbols", {}], Except[_List] -> {}] -> True
+  ]];
+
+  classifyGlobal = If[mode === "fast",
+    classifyGlobalSymbolFast,
+    classifyGlobalSymbol
+  ];
+
+  Function[{name},
+    Lookup[
+      classificationCache,
+      name,
+      classificationCache[name] = If[
+        !StringContainsQ[name, "`"] && KeyExistsQ[userSymbolsSet, name],
+        {"class", {"definition"}},
+        classifyGlobal[name]
+      ]
+    ]
+  ]
+]
+
+
+warmSemanticTokenClassifierCaches[] :=
+Module[{},
+  isSystemSymbol["Plot"];
+  isSystemConstant["Pi"];
+  isSystemOption["PlotRange"];
+  isExperimentalSymbol["Iconize"];
+  isObsoleteSymbol["DirectedInfinity"];
+  isUndocumentedSymbol["SequenceHold"];
+  isSessionSymbol["Print"];
+  isBadSymbol["SetDelayedDelayed"]
+]
+
+
 (*
 Compute and cache semantic tokens for uri synchronously.
 Reads entry from $OpenFilesMap; requires entry["CST"] and entry["AST"] to be present.
@@ -509,9 +706,9 @@ Used by workspace/semanticTokens/refresh to pre-compute tokens for files whose
 initial semanticTokens/full pipeline was cancelled before it completed.
 *)
 computeAndCacheSemanticTokens[uri_String] :=
-Module[{entry, cst, ast, scopingData, localTokens,
+Module[{entry, cst, ast, rawScopingData, scopingData, scopingTimedOut, scopingEligibleQ, localTokens,
   scopedSources, allSymbols, globalSymbolTokens, stringTemplateTokens,
-  transformed, line, char, oldLine, oldChar, semanticTokens},
+  transformed, line, char, oldLine, oldChar, semanticTokens, classifySymbol},
 
   entry = Lookup[$OpenFilesMap, uri, Null];
   If[!AssociationQ[entry], Return[False]];
@@ -524,10 +721,22 @@ Module[{entry, cst, ast, scopingData, localTokens,
   ];
 
   (* Compute ScopingData if not yet cached *)
-  scopingData = Lookup[entry, "ScopingData", Null];
-  If[scopingData === Null || FailureQ[scopingData],
-    scopingData = Join[ScopingData[ast], extractMathScopingData[ast]];
-    entry["ScopingData"] = scopingData;
+  rawScopingData = Lookup[entry, "ScopingData", Null];
+  scopingTimedOut = False;
+  scopingEligibleQ = semanticTokensScopingEligibleQ[entry];
+  If[!ListQ[rawScopingData],
+    If[scopingEligibleQ,
+      rawScopingData = safeScopingData[ast];
+      scopingTimedOut = TrueQ[$LastSemanticTokensScopingTimedOut],
+      rawScopingData = {}
+    ];
+    entry["ScopingData"] = rawScopingData;
+  ];
+  scopingData = normalizeScopingData[rawScopingData];
+
+  classifySymbol = makeSemanticTokenClassifier[
+    entry,
+    If[scopingTimedOut || !scopingEligibleQ, "fast", "full"]
   ];
 
   localTokens =
@@ -545,14 +754,14 @@ Module[{entry, cst, ast, scopingData, localTokens,
               "parameter"
           ]
         ],
-        BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers ~Join~ (
-            Replace[scope,
-              {"Module" | "DynamicModule" -> "Module",
-               "Block" | "Internal`InheritedBlock" -> "Block",
-               "With" -> "With",
-               _ :> Sequence @@ {}},
-              {1}]
-          ), 0]]}&[source - 1]
+        modifierBits[modifiers ~Join~ (
+          Replace[scope,
+            {"Module" | "DynamicModule" -> "Module",
+             "Block" | "Internal`InheritedBlock" -> "Block",
+             "With" -> "With",
+             _ :> Sequence @@ {}},
+            {1}]
+        )]}&[source - 1]
     ] @@@ scopingData;
 
   scopedSources = Association[
@@ -570,13 +779,12 @@ Module[{entry, cst, ast, scopingData, localTokens,
         {name, src} = sym;
         startPos = {src[[1, 1]], src[[1, 2]]};
         If[KeyExistsQ[scopedSources, startPos], Nothing,
-          classification = classifyGlobalSymbol[name];
+          classification = safeClassifySymbol[classifySymbol, name];
           tokenType = classification[[1]];
           modifiers = classification[[2]];
           {src[[1, 1]] - 1, src[[1, 2]] - 1, src[[2, 2]] - src[[1, 2]],
            $SemanticTokenTypes[tokenType],
-           If[modifiers === {}, 0,
-              BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers, 0]]]}
+           modifierBits[modifiers]}
         ]
       ],
       {sym, allSymbols}
@@ -597,6 +805,7 @@ Module[{entry, cst, ast, scopingData, localTokens,
 
   semanticTokens = transformed;
   entry["SemanticTokens"] = semanticTokens;
+  entry = KeyDrop[entry, "SemanticTokensIncomplete"];
   $OpenFilesMap[uri] = entry;
 
   log[0, "DBG-ST computeAndCacheSemanticTokens: COMPUTED tokens=", Length[semanticTokens], " uri=", uri];
@@ -604,11 +813,36 @@ Module[{entry, cst, ast, scopingData, localTokens,
 ]
 
 
+semanticTokenScopingFollowupQueuedQ[uri_String] :=
+  AnyTrue[
+    Join[
+      Replace[LSPServer`$PreExpandContentQueue, Except[_List] -> {}],
+      Replace[LSPServer`$ContentQueue, Except[_List] -> {}]
+    ],
+    AssociationQ[#] &&
+      Lookup[#, "method", None] === "textDocument/runScopingData" &&
+      Lookup[Lookup[Lookup[#, "params", <||>], "textDocument", <||>], "uri", None] === uri &
+  ]
+
+
+queueSemanticTokenScopingFollowup[uri_String] :=
+  If[!semanticTokenScopingFollowupQueuedQ[uri],
+    LSPServer`Private`appendContentsToContentQueue[{
+      <|
+        "method" -> "textDocument/runScopingData",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>,
+        "deferrable" -> True
+      |>
+    }]
+  ]
+
+
 handleContent[content:KeyValuePattern["method" -> "textDocument/semanticTokens/fullFencepost"]] :=
 Catch[
 Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbols,
   scopedSources, globalSymbolTokens, stringTemplateTokens, localTokens, transformed,
-  line, char, oldLine, oldChar},
+  line, char, oldLine, oldChar, needsScopingFollowupQ, scopingEligibleQ,
+  fastOnlyQ, classifySymbol},
 
   log[1, "textDocument/semanticTokens/fullFencepost: enter"];
 
@@ -658,8 +892,14 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
       log["stale"]
     ];
 
-    log[0, "DBG-ST fencepost: DIDCHANGE-STALE id=", id, " uri=", uri];
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+    If[semanticTokensQueuedDidCloseQ[uri],
+      log[0, "DBG-ST fencepost: DIDCLOSE-STALE id=", id, " uri=", uri];
+      clearPending[];
+      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+    ];
+
+    log[0, "DBG-ST fencepost: DIDCHANGE-STALE waiting for recovery id=", id, " uri=", uri];
+    Throw[{}]
   ];
 
   entry = Lookup[$OpenFilesMap, uri, Null];
@@ -688,23 +928,41 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
     Throw[{}]
   ];
 
-  If[LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri],
-    entry = Lookup[$OpenFilesMap, uri, Null];
-    semanticTokens = Lookup[entry, "SemanticTokens", Null];
-    If[semanticTokens =!= Null,
-      clearPending[];
-      log[0, "DBG-ST fencepost: COMPUTED FROM ENTRY id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
-      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
-    ]
-  ];
-
   scopingData = Lookup[entry, "ScopingData", Null];
   cst = Lookup[entry, "CST", Null];
+  scopingEligibleQ = semanticTokensScopingEligibleQ[entry];
+  needsScopingFollowupQ =
+    scopingEligibleQ &&
+    !ListQ[scopingData] &&
+    Lookup[entry, "AST", Null] =!= Null &&
+    !FailureQ[Lookup[entry, "AST", Null]];
+  fastOnlyQ = !scopingEligibleQ && !ListQ[scopingData];
+  If[ListQ[scopingData],
+    scopingData = normalizeScopingData[scopingData]
+  ];
+  classifySymbol = makeSemanticTokenClassifier[
+    entry,
+    If[needsScopingFollowupQ || fastOnlyQ, "fast", "full"]
+  ];
+
+  If[needsScopingFollowupQ,
+    queueSemanticTokenScopingFollowup[uri]
+  ,
+    If[scopingEligibleQ && LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri],
+      entry = Lookup[$OpenFilesMap, uri, Null];
+      semanticTokens = Lookup[entry, "SemanticTokens", Null];
+      If[semanticTokens =!= Null,
+        clearPending[];
+        log[0, "DBG-ST fencepost: COMPUTED FROM ENTRY id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
+        Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
+      ]
+    ]
+  ];
 
   (*
   If no scoping data, still try to provide global symbol highlighting
   *)
-  If[scopingData === Null || FailureQ[scopingData],
+  If[!ListQ[scopingData],
     scopingData = {}
   ];
 
@@ -732,18 +990,18 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
           ]
         ],
 
-        BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers ~Join~ (
-            Replace[scope,
-              {
-                "Module" | "DynamicModule" -> "Module",
-                "Block" | "Internal`InheritedBlock" -> "Block",
-                "With" -> "With",
-                _ :> Sequence @@ {}
-              }
-              ,
-              {1}
-            ]
-          ), 0]]}&[source - 1]
+        modifierBits[modifiers ~Join~ (
+          Replace[scope,
+            {
+              "Module" | "DynamicModule" -> "Module",
+              "Block" | "Internal`InheritedBlock" -> "Block",
+              "With" -> "With",
+              _ :> Sequence @@ {}
+            }
+            ,
+            {1}
+          ]
+        )]}&[source - 1]
     ] @@@ scopingData;
 
   (*
@@ -790,7 +1048,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
           (*
           Classify the symbol
           *)
-          classification = classifyGlobalSymbol[name];
+          classification = safeClassifySymbol[classifySymbol, name];
           tokenType = classification[[1]];
           modifiers = classification[[2]];
 
@@ -803,10 +1061,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
             src[[1, 2]] - 1,
             src[[2, 2]] - src[[1, 2]],
             $SemanticTokenTypes[tokenType],
-            If[modifiers === {},
-              0,
-              BitOr @@ BitShiftLeft[1, Lookup[$SemanticTokenModifiers, modifiers, 0]]
-            ]
+            modifierBits[modifiers]
           }
         ]
       ],
@@ -847,6 +1102,10 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   semanticTokens = transformed;
 
   entry["SemanticTokens"] = semanticTokens;
+  If[needsScopingFollowupQ,
+    entry["SemanticTokensIncomplete"] = True,
+    entry = KeyDrop[entry, "SemanticTokensIncomplete"]
+  ];
 
   $OpenFilesMap[uri] = entry;
 
@@ -945,7 +1204,7 @@ Module[{bag},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/runScopingData"]] :=
 Catch[
-Module[{params, doc, uri, entry, ast, scopingData},
+Module[{params, doc, uri, entry, ast, scopingData, scopingTimedOut},
 
   log[1, "textDocument/runScopingData: enter"];
 
@@ -970,9 +1229,25 @@ Module[{params, doc, uri, entry, ast, scopingData},
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
 
+  If[!semanticTokensScopingEligibleQ[entry],
+    entry["ScopingData"] = {};
+    entry = KeyDrop[entry, "SemanticTokensIncomplete"];
+    $OpenFilesMap[uri] = entry;
+    log[0, "DBG-ST runScopingData: skipped large file; keeping fast semantic tokens uri=", uri];
+    Throw[{}]
+  ];
+
   scopingData = Lookup[entry, "ScopingData", Null];
 
-  If[scopingData =!= Null,
+  If[ListQ[scopingData],
+    If[TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]],
+      warmSemanticTokenClassifierCaches[];
+      entry = KeyDrop[entry, {"SemanticTokens", "SemanticTokensIncomplete"}];
+      $OpenFilesMap[uri] = entry;
+      LSPServer`Private`queueSemanticTokensRefresh[
+        "DBG-ST runScopingData: cached scoping ready; queueing semantic-tokens refresh for " <> uri
+      ]
+    ];
     log[0, "DBG-ST runScopingData: ALREADY CACHED uri=", uri];
     Throw[{}]
   ];
@@ -987,16 +1262,28 @@ Module[{params, doc, uri, entry, ast, scopingData},
     log["before ScopingData"]
   ];
 
-  scopingData = ScopingData[ast];
-
-  (* Merge in math function variable scoping (Integrate, D, Solve, Limit, etc.) *)
-  scopingData = Join[scopingData, extractMathScopingData[ast]];
+  scopingData = safeScopingData[ast];
+  scopingTimedOut = TrueQ[$LastSemanticTokensScopingTimedOut];
 
   log[2, "after ScopingData"];
 
   entry["ScopingData"] = scopingData;
-
-  $OpenFilesMap[uri] = entry;
+  If[TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]],
+    If[scopingTimedOut,
+      entry = KeyDrop[entry, "SemanticTokensIncomplete"];
+      $OpenFilesMap[uri] = entry;
+      log[0, "DBG-ST runScopingData: timed out; keeping fast semantic tokens uri=", uri]
+    ,
+      warmSemanticTokenClassifierCaches[];
+      entry = KeyDrop[entry, {"SemanticTokens", "SemanticTokensIncomplete"}];
+      $OpenFilesMap[uri] = entry;
+      LSPServer`Private`queueSemanticTokensRefresh[
+        "DBG-ST runScopingData: computed scoping; queueing semantic-tokens refresh for " <> uri
+      ]
+    ]
+  ,
+    $OpenFilesMap[uri] = entry
+  ];
 
   log[0, "DBG-ST runScopingData: COMPUTED entries=", Length[scopingData], " uri=", uri];
   log[1, "textDocument/runScopingData: exit"];

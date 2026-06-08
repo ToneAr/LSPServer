@@ -12,7 +12,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "f[x] has multiple definition.\n\n**Definitions**\n\n```wolfram\nf[x_]\nf[x_String]\nf[x_String] /; x\nf[x_Number]\n```\n\n---\n**Doc Comments**\n\n**Parameters:** `_String`  \n**Returns:** `_String`\n\n**Returns:** `_String`\n\n**Parameters:** `_Number`"
+    value == "f[x] has multiple definition.\n\n**Definitions**\n\n```wolfram\nf[]\n```\n\n**Delayed Definitions**\n\n```wolfram\nf[x_]\nf[x_String]\nf[x_String] /; x\nf[x_Number]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`\n\n**Parameters:** `_String`  \n**Returns:** `_String`\n\n**Parameters:** `_Number`"
   ],
   True,
   TestID -> "IDE-Test-SetDelayed-Multiple-Definition"
@@ -24,7 +24,7 @@ VerificationTest[
   LSPServer`handleContent[
     <|"method" -> "textDocument/hoverFencepost",
       "id" -> 2,
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 10, "character" -> 2|>|>
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 11, "character" -> 2|>|>
     |>
   ]
   ,
@@ -32,7 +32,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 2,
       "result" -> <|"contents" -> <|
         "kind" -> "markdown",
-        "value" -> "**Definitions**\n\n```wolfram\np[q[x_]]\n```"
+        "value" -> "**Delayed Definitions**\n\n```wolfram\np[q[x_]]\n```"
         |>
       |>
     |>
@@ -46,7 +46,7 @@ VerificationTest[
   LSPServer`handleContent[
     <|"method" -> "textDocument/hoverFencepost",
       "id" -> 3,
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 12, "character" -> 0|>|>
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 13, "character" -> 0|>|>
     |>
   ]
   ,
@@ -62,7 +62,7 @@ VerificationTest[
   LSPServer`handleContent[
     <|"method" -> "textDocument/hoverFencepost",
       "id" -> 4,
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 16, "character" -> 0|>|>
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 17, "character" -> 0|>|>
     |>
   ]
   ,
@@ -70,7 +70,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 4,
       "result" -> <|"contents" ->
           <|"kind" -> "markdown",
-            "value" -> "**Definitions**\n\n```wolfram\nf2[g[x_]]\n```"
+            "value" -> "**Delayed Definitions**\n\n```wolfram\nf2[g[x_]]\n```"
           |>
       |>
     |>
@@ -84,7 +84,7 @@ VerificationTest[
   LSPServer`handleContent[
     <|"method" -> "textDocument/hoverFencepost",
       "id" -> 5,
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 18, "character" -> 1|>|>
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 19, "character" -> 1|>|>
     |>
   ]
   ,
@@ -101,11 +101,11 @@ VerificationTest[
     result = LSPServer`handleContent[
       <|"method" -> "textDocument/hoverFencepost",
         "id" -> 6,
-        "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 25, "character" -> 3|>|>
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>, "position" -> <|"line" -> 26, "character" -> 3|>|>
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "**Definitions**\n\n```wolfram\naddTwo[a_Integer, b_]\n```\n\n---\n**Doc Comments**\n\n**Parameters:** `_Integer`  \n**Returns:** `_Integer`"
+    value == "**Delayed Definitions**\n\n```wolfram\naddTwo[a_Integer, b_]\n```\n\n---\n**Doc Comments**\n\n**Parameters:** `_Integer`  \n**Returns:** `_Integer`"
   ],
   True,
   TestID -> "IDE-Test-SetDelayed-ConstrainedArgs"

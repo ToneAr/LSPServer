@@ -165,3 +165,32 @@ With[{s = "abc"}, s]
 
 (* Block closure return type: body is an Integer literal -> inferred _Integer *)
 blockReturn = Block[{}, 99]
+
+(* Sequence-return inference: ___[All] inspects first-level call arguments. *)
+(* Return: ___[All] *)
+seqAll[args___] := Sequence[args]
+
+seqAllHomogeneous = seqAll[1, 2, 3, 4]
+seqAllMixed = seqAll[1, 2, 3., 2 + I]
+seqAllEmpty = seqAll[]
+
+(* Sequence-return inference: __[All] uses BlankSequence for homogeneous/empty fallback. *)
+(* Return: __[All] *)
+seqAllRequired[args__] := Sequence[args]
+
+seqAllRequiredHomogeneous = seqAllRequired[1, 2, 3]
+
+(* Sequence-return inference: ___[1, All] inspects elements of the first argument. *)
+(* Return: ___[1, All] *)
+seqFromList[x_List] := Sequence @@ x
+
+seqFromListHomogeneous = seqFromList[{1, 2, 3}]
+
+(* Apply[f, expr] replaces expr's head with f before return inference. *)
+(* Return: _String *)
+applyTarget[x_Integer, y_Integer] := ToString[x + y]
+
+applyHeadFromList = Apply[applyTarget, {1, 2}]
+applyHeadFromExpression = Apply[applyTarget, wrapper[1, 2]]
+applyListHeadFromExpression = Apply[List, wrapper[1, 2, 3]]
+applySequenceHeadFromList = Apply[seqAll, {1, 2, 3., 2 + I}]

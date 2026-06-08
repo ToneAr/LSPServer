@@ -12,7 +12,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "**Definitions**\n\n```wolfram\nsubFn[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
+    value == "**Delayed Definitions**\n\n```wolfram\nsubFn[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
   ],
   True,
   TestID -> "IDE-Test-SubValues-Simple"
@@ -32,7 +32,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "SubValue function with usage.\n\n**Definitions**\n\n```wolfram\nsubFnUsage[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
+    value == "SubValue function with usage.\n\n**Delayed Definitions**\n\n```wolfram\nsubFnUsage[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
   ],
   True,
   TestID -> "IDE-Test-SubValues-Usage"
@@ -55,7 +55,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 3,
       "result" -> <|"contents" -> <|
         "kind" -> "markdown",
-        "value" -> "g is a function with UpValue.\n\n**Definitions**\n\n```wolfram\nf[g]\nf[g[x_]]\n```"
+        "value" -> "g is a function with UpValue.\n\n**Delayed Definitions**\n\n```wolfram\nf[g]\nf[g[x_]]\n```"
         |>
       |>
     |>
@@ -105,7 +105,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 5,
       "result" -> <|"contents" -> <|
         "kind" -> "markdown",
-        "value" -> "downValFn is a function with DownValue.\n\n**Definitions**\n\n```wolfram\ndownValFn[x_ /; x > -2]\ndownValFn[x_ /; x < 2]\n```"
+        "value" -> "downValFn is a function with DownValue.\n\n**Delayed Definitions**\n\n```wolfram\ndownValFn[x_ /; x > -2]\ndownValFn[x_ /; x < 2]\n```"
         |>
       |>
     |>

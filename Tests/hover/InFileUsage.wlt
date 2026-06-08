@@ -12,7 +12,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "mySin is just a sin function.\n\n**Definitions**\n\n```wolfram\nmySin[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_?NumericQ`"
+    value == "mySin is just a sin function.\n\n**Delayed Definitions**\n\n```wolfram\nmySin[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_?NumericQ`"
   ],
   True,
   TestID -> "IDE-Test-InFileUsage-Simple"
@@ -29,7 +29,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "myTan is Tan function.\n\n**Definitions**\n\n```wolfram\nmyTan[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_?NumericQ`"
+    value == "myTan is Tan function.\n\n**Delayed Definitions**\n\n```wolfram\nmyTan[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_?NumericQ`"
   ],
   True,
   TestID -> "IDE-Test-InFileUsage-Tab"
@@ -46,7 +46,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "Cos[**z**] gives the cosine of *z*. \n\n**Definitions**\n\n```wolfram\nmyCos[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_?NumericQ`"
+    value == "Cos[**z**] gives the cosine of *z*. \n\n**Delayed Definitions**\n\n```wolfram\nmyCos[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_?NumericQ`"
   ],
   True,
   TestID -> "IDE-Test-InFileUsage-LinearSyntax"
@@ -63,7 +63,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "Usage with SetDelay\n\n**Definitions**\n\n```wolfram\naa[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
+    value == "Usage with SetDelay\n\n**Delayed Definitions**\n\n```wolfram\naa[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
   ],
   True,
   TestID -> "IDE-Test-Usage-with-SetDelay"

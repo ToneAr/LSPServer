@@ -309,7 +309,7 @@ Module[{content, contents},
     ProcessScheduledJobs[];
 
     If[LSPServer`Private`contentQueueEmptyQ[],
-      Pause[0.01];
+      Pause[LSPServer`$IdleLoopPause];
       Continue[]
     ];
 

@@ -6,6 +6,7 @@ f[x_String]:=x <> "Test";
 f[x_String]:=x <> "Test";
 f[x_String]/;x :=x <> "Test-String";
 f[x_Number] := x;
+f[] = 42;
 
 (* UpSetDelayed *)
 p[q[x_]] ^:= pq[x]

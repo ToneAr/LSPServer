@@ -10,6 +10,7 @@ RunServerDiagnostic
 initializeLSPComm
 
 expandContent
+expandContents
 
 expandContentsAndAppendToContentQueue
 
@@ -18,6 +19,8 @@ readEvalWriteLoop
 
 handleContent
 handleContentAfterShutdown
+
+LoadAllFeatureModules
 
 ProcessScheduledJobs
 SourceFileFormat
@@ -33,18 +36,6 @@ exitGracefully
 exitSemiGracefully
 shutdownLSPComm
 
-
-(* Do not launch the diagnostics worker during Needs["LSPServer`"].
-   StartServer[] schedules it lazily after initialize so package load stays
-   below editor startup timeouts. *)
-
-
-LSPServer`distributeDiagnosticsWorkerDefinitions[] :=
-  Quiet[DistributeDefinitions[
-    LSPServer`buildWorkerSnapshot,
-    LSPServer`Diagnostics`Private`runWorkspaceDiagnosticsWorker,
-    LSPServer`Diagnostics`Private`runClosedFileDiagnosticsWorker
-  ]]
 
 $BracketMatcherUseDesignColors
 
@@ -84,27 +75,40 @@ $ImplicitTokensDelayAfterLastChange
 $WorkspaceRootPath
 
 $DiagnosticsKernel
-
 $DiagnosticsKernelBin
-
 $DiagnosticsTask
-
 $DiagnosticsTaskURI
-
 $DiagnosticsTaskKind
-
 $DiagnosticsTaskResult
-
 $DiagnosticsTaskStartTime
-
 $DiagnosticsKernelLaunchAfter
+$HoverTask
+$HoverTaskURI
+$HoverTaskID
+$HoverTaskResult
+$HoverTaskStartTime
 $IndexingWasActive
 $InternalRequestId
 $PendingSemanticTokenRequests
 $WorkspaceDiagnosticsSweepURIs
 $ClosedFileDiagnosticsNotifications
+$WorkspaceBootstrapAfter
 $QueueLastNonEmptyTime
 $PendingTokenRefresh
+$PendingTokenRefreshTime
+$WorkspaceIndexingQueued
+$WorkspaceIndexingInterval
+$WorkspaceIndexingLastRun
+$WorkspaceIndexingBatchSize
+$WorkspaceReferenceBatchSize
+$ExternalDependencyIndexingBatchSize
+$DependencyDiscoveryBatchSize
+$ExternalDependencyFileLimit
+$ClosedFileDiagnosticsIdleDelay
+$ClosedFileDiagnosticsInterval
+$ClosedFileDiagnosticsLastRun
+$ClosedFileDiagnosticsMaxTextLength
+$IdleLoopPause
 
 $startupMessagesText
 
@@ -123,6 +127,7 @@ The messages may cause unexplained hangs in clients
 
 So manually set $Messages to a tmp file and then handle the messages later
 *)
+$startupMessagesText = "";
 $startupMessagesFile = OpenWrite[]
 
 If[!FailureQ[$startupMessagesFile],
@@ -134,12 +139,6 @@ If[!FailureQ[$startupMessagesFile],
 
 
 
-Quiet[Needs["CodeFormatter`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
-Quiet[Needs["CodeInspector`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
-Quiet[Needs["CodeInspector`Format`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
-Quiet[Needs["CodeInspector`ImplicitTokens`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
-Quiet[Needs["CodeInspector`BracketMismatches`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
-Quiet[Needs["CodeInspector`Utils`"], {MessageName[CompileUtilities`Symbols`SystemSymbolQ, "shdw"]}]
 Needs["CodeParser`"]
 Needs["CodeParser`Utils`"]
 
@@ -165,7 +164,7 @@ Modules like Completion.wl, Diagnostics.wl, and Hover.wl use these data variable
 (* wl-disable *)
 WolframLanguageSyntax`Generate`$options :=
 	WolframLanguageSyntax`Generate`$options =
-	EntityClass["WolframLanguageSymbol", "OptionName"]["Name"]
+	Get[FileNameJoin[{location, "Resources", "Data", "Options.wl"}]]
 
 WolframLanguageSyntax`Generate`$experimentalSymbols =
 	Get[FileNameJoin[{location, "Resources", "Data", "ExperimentalSymbols.wl"}]]
@@ -183,7 +182,7 @@ WolframLanguageSyntax`Generate`$builtinFunctions :=
 	(* ] *)
 
 WolframLanguageSyntax`Generate`$obsoleteSymbols =
-	Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
+    Get[FileNameJoin[{location, "Resources", "Data", "ObsoleteSymbols.wl"}]]
 
 WolframLanguageSyntax`Generate`$sessionSymbols =
 	Get[FileNameJoin[{location, "Resources", "Data", "SessionSymbols.wl"}]]
@@ -222,31 +221,126 @@ Get[FileNameJoin[{location, "Kernel", "StdIO.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "Socket.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "ListenSocket.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "ServerDiagnostics.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "DocumentSymbol.wl"}]]
+Get[FileNameJoin[{location, "Kernel", "CST.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "PacletIndex.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "BracketMismatches.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "CodeAction.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "Color.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "Completion.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "Definitions.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "IgnorePatterns.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "Diagnostics.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "FoldingRange.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "Formatting.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "Hover.wl"}]]
 Get[FileNameJoin[{location, "Kernel", "TypeWL.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "ImplicitTokens.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "InlayHints.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "References.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "SelectionRange.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "SemanticTokens.wl"}]]
-Get[FileNameJoin[{location, "Kernel", "Workspace.wl"}]]
+
+$FeatureModuleFiles = <|
+  "Diagnostics" -> FileNameJoin[{location, "Kernel", "Diagnostics.wl"}],
+  "DocumentSymbol" -> FileNameJoin[{location, "Kernel", "DocumentSymbol.wl"}],
+  "BracketMismatches" -> FileNameJoin[{location, "Kernel", "BracketMismatches.wl"}],
+  "CodeAction" -> FileNameJoin[{location, "Kernel", "CodeAction.wl"}],
+  "Color" -> FileNameJoin[{location, "Kernel", "Color.wl"}],
+  "Completion" -> FileNameJoin[{location, "Kernel", "Completion.wl"}],
+  "Definitions" -> FileNameJoin[{location, "Kernel", "Definitions.wl"}],
+  "FoldingRange" -> FileNameJoin[{location, "Kernel", "FoldingRange.wl"}],
+  "Formatting" -> FileNameJoin[{location, "Kernel", "Formatting.wl"}],
+  "Hover" -> FileNameJoin[{location, "Kernel", "Hover.wl"}],
+  "ImplicitTokens" -> FileNameJoin[{location, "Kernel", "ImplicitTokens.wl"}],
+  "InlayHints" -> FileNameJoin[{location, "Kernel", "InlayHints.wl"}],
+  "References" -> FileNameJoin[{location, "Kernel", "References.wl"}],
+  "SelectionRange" -> FileNameJoin[{location, "Kernel", "SelectionRange.wl"}],
+  "SemanticTokens" -> FileNameJoin[{location, "Kernel", "SemanticTokens.wl"}],
+  "Workspace" -> FileNameJoin[{location, "Kernel", "Workspace.wl"}]
+|>;
+
+$FeatureModulesLoaded = <||>;
+
+$FeatureExpandMethods = <|
+  "textDocument/runDiagnostics" -> {"Diagnostics"},
+  "textDocument/documentSymbol" -> {"DocumentSymbol"},
+  "textDocument/runBracketMismatches" -> {"BracketMismatches"},
+  "textDocument/codeAction" -> {"CodeAction"},
+  "textDocument/documentColor" -> {"Color"},
+  "textDocument/completion" -> {"Completion"},
+  "textDocument/definition" -> {"Definitions"},
+  "textDocument/foldingRange" -> {"FoldingRange"},
+  "textDocument/hover" -> {"Hover"},
+  "textDocument/runImplicitTokens" -> {"ImplicitTokens"},
+  "textDocument/inlayHint" -> {"InlayHints"},
+  "textDocument/references" -> {"References"},
+  "textDocument/selectionRange" -> {"SelectionRange"},
+  "textDocument/semanticTokens/full" -> {"SemanticTokens"}
+|>;
+
+$FeatureHandleMethods = <|
+  "textDocument/runFastDiagnostics" -> {"Diagnostics"},
+  "textDocument/runClosedFileDiagnostics" -> {"Diagnostics"},
+  "textDocument/suppressedRegions" -> {"Diagnostics"},
+  "textDocument/parseIgnoreComments" -> {"Diagnostics"},
+  "textDocument/runConcreteDiagnostics" -> {"Diagnostics"},
+  "textDocument/runAggregateDiagnostics" -> {"Diagnostics"},
+  "textDocument/runAbstractDiagnostics" -> {"Diagnostics"},
+  "textDocument/runScopingDiagnostics" -> {"Diagnostics"},
+  "textDocument/runWorkspaceDiagnostics" -> {"Diagnostics"},
+  "textDocument/mergeWorkspaceLints" -> {"Diagnostics"},
+  "textDocument/clearDiagnostics" -> {"Diagnostics"},
+  "textDocument/publishDiagnostics" -> {"Diagnostics"},
+  "textDocument/publishClosedFileDiagnostics" -> {"Diagnostics"},
+  "textDocument/documentNodeList" -> {"DocumentSymbol"},
+  "textDocument/documentSymbolFencepost" -> {"DocumentSymbol"},
+  "textDocument/runBracketMismatchesFencepost" -> {"BracketMismatches"},
+  "textDocument/suggestBracketEdits" -> {"BracketMismatches"},
+  "textDocument/clearBracketMismatches" -> {"BracketMismatches"},
+  "textDocument/publishBracketMismatches" -> {"BracketMismatches"},
+  "textDocument/codeActionFencepost" -> {"CodeAction"},
+  "textDocument/documentColorFencepost" -> {"Color"},
+  "textDocument/colorPresentation" -> {"Color"},
+  "textDocument/completionFencepost" -> {"Completion"},
+  "completionItem/resolve" -> {"Completion"},
+  "textDocument/definitionFencepost" -> {"Definitions"},
+  "textDocument/foldingRangeFencepost" -> {"FoldingRange"},
+  "textDocument/formatting" -> {"Formatting"},
+  "textDocument/rangeFormatting" -> {"Formatting"},
+  "textDocument/hoverFencepost" -> {"Hover"},
+  "textDocument/runImplicitTokensFencepost" -> {"ImplicitTokens"},
+  "textDocument/clearImplicitTokens" -> {"ImplicitTokens"},
+  "textDocument/publishImplicitTokens" -> {"ImplicitTokens"},
+  "textDocument/inlayHintFencepost" -> {"InlayHints"},
+  "textDocument/referencesFencepost" -> {"References"},
+  "textDocument/selectionRangeFencepost" -> {"SelectionRange"},
+  "textDocument/semanticTokens/fullFencepost" -> {"SemanticTokens"},
+  "textDocument/runScopingData" -> {"SemanticTokens"},
+  "workspace/executeCommand" -> {"Workspace"},
+  "workspace/didChangeWatchedFiles" -> {"Workspace"},
+  "workspace/didChangeConfiguration" -> {"Workspace"},
+  "workspace/symbol" -> {"Workspace"},
+  "workspace/didChangeWorkspaceFolders" -> {"Workspace"}
+|>;
+
+loadFeatureModule[name_String] :=
+  If[!TrueQ[Lookup[$FeatureModulesLoaded, name, False]],
+    Get[$FeatureModuleFiles[name]];
+    $FeatureModulesLoaded[name] = True
+  ];
+
+loadFeatureModulesForMethod[method_String] :=
+  Scan[
+    loadFeatureModule,
+    Lookup[
+      $FeatureHandleMethods,
+      method,
+      Lookup[$FeatureExpandMethods, method, {}]
+    ]
+  ];
+
+LSPServer`LoadAllFeatureModules[] :=
+  Scan[loadFeatureModule, Keys[$FeatureModuleFiles]];
+
+expandContent[content : KeyValuePattern["method" -> method_String], pos_] /;
+    KeyExistsQ[$FeatureExpandMethods, method] &&
+    !TrueQ[Lookup[$FeatureModulesLoaded, First[$FeatureExpandMethods[method]], False]] :=
+  Module[{},
+    loadFeatureModulesForMethod[method];
+    expandContent[content, pos]
+  ];
 
 
 (*
 This uses func := func = def idiom and is fast
 *)
-loadAllFuncs[]
+LSPServer`Library`loadAllFuncs[]
 
 
 $DefaultConfidenceLevel = 0.50
@@ -342,6 +436,25 @@ $ErrorCodes = <|
 |>
 
 
+Clear[jsonRPCErrorResponse]
+jsonRPCErrorResponse[content_, codeName_String, message_String] :=
+Module[{id},
+  If[!AssociationQ[content] || !KeyExistsQ[content, "id"],
+    Return[{}]
+  ];
+
+  id = content["id"];
+  {<|
+    "jsonrpc" -> "2.0",
+    "id" -> id,
+    "error" -> <|
+      "code" -> Lookup[$ErrorCodes, codeName, $ErrorCodes["InternalError"]],
+      "message" -> message
+    |>
+  |>}
+]
+
+
 $TextDocumentSyncKind = <|
   "None" -> 0,
   "Full" -> 1,
@@ -358,6 +471,15 @@ $MessageType = <|
 
 
 $ContentQueue = {}
+$WorkspaceBootstrapAfter = None
+
+(*
+Thunks set by readEvalWriteLoop so that yield points inside long-running
+handlers can drain the transport queue and write responses without knowing
+the transport type.
+*)
+$TryQueueThunk = Function[Null]
+$WriteLSPResultThunk = Function[{contentsArg}, Null]
 
 
 $PriorityContentQueueMethods = {
@@ -367,42 +489,264 @@ $PriorityContentQueueMethods = {
   "textDocument/semanticTokens/fullFencepost"
 }
 
+(*
+Interactive methods that a user is waiting on — these should be served before
+background diagnostics items whenever possible. The takeFirstContentQueueItem
+function promotes any interactive item to the front of the queue.
+*)
+$InteractiveContentQueueMethods = {
+  "textDocument/hoverFencepost",
+  "textDocument/hover",
+  "textDocument/completion",
+  "textDocument/completionFencepost",
+  "textDocument/signatureHelp",
+  "textDocument/definition",
+  "textDocument/definitionFencepost",
+  "textDocument/references",
+  "textDocument/referencesFencepost",
+  "textDocument/documentHighlight",
+  "textDocument/documentSymbol",
+  "textDocument/codeAction",
+  "textDocument/rename",
+  "textDocument/prepareRename",
+  "textDocument/formatting",
+  "textDocument/rangeFormatting",
+  "textDocument/declaration",
+  "textDocument/typeDefinition",
+  "textDocument/implementation"
+}
+
+interactiveMethodQ[content_] :=
+  AssociationQ[content] &&
+  MemberQ[$InteractiveContentQueueMethods, Lookup[content, "method", None]]
+
+(*
+Diagnostic-tier methods that can be deferred when interactive requests are waiting.
+*)
+$DeferrableDiagnosticMethods = {
+  "textDocument/runFastDiagnostics",
+  "textDocument/runWorkspaceDiagnostics",
+  "textDocument/publishClosedFileDiagnostics",
+  "textDocument/runIndexUpdate",
+  "textDocument/runOpenIndexUpdate",
+  "workspace/processIndexing",
+  "workspace/semanticTokens/refresh"
+}
+
+deferrableDiagnosticQ[content_] :=
+  Module[{deferrable},
+    deferrable = Lookup[content, "deferrable", Automatic];
+    AssociationQ[content] &&
+    If[
+      deferrable === Automatic,
+      MemberQ[$DeferrableDiagnosticMethods, Lookup[content, "method", None]],
+      TrueQ[deferrable]
+    ]
+  ]
+
+
+contentURI[content_] :=
+  Lookup[
+    Lookup[Lookup[content, "params", <||>], "textDocument", <||>],
+    "uri",
+    None
+  ]
+contiguousRequestPipelineRange[contents_List, idx_Integer] :=
+  Module[{id, uri, start = idx, end = idx},
+    id = Lookup[contents[[idx]], "id", Missing["NotFound"]];
+    If[MissingQ[id],
+      Return[{idx}]
+    ];
+
+    uri = contentURI[contents[[idx]]];
+
+    While[
+      start > 1 &&
+      Lookup[contents[[start - 1]], "id", Missing["NotFound"]] === id &&
+      contentURI[contents[[start - 1]]] === uri,
+      start--
+    ];
+
+    While[
+      end < Length[contents] &&
+      Lookup[contents[[end + 1]], "id", Missing["NotFound"]] === id &&
+      contentURI[contents[[end + 1]]] === uri,
+      end++
+    ];
+
+    Range[start, end]
+  ]
+
+
+firstNonDeferrableQueueRange[contents_List] :=
+  Module[{idx},
+    If[contents === {} || !deferrableDiagnosticQ[First[contents]],
+      Return[{}]
+    ];
+
+    idx = SelectFirst[
+      Range[2, Length[contents]],
+      !deferrableDiagnosticQ[contents[[#]]] &,
+      0
+    ];
+
+    If[idx == 0,
+      {},
+      contiguousRequestPipelineRange[contents, idx]
+    ]
+  ]
+
+
+promoteFirstNonDeferrableQueueRange[] :=
+  Module[{range, block},
+    range = firstNonDeferrableQueueRange[$ContentQueue];
+    If[range === {} || First[range] <= 1,
+      Return[False]
+    ];
+
+    block = $ContentQueue[[range]];
+    $ContentQueue = Join[
+      block,
+      Delete[$ContentQueue, List /@ range]
+    ];
+
+    True
+  ]
+
 
 contentQueuePriorityMethodQ[content_] :=
-  AssociationQ[content] &&
-  (
-    TrueQ[Lookup[content, "priority", False]] ||
-    MemberQ[$PriorityContentQueueMethods, Lookup[content, "method", None]]
-  )
+  Module[{priority},
+    priority = Lookup[content, "priority", Automatic];
+    AssociationQ[content] &&
+    If[
+      priority === Automatic,
+      MemberQ[$PriorityContentQueueMethods, Lookup[content, "method", None]],
+      TrueQ[priority]
+    ]
+  ]
 
 
+(*
+  prioritizeContentQueueContents groups items so that each fencepost
+  is immediately followed by its dependent items (runDiagnostics,
+  publishDiagnostics, etc.) for the same URI, rather than pulling ALL
+  fenceposts to the front. This prevents diagnostic starvation when
+  many files are opened simultaneously.
+*)
 prioritizeContentQueueContents[contents_List] :=
-  Join[
-    Select[contents, contentQueuePriorityMethodQ],
-    Select[contents, !contentQueuePriorityMethodQ[#] &]
+  Module[{priorityGroups, nonGrouped, result, uri, method, i,
+          fencepostIndices, claimed, group},
+
+    (* Find indices of all priority (fencepost) items *)
+    fencepostIndices = Select[Range[Length[contents]],
+      contentQueuePriorityMethodQ[contents[[#]]] &];
+
+    (* For each fencepost, greedily claim the immediately following
+       non-priority items that share the same URI (these are the
+       runDiagnostics / publishDiagnostics that were expanded together
+       with the fencepost). *)
+    claimed = <||>;  (* index -> True for items claimed by a group *)
+    priorityGroups = {};
+
+    Do[
+      uri = Lookup[Lookup[Lookup[contents[[idx]], "params", <||>], "textDocument", <||>], "uri", None];
+      group = {idx};
+      i = idx + 1;
+      While[i <= Length[contents] && !KeyExistsQ[claimed, i] &&
+            !contentQueuePriorityMethodQ[contents[[i]]] &&
+            Lookup[Lookup[Lookup[contents[[i]], "params", <||>], "textDocument", <||>], "uri", None] === uri,
+        AppendTo[group, i];
+        i++
+      ];
+      Do[claimed[g] = True, {g, group}];
+      AppendTo[priorityGroups, group],
+      {idx, fencepostIndices}
+    ];
+
+    (* Collect remaining unclaimed non-priority items *)
+    nonGrouped = Select[Range[Length[contents]],
+      !KeyExistsQ[claimed, #] &];
+
+    (* Result: priority groups first (each fencepost + its diagnostics),
+       then any remaining items *)
+    result = Join[
+      Flatten[Map[contents[[#]] &, priorityGroups, {2}], 1],
+      contents[[nonGrouped]]
+    ];
+
+    result
   ]
 
 
 appendContentsToContentQueue[contents_List] :=
   If[contents =!= {},
-    (* Keep semantic-token and lifecycle fenceposts ahead of slower
-       diagnostics / code-action work so token responses are not starved
-       behind large backlogs after didOpen or didChange. *)
+    (* Keep fencepost items grouped with their per-URI diagnostic
+       pipeline items so diagnostics are not starved behind a wall
+       of fenceposts from other URIs. *)
     $ContentQueue = prioritizeContentQueueContents[Join[$ContentQueue, contents]]
   ]
 
 
-contentQueueEmptyQ[] := empty[$ContentQueue]
+contentQueueEmptyQ[] := $ContentQueue === {}
 
 
 takeFirstContentQueueItem[] :=
   If[contentQueueEmptyQ[],
     None,
-    Module[{content = First[$ContentQueue]},
+    Module[{content},
+      (* If the queue is blocked on deferrable diagnostics, promote the earliest
+         later non-deferrable pipeline as a unit so parse steps stay attached to
+         their fencepost/request response. *)
+      If[deferrableDiagnosticQ[First[$ContentQueue]],
+        promoteFirstNonDeferrableQueueRange[]
+      ];
+      content = First[$ContentQueue];
       $ContentQueue = Rest[$ContentQueue];
       content
     ]
   ]
+
+(*
+yieldToInteractiveRequests[currentURI]
+
+Called at yield points inside long-running handlers (e.g. runFastDiagnostics,
+runIndexUpdate) to cooperatively serve queued non-deferrable work without
+waiting for the heavy computation to finish.
+
+Flow:
+  1. Drain the transport queue (TryQueue) so newly-arrived messages enter $ContentQueue
+  2. While the queue has a non-deferrable item available ahead of the current
+     deferrable work, dequeue it, evaluate it, and write the response
+  3. Return True only when the caller's URI has become stale.
+*)
+yieldToInteractiveRequests[currentURI_:None] :=
+Module[{content, contents},
+  (* Drain transport → $ContentQueue *)
+  $TryQueueThunk[];
+
+  While[
+    !contentQueueEmptyQ[] &&
+    If[
+      deferrableDiagnosticQ[First[$ContentQueue]],
+      promoteFirstNonDeferrableQueueRange[],
+      True
+    ]
+    ,
+    content = First[$ContentQueue];
+    $ContentQueue = Rest[$ContentQueue];
+    log[1, "yield: serving queued work ", Lookup[content, "method", Missing["NotFound"]]];
+    contents = LSPEvaluate[content];
+    $WriteLSPResultThunk[contents];
+
+    If[StringQ[currentURI] && isStale[$ContentQueue, currentURI],
+      Return[True]
+    ];
+
+    $TryQueueThunk[]
+  ];
+
+  StringQ[currentURI] && isStale[$ContentQueue, currentURI]
+]
 
 (*
 An assoc of uri -> entry
@@ -434,7 +778,7 @@ Module[{contents, ignoredResponses},
     log[1, "Ignoring client responses without method: ids=",
       InputForm[Lookup[ignoredResponses, "id", Missing["NotFound"]]]]
   ];
-  contents = Select[contents, KeyExistsQ[#, "method"] &];
+  contents = Select[contents, AssociationQ[#] && KeyExistsQ[#, "method"] &];
 
   If[contents === {},
     Return[Null]
@@ -460,6 +804,8 @@ Module[{contents, ignoredResponses},
 
   contents = expandContents[contents];
 
+  contents = Select[contents, AssociationQ[#] && KeyExistsQ[#, "method"] &];
+
   appendContentsToContentQueue[contents];
 
   log[1, "$ContentQueue methods (after expansion & joining new content) :> ", InputForm[#["method"]& /@ $ContentQueue]];
@@ -482,6 +828,34 @@ $DiagnosticsDelayAfterLastChange = 0.4
 $ImplicitTokensDelayAfterLastChange = 3.0
 
 $BracketMatcherDelayAfterLastChange = 4.0
+
+(* Background work must not monopolize the LSP kernel while the editor is idle. *)
+$IdleLoopPause = 0.03
+$WorkspaceIndexingInterval = 0.25
+$WorkspaceIndexingLastRun = 0
+$WorkspaceIndexingBatchSize = 5
+$WorkspaceReferenceBatchSize = 10
+$ExternalDependencyIndexingBatchSize = 3
+$DependencyDiscoveryBatchSize = 2
+$ExternalDependencyFileLimit = 80
+$ClosedFileDiagnosticsIdleDelay = 1.0
+$ClosedFileDiagnosticsInterval = 2.0
+$ClosedFileDiagnosticsLastRun = 0
+$ClosedFileDiagnosticsMaxTextLength = 200000
+
+$DiagnosticsKernel = None
+$DiagnosticsKernelBin = None
+$DiagnosticsTask = None
+$DiagnosticsTaskURI = None
+$DiagnosticsTaskKind = None
+$DiagnosticsTaskResult = None
+$DiagnosticsTaskStartTime = None
+$DiagnosticsKernelLaunchAfter = None
+$HoverTask = None
+$HoverTaskURI = None
+$HoverTaskID = None
+$HoverTaskResult = None
+$HoverTaskStartTime = None
 
 
 
@@ -535,16 +909,20 @@ Module[{logFile, logFileStream,
   *)
   $Output = Streams["stderr"];
 
-  (* Background kernel for async workspace diagnostics. *)
-  (* Kernel is launched lazily ~5s after "initialized" to avoid blocking startup. *)
+  $WorkspaceBootstrapAfter      = None;
+  $DiagnosticsKernel            = None;
+  $DiagnosticsKernelBin         = None;
   $DiagnosticsTask              = None;
   $DiagnosticsTaskURI           = None;
   $DiagnosticsTaskKind          = None;
   $DiagnosticsTaskResult        = None;
   $DiagnosticsTaskStartTime     = None;
-  $DiagnosticsKernel            = None;
-  $DiagnosticsKernelBin         = None;
   $DiagnosticsKernelLaunchAfter = None;
+  $HoverTask                    = None;
+  $HoverTaskURI                 = None;
+  $HoverTaskID                  = None;
+  $HoverTaskResult              = None;
+  $HoverTaskStartTime           = None;
   $IndexingWasActive            = False;
   $InternalRequestId            = -1;
   $PendingSemanticTokenRequests = <||>;
@@ -552,6 +930,10 @@ Module[{logFile, logFileStream,
   $ClosedFileDiagnosticsNotifications = <||>;
   $QueueLastNonEmptyTime        = 0;
   $PendingTokenRefresh          = False;
+  $PendingTokenRefreshTime      = None;
+  $WorkspaceIndexingQueued      = False;
+  $WorkspaceIndexingLastRun     = 0;
+  $ClosedFileDiagnosticsLastRun = 0;
 
 
   If[(logDir != ""),
@@ -784,45 +1166,164 @@ Module[{contents, lastContents},
 
 
 launchDiagnosticsKernel[] :=
-Module[{addonsApps, kernelObjDir, kernelBin, startupWl, ok},
-  addonsApps   = FileNameJoin[{$InstallationDirectory, "AddOns", "Applications"}];
-  kernelObjDir = FileNameJoin[{$InstallationDirectory, "SystemFiles",
-                                "Components", "KernelObjects", "Kernel"}];
-  kernelBin    = FileNameJoin[{$InstallationDirectory, "SystemFiles", "Kernel",
-                                "Binaries", $SystemID, "WolframKernel"}];
-  startupWl    = FileNameJoin[{kernelObjDir, "KernelObjectsStartup.wl"}];
-  ok = DirectoryQ[addonsApps] && DirectoryQ[kernelObjDir] &&
-       FileExistsQ[kernelBin] && FileExistsQ[startupWl];
-  If[ok,
-    If[!MemberQ[$Path, kernelObjDir], PrependTo[$Path, kernelObjDir]];
-    If[!MemberQ[$Path, addonsApps],   PrependTo[$Path, addonsApps]];
-    Quiet[Get[startupWl]];
-    Quiet[Needs["Parallel`"]];
-    $DiagnosticsKernelBin = kernelBin;
-    $DiagnosticsKernel = Quiet[Check[
+Module[{kernel = $Failed, setupResult = $Failed},
+  If[$DiagnosticsKernel =!= None || $DiagnosticsTask =!= None,
+    cleanupDiagnosticsWorker[True]
+  ];
+
+  Quiet[Needs["Parallel`"]];
+  CheckAbort[
+    kernel = Quiet[Check[
       Module[{kernels = LaunchKernels[1]},
         If[ListQ[kernels] && Length[kernels] > 0, First[kernels], $Failed]
       ],
       $Failed
-    ]]
-    ,
-    $DiagnosticsKernelBin = $Failed;
-    $DiagnosticsKernel    = $Failed
-  ];
-  If[$DiagnosticsKernel =!= $Failed,
-    Quiet[ParallelEvaluate[
-      Needs["CodeParser`"];
-      Needs["CodeInspector`"];
-      Needs["CodeFormatter`"]
-      ,
-      $DiagnosticsKernel
     ]];
-    Quiet[DistributeDefinitions["LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
-      "LSPServer`PacletIndex`", "LSPServer`Diagnostics`", "LSPServer`Diagnostics`Private`",
-      $DiagnosticsKernel]]
+    If[kernel =!= $Failed,
+      setupResult = Quiet[Check[
+        ParallelEvaluate[
+          Needs["CodeParser`"];
+          Needs["CodeInspector`"];
+          Needs["CodeFormatter`"],
+          kernel
+        ],
+        $Failed
+      ]];
+      If[setupResult =!= $Failed,
+        setupResult = Quiet[Check[
+          DistributeDefinitions[
+            "LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
+            "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
+            "LSPServer`Diagnostics`Private`",
+            kernel
+          ],
+          $Failed
+        ]]
+      ];
+      If[setupResult =!= $Failed,
+        $DiagnosticsKernel = kernel;
+        $DiagnosticsKernelBin = $CommandLine[[1]]
+      ,
+        Quiet[AbortKernels[kernel]];
+        Quiet[CloseKernels[kernel]];
+        $DiagnosticsKernel = $Failed;
+        $DiagnosticsKernelBin = $Failed
+      ]
     ,
+      $DiagnosticsKernel = $Failed;
+      $DiagnosticsKernelBin = $Failed
+    ],
+    If[kernel =!= $Failed,
+      Quiet[AbortKernels[kernel]];
+      Quiet[CloseKernels[kernel]]
+    ];
+    $DiagnosticsKernel = $Failed;
+    $DiagnosticsKernelBin = $Failed
+  ];
+
+  If[$DiagnosticsKernel === $Failed,
     log[0, "WARNING: LaunchKernels failed - workspace diagnostics will run synchronously"]
   ]
+]
+
+
+clearDiagnosticsTaskState[requeueClosedFileSweep_:False] :=
+Module[{taskKind, taskURI},
+  taskKind = $DiagnosticsTaskKind;
+  taskURI = $DiagnosticsTaskURI;
+
+  If[TrueQ[requeueClosedFileSweep] && taskKind === "closed-file-sweep" && StringQ[taskURI],
+    requeueWorkspaceDiagnosticsSweepURI[taskURI]
+  ];
+
+  $DiagnosticsTask = None;
+  $DiagnosticsTaskURI = None;
+  $DiagnosticsTaskKind = None;
+  $DiagnosticsTaskResult = None;
+  $DiagnosticsTaskStartTime = None;
+  Null
+]
+
+
+clearHoverTaskState[] :=
+(
+  $HoverTask = None;
+  $HoverTaskURI = None;
+  $HoverTaskID = None;
+  $HoverTaskResult = None;
+  $HoverTaskStartTime = None;
+  Null
+)
+
+
+abortDiagnosticsKernel[] :=
+Module[{kernel = $DiagnosticsKernel},
+  If[kernel =!= $Failed && kernel =!= None,
+    Quiet[AbortKernels[kernel]]
+  ];
+  Null
+]
+
+
+closeDiagnosticsKernel[] :=
+Module[{kernel = $DiagnosticsKernel},
+  abortDiagnosticsKernel[];
+  If[kernel =!= $Failed && kernel =!= None,
+    Quiet[CloseKernels[kernel]]
+  ];
+  $DiagnosticsKernel = None;
+  $DiagnosticsKernelBin = None;
+  Null
+]
+
+
+cleanupDiagnosticsWorker[requeueClosedFileSweep_:False] :=
+(
+  clearDiagnosticsTaskState[requeueClosedFileSweep];
+  closeDiagnosticsKernel[]
+)
+
+
+cancelCurrentDiagnosticsTask[] :=
+Module[{},
+  If[$DiagnosticsTask =!= None,
+    clearDiagnosticsTaskState[True];
+    abortDiagnosticsKernel[]
+  ];
+  Null
+]
+
+
+handleContent[content:KeyValuePattern["method" -> "workspace/processIndexing"]] :=
+Module[{moreWork},
+
+
+  log[1, "workspace/processIndexing: enter"];
+
+
+  $WorkspaceIndexingQueued = False;
+
+  If[!workspaceIndexingPendingQ[],
+    finishWorkspaceIndexing[];
+    log[1, "workspace/processIndexing: exit"];
+    Return[{}]
+  ];
+
+  moreWork = LSPServer`PacletIndex`ProcessPendingIndexFiles[];
+  $WorkspaceIndexingLastRun = AbsoluteTime[];
+
+  If[moreWork,
+    $IndexingWasActive = True;
+    queueWorkspaceIndexing[
+      "workspace/processIndexing: re-queued remaining index work"
+    ]
+  ,
+    finishWorkspaceIndexing[]
+  ];
+
+  log[1, "workspace/processIndexing: exit"];
+
+  {}
 ]
 
 
@@ -874,26 +1375,89 @@ Module[{},
 ]
 
 
-cancelCurrentDiagnosticsTask[] :=
-Module[{},
-  If[$DiagnosticsTask =!= None,
-    If[$DiagnosticsTaskKind === "closed-file-sweep" && StringQ[$DiagnosticsTaskURI],
-      requeueWorkspaceDiagnosticsSweepURI[$DiagnosticsTaskURI]
-    ];
-
-    $DiagnosticsTask          = None;
-    $DiagnosticsTaskURI       = None;
-    $DiagnosticsTaskKind      = None;
-    $DiagnosticsTaskResult    = None;
-    $DiagnosticsTaskStartTime = None;
-
-    Quiet[If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-      AbortKernels[$DiagnosticsKernel]
-    ]]
+openFilesAffectedByDefinitions[symbols_List] :=
+Module[{referencingURIs},
+  If[symbols === {},
+    Return[{}]
   ];
 
-  Null
+  referencingURIs = DeleteDuplicates @ Flatten[
+    Function[{sym},
+      Lookup[
+        Replace[LSPServer`PacletIndex`GetSymbolReferences[sym], Except[_List] -> {}],
+        "uri",
+        {}
+      ]
+    ] /@ symbols
+  ];
+
+  Select[referencingURIs, KeyExistsQ[$OpenFilesMap, #] &]
 ]
+
+
+workspaceIndexingPendingQ[] :=
+  Length[LSPServer`PacletIndex`Private`$PendingExternalDepFiles] > 0 ||
+  Length[LSPServer`PacletIndex`$PendingIndexFiles] > 0 ||
+  Length[LSPServer`PacletIndex`$PendingReferenceFiles] > 0 ||
+  Length[LSPServer`PacletIndex`Private`$PendingDepDiscovery] > 0
+
+backgroundIntervalReadyQ[last_, interval_] :=
+Module[{now, nLast, nInterval},
+  now = AbsoluteTime[];
+  nLast = Replace[last, Except[_?NumberQ] -> 0];
+  nInterval = Replace[interval, Except[_?NumberQ] -> 0];
+  now - nLast >= nInterval
+]
+
+
+queueWorkspaceIndexing[reason_String:""] :=
+  If[
+    workspaceIndexingPendingQ[] &&
+    !TrueQ[$WorkspaceIndexingQueued] &&
+    backgroundIntervalReadyQ[$WorkspaceIndexingLastRun, $WorkspaceIndexingInterval],
+    If[reason =!= "",
+      log[1, reason]
+    ];
+    $WorkspaceIndexingQueued = True;
+    appendContentsToContentQueue[{
+      <|"method" -> "workspace/processIndexing", "deferrable" -> True|>
+    }]
+  ]
+
+
+finishWorkspaceIndexing[] :=
+  If[$IndexingWasActive,
+    $IndexingWasActive = False;
+    log[1, "Indexing complete. Invalidating WorkspaceLints for ", Length[$OpenFilesMap], " open files and re-dispatching workspace diagnostics."];
+    (* Invalidate cached WorkspaceLints for all open files so that
+       runWorkspaceDiagnostics actually re-runs instead of returning
+       the stale results computed before external deps were indexed. *)
+    Scan[
+      Function[{uri},
+        Module[{entry},
+          entry = Lookup[$OpenFilesMap, uri, Null];
+          If[AssociationQ[entry],
+            entry["WorkspaceLints"] = Null;
+            $OpenFilesMap[uri] = entry
+          ]
+        ]
+      ],
+      Keys[$OpenFilesMap]
+    ];
+    (* Re-dispatch workspace diagnostics for all open files now that
+       $PacletIndex is fully populated with external dep symbols. *)
+    Scan[
+      loadFeatureModule["Diagnostics"];
+      LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics,
+      Keys[$OpenFilesMap]
+    ];
+    queueWorkspaceDiagnosticsSweep[];
+    (* Tell VS Code to re-request semantic tokens for all open files so
+       newly-indexed dependency symbols are classified correctly. *)
+    queueSemanticTokensRefresh[
+      "DBG-ST: indexing done; queuing workspace/semanticTokens/refresh"
+    ]
+  ]
 
 
 ProcessScheduledJobs[] :=
@@ -907,44 +1471,80 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
     Throw[Null]
   ];
 
-  (*
-  Process a small batch of pending workspace index files on each idle iteration.
-  This lets InitializePacletIndex return immediately while indexing completes
-  in the background between requests.
-  Track when external dep indexing transitions from active → idle so that
-  diagnostics can be re-dispatched once the $PacletIndex is fully populated.
-  *)
-  Module[{hadIndexWork, moreWork},
-    hadIndexWork =
-      Length[$PendingExternalDepFiles] > 0 ||
-      Length[$PendingIndexFiles] > 0 ||
-      Length[$PendingReferenceFiles] > 0;
+  If[$DiagnosticsKernel === None &&
+     NumberQ[$DiagnosticsKernelLaunchAfter] &&
+     AbsoluteTime[] >= $DiagnosticsKernelLaunchAfter,
+    $DiagnosticsKernelLaunchAfter = None;
+    launchDiagnosticsKernel[]
+  ];
 
-    moreWork = ProcessPendingIndexFiles[];
+  If[$HoverTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Module[{taskResult, taskURI, taskID},
+      taskResult = Quiet[
+        TimeConstrained[WaitAll[$HoverTask], 0.001, Missing["StillRunning"]]
+      ];
+      If[taskResult =!= Missing["StillRunning"],
+        taskURI = $HoverTaskURI;
+        taskID = $HoverTaskID;
+        clearHoverTaskState[];
+        $HoverTaskResult = taskResult;
+        appendContentsToContentQueue[{
+          <|
+            "method" -> "textDocument/publishHoverResult",
+            "id" -> taskID,
+            "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>
+          |>
+        }]
+      ]
+    ]
+  ];
+
+  If[$DiagnosticsTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
+    Module[{taskResult, taskKind, taskURI},
+      taskResult = Quiet[
+        TimeConstrained[WaitAll[$DiagnosticsTask], 0.001, Missing["StillRunning"]]
+      ];
+      If[taskResult =!= Missing["StillRunning"],
+        taskKind = $DiagnosticsTaskKind;
+        taskURI = $DiagnosticsTaskURI;
+        $DiagnosticsTask = None;
+        $DiagnosticsTaskURI = None;
+        $DiagnosticsTaskKind = None;
+        $DiagnosticsTaskStartTime = None;
+
+        If[AssociationQ[taskResult] && Lookup[taskResult, "URI", None] === taskURI,
+          $DiagnosticsTaskResult = taskResult;
+          appendContentsToContentQueue[{
+            If[taskKind === "closed-file-sweep",
+              <|"method" -> "textDocument/publishClosedFileDiagnostics",
+                "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>,
+              <|"method" -> "textDocument/mergeWorkspaceLints",
+                "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>
+            ]
+          }],
+          $DiagnosticsTaskResult = None
+        ]
+      ]
+    ]
+  ];
+
+  (*
+  Queue workspace indexing as deferrable content so it can make progress while
+  the server is busy, but still yield to interactive requests.
+  *)
+  Module[{hadIndexWork},
+    hadIndexWork = workspaceIndexingPendingQ[];
 
     (* Mark indexing active as soon as we observe pending work, even if the
        current call drains the queues completely. Without this, single-batch
        dependency/workspace indexing never triggers the completion refresh. *)
     If[hadIndexWork,
-      $IndexingWasActive = True
-    ];
-
-    If[$IndexingWasActive && !moreWork,
-      $IndexingWasActive = False;
-      (* Re-dispatch workspace diagnostics for all open files now that
-         $PacletIndex is fully populated with external dep symbols.
-         dispatchWorkspaceDiagnostics handles both the parallel-kernel path
-         and the sync-fallback path, so no kernel-availability guard needed. *)
-      Scan[
-        LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics,
-        Keys[$OpenFilesMap]
-      ];
-      queueWorkspaceDiagnosticsSweep[];
-      (* Tell VS Code to re-request semantic tokens for all open files so
-         newly-indexed dependency symbols are classified correctly. *)
-      queueSemanticTokensRefresh[
-        "DBG-ST: indexing done; queuing workspace/semanticTokens/refresh"
+      $IndexingWasActive = True;
+      queueWorkspaceIndexing[
+        "ProcessScheduledJobs: queued cooperative workspace indexing"
       ]
+    ,
+      finishWorkspaceIndexing[]
     ]
   ];
 
@@ -955,92 +1555,13 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
     $QueueLastNonEmptyTime = AbsoluteTime[]
   ];
 
-  (*
-  Launch the background diagnostics kernel deferred from startup.
-  Only fire when the queue has been idle for at least 3 seconds — this ensures
-  VS Code has received all pending responses (tokens, diagnostics) before the
-  blocking LaunchKernels + DistributeDefinitions call stalls the event loop.
-  If the queue is busy or recently busy, defer by 2 seconds and retry.
-  *)
-  If[$DiagnosticsKernelLaunchAfter =!= None && AbsoluteTime[] >= $DiagnosticsKernelLaunchAfter,
-    If[Length[$ContentQueue] == 0 && AbsoluteTime[] - $QueueLastNonEmptyTime >= 3,
-      $DiagnosticsKernelLaunchAfter = None;
-      launchDiagnosticsKernel[]
-    ,
-      (* Queue busy or recently busy; defer by 2 seconds and try again *)
-      $DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 2
-    ]
-  ];
-
-  (*
-  Consume the background diagnostics task once the event loop is idle.
-
-  TimeConstrained[WaitAll[task], t, alt] is the correct non-blocking pattern:
-  - If the task is already done WaitAll returns immediately (microseconds) and
-    TimeConstrained passes the result through.
-  - If the task is still running WaitAll blocks; TimeConstrained fires an
-    Interrupt[] after t seconds and returns the sentinel alt.
-  Unlike WaitAll[{task}, t] (the timed WaitAll form), a TimeConstrained-
-  interrupted WaitAll does NOT invalidate the EvaluationObject, so we can
-  safely retry on the next event-loop iteration.
-
-  A 45-second timeout guard detects crashed worker kernels (which would cause
-  WaitAll to block permanently) and kills the kernel so the fallback sync path
-  can take over.
-  *)
-  If[$DiagnosticsTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    (* Timeout guard: kill the worker kernel if it has been stuck for too long.
-       NumberQ guards against an unbound or None $DiagnosticsTaskStartTime. *)
-    If[NumberQ[$DiagnosticsTaskStartTime] &&
-       AbsoluteTime[] - $DiagnosticsTaskStartTime > 45,
-      log[0, "WARNING: diagnostics task timed out after 45s; restarting worker kernel"];
-      cancelCurrentDiagnosticsTask[];
-      Quiet[CloseKernels[$DiagnosticsKernel]];
-      $DiagnosticsKernel    = $Failed;
-      $DiagnosticsTaskStartTime = None
-    ];
-    If[$DiagnosticsTask =!= None && Length[$ContentQueue] == 0,
-      Module[{taskResult, taskKind, taskURI},
-        (*
-        Poll with a 1 ms TimeConstrained.  If the worker is done the result
-        arrives in microseconds (well within 1 ms); if it is still running we
-        get Missing["StillRunning"] and retry on the next iteration (~100 ms).
-        *)
-        taskResult = Quiet[Check[
-          TimeConstrained[WaitAll[$DiagnosticsTask], 0.001, Missing["StillRunning"]],
-          $Failed
-        ]];
-        If[!MatchQ[taskResult, _Missing],
-          (* Task completed (with a result) or failed ($Failed) *)
-          taskKind = $DiagnosticsTaskKind;
-          taskURI = $DiagnosticsTaskURI;
-          $DiagnosticsTask          = None;
-          $DiagnosticsTaskURI       = None;
-          $DiagnosticsTaskKind      = None;
-          $DiagnosticsTaskStartTime = None;
-          If[AssociationQ[taskResult] &&
-             Lookup[taskResult, "URI", None] === taskURI,
-            $DiagnosticsTaskResult = taskResult;
-            Switch[taskKind,
-              "open-file",
-                AppendTo[$ContentQueue,
-                  <|"method" -> "textDocument/mergeWorkspaceLints",
-                    "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>]
-              ,
-              "closed-file-sweep",
-                AppendTo[$ContentQueue,
-                  <|"method" -> "textDocument/publishClosedFileDiagnostics",
-                    "params" -> <|"textDocument" -> <|"uri" -> taskURI|>|>|>]
-              ,
-              _,
-                $DiagnosticsTaskResult = None
-            ]
-          ]
-        ]
-        (* If Missing["StillRunning"]: task still in flight — leave $DiagnosticsTask
-           intact and retry on the next event-loop iteration. *)
-      ]
-    ]
+  If[
+    $WorkspaceBootstrapAfter =!= None &&
+    AbsoluteTime[] >= $WorkspaceBootstrapAfter &&
+    Length[$ContentQueue] == 0 &&
+    AbsoluteTime[] - $QueueLastNonEmptyTime >= 1,
+    $WorkspaceBootstrapAfter = None;
+    appendContentsToContentQueue[{<|"method" -> "workspace/bootstrapWorkspaceIndex", "deferrable" -> True|>}]
   ];
 
   (*
@@ -1051,11 +1572,11 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
   *)
   Module[{canStartSweep},
     canStartSweep =
-      $DiagnosticsTask === None &&
       ListQ[$WorkspaceDiagnosticsSweepURIs] &&
       Length[$WorkspaceDiagnosticsSweepURIs] > 0 &&
       Length[$ContentQueue] == 0 &&
-      AbsoluteTime[] - $QueueLastNonEmptyTime >= 1;
+      backgroundIntervalReadyQ[$QueueLastNonEmptyTime, $ClosedFileDiagnosticsIdleDelay] &&
+      backgroundIntervalReadyQ[$ClosedFileDiagnosticsLastRun, $ClosedFileDiagnosticsInterval];
 
     If[canStartSweep,
       Module[{nextPos, nextURI},
@@ -1067,10 +1588,26 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
         If[IntegerQ[nextPos],
           nextURI = $WorkspaceDiagnosticsSweepURIs[[nextPos]];
           $WorkspaceDiagnosticsSweepURIs = Delete[$WorkspaceDiagnosticsSweepURIs, nextPos];
+          $ClosedFileDiagnosticsLastRun = AbsoluteTime[];
+          loadFeatureModule["Diagnostics"];
           LSPServer`Diagnostics`Private`dispatchClosedFileDiagnostics[nextURI]
         ]
       ]
     ]
+  ];
+
+  (*
+  If the client never acknowledged the workspace/semanticTokens/refresh request
+  (no response received, or the response arrived with an unexpected id), the
+  $PendingTokenRefresh flag stays True forever and blocks all future refreshes.
+  Reset it after a 10-second timeout so the server can recover automatically.
+  *)
+  If[TrueQ[$PendingTokenRefresh] &&
+     NumberQ[$PendingTokenRefreshTime] &&
+     AbsoluteTime[] - $PendingTokenRefreshTime > 10,
+    log[0, "DBG-ST: workspace/semanticTokens/refresh ack not received within 10s; resetting $PendingTokenRefresh"];
+    $PendingTokenRefresh = False;
+    $PendingTokenRefreshTime = None
   ];
 
   openFilesMapCopy = $OpenFilesMap;
@@ -1100,7 +1637,7 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
         ,
         {j, 1, Length[jobs]}
       ];
-      If[!empty[toRemoveIndices],
+      If[toRemoveIndices =!= {},
         jobs = Delete[jobs, toRemoveIndices];
         entryCopy = entry;
         entryCopy["ScheduledJobs"] = jobs;
@@ -1111,7 +1648,7 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
     openFilesMapCopy
   ];
 
-  If[!empty[contents],
+  If[contents =!= {},
 
     contents = expandContents[contents];
 
@@ -1127,7 +1664,7 @@ returns: a list of JSON RPC assocs
 *)
 LSPEvaluate[content_(*no Association here, allow everything*)] :=
 Catch[
-Module[{contents},
+Module[{contents, methodName},
 
   (*
   (*
@@ -1191,7 +1728,12 @@ Module[{contents},
     log[0, "Internal assert 4 failed: list of Associations: ", contents];
     log[0, "\n\n"];
 
-    exitHard[]
+    methodName = If[AssociationQ[content], Lookup[content, "method", "message"], "message"];
+    contents = jsonRPCErrorResponse[
+      content,
+      "InternalError",
+      "Internal server error while handling " <> ToString[methodName]
+    ]
   ];
 
   contents
@@ -1199,9 +1741,15 @@ Module[{contents},
 
 
 
+(*
+  runDiagnostics expands to runFastDiagnostics which already publishes
+  partial diagnostics.  A separate publishDiagnostics was re-reading the
+  entry before workspace lints arrived, overwriting real results with an
+  empty array.  Removed the redundant publishDiagnostics here;
+  the workspace-diagnostics slow tier publishes a final update itself
+  once it completes.
+*)
 $didOpenMethods = {
-  "textDocument/runDiagnostics",
-  "textDocument/publishDiagnostics"
 }
 
 
@@ -1213,17 +1761,11 @@ $didCloseMethods = {
 $didSaveMethods = {}
 
 
-$didChangeMethods = {}
-
-$didChangeScheduledJobs = {
-  Function[{entry}, If[Now - entry["LastChange"] > Quantity[$DiagnosticsDelayAfterLastChange, "Seconds"],
-    {{
-      "textDocument/runDiagnostics",
-      "textDocument/publishDiagnostics"
-    }, True},
-    {{}, False}]
-  ]
+$didChangeMethods = {
+  "textDocument/runDiagnostics"
 }
+
+$didChangeScheduledJobs = {}
 
 
 RegisterDidOpenMethods[meths_] := ($didOpenMethods = Join[$didOpenMethods, meths])
@@ -1254,7 +1796,8 @@ handleContent[content:KeyValuePattern["method" -> "initialize"]] :=
 Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSupport, codeActionKind, valueSet,
   codeActionProviderValue, initializationOptions, implicitTokens,
   bracketMatcher, debugBracketMatcher, clientName, semanticTokensProviderValue, inlayHintProviderValue,
-  semanticTokens, contents, documentSymbol, hierarchicalDocumentSymbolSupport},
+  semanticTokens, contents, documentSymbol, hierarchicalDocumentSymbolSupport,
+  performanceOptions, setPositiveNumberOption, setPositiveIntegerOption},
 
   log[1, "initialize: Enter"];
 
@@ -1305,6 +1848,36 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
       ];
       If[KeyExistsQ[initializationOptions, "inlayHints"],
         $InlayHints = TrueQ[initializationOptions["inlayHints"]]
+      ];
+      If[KeyExistsQ[initializationOptions, "performance"] &&
+          AssociationQ[initializationOptions["performance"]],
+        performanceOptions = initializationOptions["performance"];
+        setPositiveNumberOption = Function[{key, sym},
+          If[KeyExistsQ[performanceOptions, key] &&
+              NumberQ[performanceOptions[key]] &&
+              performanceOptions[key] >= 0,
+            sym = performanceOptions[key]
+          ],
+          HoldRest
+        ];
+        setPositiveIntegerOption = Function[{key, sym},
+          If[KeyExistsQ[performanceOptions, key] &&
+              IntegerQ[performanceOptions[key]] &&
+              performanceOptions[key] > 0,
+            sym = performanceOptions[key]
+          ],
+          HoldRest
+        ];
+        setPositiveNumberOption["idleLoopPause", $IdleLoopPause];
+        setPositiveNumberOption["workspaceIndexingInterval", $WorkspaceIndexingInterval];
+        setPositiveIntegerOption["workspaceIndexingBatchSize", $WorkspaceIndexingBatchSize];
+        setPositiveIntegerOption["workspaceReferenceBatchSize", $WorkspaceReferenceBatchSize];
+        setPositiveIntegerOption["externalDependencyIndexingBatchSize", $ExternalDependencyIndexingBatchSize];
+        setPositiveIntegerOption["dependencyDiscoveryBatchSize", $DependencyDiscoveryBatchSize];
+        setPositiveIntegerOption["externalDependencyFileLimit", $ExternalDependencyFileLimit];
+        setPositiveNumberOption["closedFileDiagnosticsIdleDelay", $ClosedFileDiagnosticsIdleDelay];
+        setPositiveNumberOption["closedFileDiagnosticsInterval", $ClosedFileDiagnosticsInterval];
+        setPositiveIntegerOption["closedFileDiagnosticsMaxTextLength", $ClosedFileDiagnosticsMaxTextLength]
       ];
     ];
 
@@ -1496,10 +2069,11 @@ Module[{id, params, capabilities, textDocument, codeAction, codeActionLiteralSup
 
   If[$SemanticTokens,
     If[KeyExistsQ[textDocument, "semanticTokens"],
+      loadFeatureModule["SemanticTokens"];
       semanticTokensProviderValue = <|
         "legend" -> <|
-          "tokenTypes" -> Keys[$SemanticTokenTypes],
-          "tokenModifiers" -> Keys[$SemanticTokenModifiers]
+          "tokenTypes" -> Keys[LSPServer`SemanticTokens`$SemanticTokenTypes],
+          "tokenModifiers" -> Keys[LSPServer`SemanticTokens`$SemanticTokenModifiers]
         |>,
         "range" -> False,
         "full" -> <| "delta" -> False |>
@@ -1609,24 +2183,30 @@ Module[{warningMessages},
     ML4Code`SuggestBracketEdits["f["];
   ];
 
+  If[$SemanticTokens,
+    loadFeatureModule["SemanticTokens"];
+    (* Warm semantic-token symbol-category caches so the first highlight request
+       does not pay the lazy initialization cost. *)
+    LSPServer`SemanticTokens`Private`isSystemSymbol["Plot"];
+    LSPServer`SemanticTokens`Private`isSystemConstant["Pi"];
+    LSPServer`SemanticTokens`Private`isSystemOption["PlotRange"];
+    LSPServer`SemanticTokens`Private`isExperimentalSymbol["Iconize"];
+    LSPServer`SemanticTokens`Private`isObsoleteSymbol["DirectedInfinity"];
+    LSPServer`SemanticTokens`Private`isUndocumentedSymbol["SequenceHold"];
+    LSPServer`SemanticTokens`Private`isSessionSymbol["Print"];
+    LSPServer`SemanticTokens`Private`isBadSymbol["SetDelayedDelayed"]
+  ];
+
   (*
   Initialize paclet index if workspace root is set
   *)
   If[StringQ[$WorkspaceRootPath],
-    If[$Debug2,
-      log["initializing paclet index for: ", $WorkspaceRootPath]
-    ];
-    InitializePacletIndex[$WorkspaceRootPath];
-
-    (*
-    Load project-level ignore configuration (.wllintrc)
-    *)
-    If[$Debug2,
-      log["loading project ignore config"]
-    ];
-    LoadProjectIgnoreConfig[$WorkspaceRootPath];
-    queueWorkspaceDiagnosticsSweep[];
-    appendContentsToContentQueue[{<|"method" -> "workspace/bootstrapClosedFileDiagnostics"|>}]
+    (* Keep workspace bootstrap off the foreground queue until the loop has been
+       idle briefly so startup didOpen and semantic-token requests land first. *)
+    $WorkspaceBootstrapAfter = AbsoluteTime[] + 1
+  ];
+  If[$DiagnosticsKernel === None && $DiagnosticsKernelLaunchAfter === None,
+    $DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 5
   ];
 
   warningMessages = ServerDiagnosticWarningMessages[];
@@ -1643,10 +2223,6 @@ Module[{warningMessages},
       |>
   |>& /@ warningMessages;
 
-  (* Schedule background kernel launch for 5 seconds from now.
-     Deferring avoids blocking during VS Code's critical startup window. *)
-  $DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 5;
-
   log[1, "initialized: Exit"];
 
   res
@@ -1660,13 +2236,9 @@ Module[{nextPos, nextURI},
   log[1, "workspace/bootstrapClosedFileDiagnostics: Enter"];
 
 
-  If[$DiagnosticsTask =!= None || !ListQ[$WorkspaceDiagnosticsSweepURIs] || $WorkspaceDiagnosticsSweepURIs === {},
+  If[!ListQ[$WorkspaceDiagnosticsSweepURIs] || $WorkspaceDiagnosticsSweepURIs === {},
     log[1, "workspace/bootstrapClosedFileDiagnostics: Exit"];
     Return[{}]
-  ];
-
-  If[$DiagnosticsKernel === None || $DiagnosticsKernel === $Failed,
-    log[1, "workspace/bootstrapClosedFileDiagnostics: diagnostics kernel not ready; using synchronous fallback"]
   ];
 
   nextPos = SelectFirst[
@@ -1678,10 +2250,43 @@ Module[{nextPos, nextURI},
   If[IntegerQ[nextPos],
     nextURI = $WorkspaceDiagnosticsSweepURIs[[nextPos]];
     $WorkspaceDiagnosticsSweepURIs = Delete[$WorkspaceDiagnosticsSweepURIs, nextPos];
+    loadFeatureModule["Diagnostics"];
     LSPServer`Diagnostics`Private`dispatchClosedFileDiagnostics[nextURI]
   ];
 
   log[1, "workspace/bootstrapClosedFileDiagnostics: Exit"];
+
+  {}
+]
+
+
+handleContent[content:KeyValuePattern["method" -> "workspace/bootstrapWorkspaceIndex"]] :=
+Module[{},
+
+
+  log[1, "workspace/bootstrapWorkspaceIndex: Enter"];
+
+
+  If[!StringQ[$WorkspaceRootPath],
+    log[1, "workspace/bootstrapWorkspaceIndex: Exit"];
+    Return[{}]
+  ];
+
+  If[$Debug2,
+    log["initializing paclet index for: ", $WorkspaceRootPath]
+  ];
+  InitializePacletIndex[$WorkspaceRootPath];
+
+  (*
+  Load project-level ignore configuration (.wllintrc)
+  *)
+  If[$Debug2,
+    log["loading project ignore config"]
+  ];
+  LoadProjectIgnoreConfig[$WorkspaceRootPath];
+  queueWorkspaceDiagnosticsSweep[];
+
+  log[1, "workspace/bootstrapWorkspaceIndex: Exit"];
 
   {}
 ]
@@ -1707,6 +2312,11 @@ Module[{id},
 
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
   ];
+
+  $WorkspaceBootstrapAfter = None;
+  $DiagnosticsKernelLaunchAfter = None;
+  clearHoverTaskState[];
+  cleanupDiagnosticsWorker[False];
 
   $OpenFilesMap =.;
 
@@ -1799,13 +2409,36 @@ Module[{id},
 ]
 
 
+handleContent[content : KeyValuePattern["method" -> method_String]] /;
+    KeyExistsQ[$FeatureHandleMethods, method] &&
+    !TrueQ[Lookup[$FeatureModulesLoaded, First[$FeatureHandleMethods[method]], False]] :=
+  Module[{},
+    loadFeatureModulesForMethod[method];
+    handleContent[content]
+  ]
+
+
+handleContent[content:KeyValuePattern["method" -> method_String]] :=
+Module[{},
+  log[0, "Unknown LSP method: ", method];
+  jsonRPCErrorResponse[content, "MethodNotFound", "Method Not Found"]
+]
+
+
 (*
 Handle responses to server-initiated requests (e.g. workspace/semanticTokens/refresh).
 These have no "method" key — just "id" and "result" (or "error").
 Without this handler, LSPEvaluate would see an unevaluated handleContent[...] and call exitHard[].
 *)
 handleContent[content_?AssociationQ] /; !KeyExistsQ[content, "method"] :=
-{}
+Module[{id},
+  id = Lookup[content, "id", None];
+  If[IntegerQ[id] && id < 0,
+    $PendingTokenRefresh = False;
+    $PendingTokenRefreshTime = None
+  ];
+  {}
+]
 
 
 rememberPendingSemanticTokenRequest[uri_String, id_Integer] :=
@@ -1933,7 +2566,9 @@ Module[{idsToRecover},
     <|
       "method" -> "textDocument/semanticTokens/fullFencepost",
       "id" -> #,
-      "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>|>,
+      "priority" -> False,
+      "deferrable" -> True
     |>& /@ idsToRecover
   ];
 
@@ -1942,62 +2577,52 @@ Module[{idsToRecover},
 
 
 semanticTokensRefreshQueuedQ[] :=
-  AnyTrue[$ContentQueue,
+  AnyTrue[
+    Replace[$ContentQueue, Except[_List] -> {}],
     AssociationQ[#] && Lookup[#, "method", None] === "workspace/semanticTokens/refresh" &
   ]
 
 
 queueSemanticTokensRefresh[reason_String:""] :=
-  If[$SemanticTokens && !semanticTokensRefreshQueuedQ[],
+  If[$SemanticTokens && !TrueQ[$PendingTokenRefresh] && !semanticTokensRefreshQueuedQ[],
     If[reason =!= "",
       log[0, reason]
     ];
+    (* Set the flag immediately so subsequent calls within the same event-loop
+       tick don't enqueue a second refresh.  The flag stays True until the
+       client acknowledges the request (or the 10-second timeout fires). *)
+    $PendingTokenRefresh = True;
+    $PendingTokenRefreshTime = AbsoluteTime[];
     AppendTo[$ContentQueue, <|"method" -> "workspace/semanticTokens/refresh"|>]
   ]
 
 
 (*
 Send workspace/semanticTokens/refresh to tell VS Code to re-fetch tokens for all
-open files. For URIs that do not already have a pending semanticTokens/full
-request id, clear cached token arrays so the later client re-fetch recomputes
-classification instead of replaying stale results from before indexing or
-didOpen finished. If a semanticTokens/full request is already pending for a
-URI, recompute and answer that request inline instead of just invalidating the
-cache and leaving the in-flight request waiting for a later re-request.
+open files.
+
+This handler must stay cheap. It should only invalidate cached tokens and queue
+pending semantic-token fenceposts; expensive token computation happens later in
+the normal semanticTokens/fullFencepost path or when the client re-requests.
 Uses a negative server-generated id to avoid colliding with client request ids.
 *)
 handleContent[content:KeyValuePattern["method" -> "workspace/semanticTokens/refresh"]] :=
-Module[{id, invalidated = 0, precomputed = 0, recovered = 0, responses = {}},
+Module[{id, invalidated = 0, recovered = 0},
   Scan[
     Function[{uri},
-      Module[{entry = Lookup[$OpenFilesMap, uri, Null], idsToRecover, recoveredResponses = {}},
+      Module[{entry = Lookup[$OpenFilesMap, uri, Null], recoveredCount = 0},
         If[AssociationQ[entry],
-          idsToRecover = pendingSemanticTokenFencepostIDsToRecover[uri];
+          If[KeyExistsQ[entry, "SemanticTokens"],
+            (* Clear cached tokens so VS Code fetches fresh ones. *)
+            $OpenFilesMap[uri] = KeyDrop[entry, "SemanticTokens"];
+            invalidated += 1
+          ];
 
-          If[idsToRecover =!= {},
-            (* If VS Code already has an in-flight semanticTokens/full request
-               for this URI, answer it now with fresh tokens rather than only
-               invalidating the cache and waiting for a later re-request. *)
-            If[KeyExistsQ[entry, "SemanticTokens"],
-              invalidated += 1
-            ];
-
-            If[LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri],
-              precomputed += 1
-            ];
-
-            recoveredResponses = pendingSemanticTokenFencepostResponses[uri, idsToRecover];
-            If[recoveredResponses =!= {},
-              recovered += Length[idsToRecover];
-              responses = Join[responses, recoveredResponses]
-            ]
-          ,
-            If[KeyExistsQ[entry, "SemanticTokens"],
-              (* Clear cached tokens so VS Code fetches fresh ones. *)
-              $OpenFilesMap[uri] = KeyDrop[entry, "SemanticTokens"];
-              invalidated += 1
-            ]
-          ]
+          recoveredCount = queuePendingSemanticTokenFenceposts[
+            uri,
+            "DBG-ST: refresh queued pending semantic-token fenceposts"
+          ];
+          recovered += recoveredCount
         ]
       ]
     ],
@@ -2006,13 +2631,12 @@ Module[{id, invalidated = 0, precomputed = 0, recovered = 0, responses = {}},
 
   $InternalRequestId -= 1;
   id = $InternalRequestId;
-    log[0, "DBG-ST: sending workspace/semanticTokens/refresh id=", id,
-      " invalidated=", invalidated, " precomputed=", precomputed,
-      " recovered=", recovered];
-  Join[
-    {<| "jsonrpc" -> "2.0", "id" -> id, "method" -> "workspace/semanticTokens/refresh" |>},
-    responses
-  ]
+  $PendingTokenRefresh = True;
+  $PendingTokenRefreshTime = AbsoluteTime[];
+  log[0, "DBG-ST: sending workspace/semanticTokens/refresh id=", id,
+    " invalidated=", invalidated,
+    " recovered=", recovered];
+  {<| "jsonrpc" -> "2.0", "id" -> id, "method" -> "workspace/semanticTokens/refresh" |>}
 ]
 
 
@@ -2086,7 +2710,7 @@ Module[{params, doc, uri, res},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/didOpenFencepost"]] :=
 Catch[
-Module[{params, doc, uri, text, entry, responses = {}},
+Module[{params, doc, uri, text, entry},
 
   If[$Debug2,
     log["textDocument/didOpenFencepost: enter"]
@@ -2099,7 +2723,9 @@ Module[{params, doc, uri, text, entry, responses = {}},
 
   entry = <|
     "Text" -> text,
-    "LastChange" -> Now
+    "LastChange" -> Now,
+    "ScheduledJobs" -> {},
+    "IndexUpdatePending" -> True
   |>;
 
   (* Pre-process .ipwl files so the parse handlers use annotation-free source *)
@@ -2109,44 +2735,93 @@ Module[{params, doc, uri, text, entry, responses = {}},
 
   $OpenFilesMap[uri] = entry;
 
-  (*
-  Update the paclet index for this file, then cache the parsed artifacts into
-  the entry so textDocument/concreteParse, textDocument/aggregateParse, and
-  textDocument/abstractParse can skip their redundant re-parse steps.
-  *)
-  With[{parseResult = UpdateFileIndex[uri, text]},
-    If[ListQ[parseResult] && Length[parseResult] == 3,
-      Module[{e},
-        e = $OpenFilesMap[uri];
-        If[AssociationQ[e],
-          e["CST"] = parseResult[[1]];
-          If[!StringContainsQ[text, "\t"], e["CSTTabs"] = parseResult[[1]]];
-          e["Agg"] = parseResult[[2]];
-          e["AST"] = parseResult[[3]];
-          e["PreviousAST"] = parseResult[[3]];
-          With[{syms = findAllUserSymbols[parseResult[[3]]]},
-            e["UserSymbols"]         = syms;
-            e["PreviousUserSymbols"] = syms
-          ];
-          $OpenFilesMap[uri] = e
-        ]
-      ]
-    ]
-  ];
-
-  (* didOpen can race with the editor's initial semanticTokens/full request.
-     Once indexing has populated CST/AST, answer any pending request ids for
-     this URI directly instead of relying on a later queued fencepost. *)
-  If[$SemanticTokens,
-    responses = recoverPendingSemanticTokenFenceposts[
-      uri,
-      "DBG-ST: didOpen indexed; recovering pending semantic-token requests"
-    ]
-  ];
+  appendContentsToContentQueue[{
+    <|"method" -> "textDocument/runOpenIndexUpdate", "params" -> <|"textDocument" -> <|"uri" -> uri|>|>|>
+  }];
 
   log[1, "textDocument/didOpenFencepost: Exit"];
 
-  responses
+  {}
+]]
+
+
+handleContent[content:KeyValuePattern["method" -> "textDocument/runOpenIndexUpdate"]] :=
+Catch[
+Module[{params, doc, uri, entry, text, parseResult, curEntry},
+
+  params = content["params"];
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  entry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+  If[!AssociationQ[entry],
+    Throw[{}]
+  ];
+
+  text = Lookup[entry, "Text", Missing["NotAvailable"]];
+  If[!StringQ[text],
+    Throw[{}]
+  ];
+  If[NumberQ[$ClosedFileDiagnosticsMaxTextLength] &&
+      StringLength[text] > $ClosedFileDiagnosticsMaxTextLength,
+    $OpenFilesMap[uri] = KeyDrop[entry, "IndexUpdatePending"];
+    Throw[{}]
+  ];
+
+  If[isStale[$ContentQueue, uri],
+    Throw[{}]
+  ];
+
+  If[TrueQ[yieldToInteractiveRequests[uri]],
+    log[1, "runOpenIndexUpdate: stale after yield, aborting"];
+    Throw[{}]
+  ];
+  If[isStale[$ContentQueue, uri], Throw[{}]];
+
+  parseResult = UpdateFileIndex[uri, text];
+
+  yieldToInteractiveRequests[uri];
+  If[isStale[$ContentQueue, uri], Throw[{}]];
+
+  If[ListQ[parseResult] && Length[parseResult] == 3,
+    curEntry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+    If[AssociationQ[curEntry] && Lookup[curEntry, "LastChange", Missing["NotAvailable"]] === entry["LastChange"],
+      curEntry = KeyDrop[curEntry, "IndexUpdatePending"];
+      curEntry["CST"] = parseResult[[1]];
+      If[!StringContainsQ[text, "\t"], curEntry["CSTTabs"] = parseResult[[1]]];
+      curEntry["Agg"] = parseResult[[2]];
+      curEntry["AST"] = parseResult[[3]];
+      curEntry["PreviousAST"] = parseResult[[3]];
+      With[{syms = findAllUserSymbols[parseResult[[3]]]},
+        curEntry["UserSymbols"]         = syms;
+        curEntry["PreviousUserSymbols"] = syms
+      ];
+      $OpenFilesMap[uri] = curEntry
+    ];
+
+    If[AssociationQ[Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]]] &&
+       Lookup[$OpenFilesMap[uri], "LastChange", Missing["NotAvailable"]] === entry["LastChange"],
+      If[$SemanticTokens,
+        queuePendingSemanticTokenFenceposts[
+          uri,
+          "DBG-ST: didOpen indexed; queuing pending semantic-token fenceposts"
+        ]
+      ];
+      appendContentsToContentQueue[{
+        <|
+          "method" -> "textDocument/runFastDiagnostics",
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+        |>
+      }]
+    ]
+  ,
+    curEntry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+    If[AssociationQ[curEntry] && Lookup[curEntry, "LastChange", Missing["NotAvailable"]] === entry["LastChange"],
+      $OpenFilesMap[uri] = KeyDrop[curEntry, "IndexUpdatePending"]
+    ]
+  ];
+
+  {}
 ]]
 
 
@@ -2552,6 +3227,7 @@ Module[{params, doc, uri, beforeQueueLen, dropped, entry, notification},
   entry = Lookup[$OpenFilesMap, uri, Null];
 
   If[AssociationQ[entry],
+    loadFeatureModule["Diagnostics"];
     notification = LSPServer`Diagnostics`Private`buildPublishNotification[
       uri,
       entry,
@@ -2668,9 +3344,18 @@ Module[{params, doc, uri, res},
     Throw[{<| "method" -> "textDocument/didChangeFencepost", "params" -> params, "stale" -> True |>}]
   ];
 
-  res = <| "method" -> #, "params" -> params |>& /@ ({
-      "textDocument/didChangeFencepost"
-    } ~Join~ $didChangeMethods);
+  res = Join[
+    {<| "method" -> "textDocument/didChangeFencepost", "params" -> params |>},
+    Map[
+      Function[{method},
+        If[MemberQ[{"textDocument/runDiagnostics", "textDocument/publishDiagnostics"}, method],
+          <| "method" -> method, "params" -> params, "priority" -> True |>,
+          <| "method" -> method, "params" -> params |>
+        ]
+      ],
+      $didChangeMethods
+    ]
+  ];
 
   log[1, "textDocument/didChange: Exit"];
 
@@ -2681,7 +3366,8 @@ Module[{params, doc, uri, res},
 
 handleContent[content:KeyValuePattern["method" -> "textDocument/didChangeFencepost"]] :=
 Catch[
-Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry},
+Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry,
+  previousUserSymbols, changedSymbols, affectedOpenURIs},
 
   If[$Debug2,
     log["textDocument/didChangeFencepost: enter"]
@@ -2700,7 +3386,6 @@ Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry},
     Throw[{}]
   ];
 
-  (* Cancel any in-flight slow-tier diagnostics task — its content is now stale *)
   cancelCurrentDiagnosticsTask[];
 
   changes = params["contentChanges"];
@@ -2713,6 +3398,10 @@ Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry},
   text = lastChange["text"];
 
   oldEntry = Lookup[$OpenFilesMap, uri, <||>];
+  previousUserSymbols = Replace[
+    Lookup[oldEntry, "PreviousUserSymbols", Lookup[oldEntry, "UserSymbols", {}]],
+    Except[_List] -> {}
+  ];
 
   (*
       We do not want to keep entry["AST"] here. As the text is changed, AST needs to be re-evaluated.
@@ -2730,6 +3419,7 @@ Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry},
     "Text" -> text,
     "LastChange" -> Now,
     "ScheduledJobs" -> $didChangeScheduledJobs,
+    "IndexUpdatePending" -> True,
     "PreviousAST" -> Lookup[oldEntry, "PreviousAST", Lookup[oldEntry, "AST", Missing["NotAvailable"]]],
     "PreviousUserSymbols" -> Lookup[oldEntry, "PreviousUserSymbols", Lookup[oldEntry, "UserSymbols", Missing["NotAvailable"]]]
   |>;
@@ -2742,52 +3432,14 @@ Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry},
   $OpenFilesMap[uri] = entry;
 
   (*
-  Schedule paclet index update (debounced with other scheduled jobs)
+  Schedule paclet index update (debounced with other scheduled jobs).
+  The job queues a "textDocument/runIndexUpdate" content message instead of
+  running UpdateFileIndex inline, so the main loop can interleave interactive
+  requests (hover, completion) between the fencepost and the index update.
   *)
   AppendTo[entry["ScheduledJobs"],
     Function[{e}, If[Now - e["LastChange"] > Quantity[$DiagnosticsDelayAfterLastChange, "Seconds"],
-      (* Run index update, then cache parsed artifacts into $OpenFilesMap so the
-         diagnostics pipeline can skip its redundant concreteParse / aggregateParse /
-         abstractParse steps. *)
-      With[{parseResult = UpdateFileIndex[uri, e["Text"]]},
-        If[ListQ[parseResult] && Length[parseResult] == 3,
-          Module[{curEntry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]]},
-            If[AssociationQ[curEntry] && Lookup[curEntry, "LastChange", Missing["NotAvailable"]] === e["LastChange"],
-              curEntry["CST"] = parseResult[[1]];
-              If[!StringContainsQ[e["Text"], "\t"], curEntry["CSTTabs"] = parseResult[[1]]];
-              curEntry["Agg"] = parseResult[[2]];
-              curEntry["AST"] = parseResult[[3]];
-              curEntry["PreviousAST"] = parseResult[[3]];
-              With[{syms = findAllUserSymbols[parseResult[[3]]]},
-                curEntry["UserSymbols"]         = syms;
-                curEntry["PreviousUserSymbols"] = syms
-              ];
-              $OpenFilesMap[uri] = curEntry
-            ,
-              log[0, "DBG-ST: didChange index result stale; skipping refresh for ", uri]
-            ]
-          ];
-          If[AssociationQ[Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]]] &&
-             Lookup[$OpenFilesMap[uri], "LastChange", Missing["NotAvailable"]] === e["LastChange"],
-            Scan[
-              LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics,
-              Keys[$OpenFilesMap]
-            ];
-            queueWorkspaceDiagnosticsSweep[];
-            If[$SemanticTokens,
-              (* Recover any semanticTokens/full requests that became stale
-                 while the didChange index update was still pending.
-                 Do not proactively push workspace/semanticTokens/refresh here:
-                 VS Code can turn that into a self-sustaining refresh loop. *)
-              queuePendingSemanticTokenFenceposts[
-                uri,
-                "DBG-ST: didChange indexed; queuing pending semantic-token fenceposts"
-              ]
-            ]
-          ]
-        ]
-      ];
-      {{}, True},
+      {{"textDocument/runIndexUpdate"}, True},
       {{}, False}]
     ]
   ];
@@ -2799,15 +3451,120 @@ Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry},
 ]]
 
 
+(*
+handleContent for the deferred index update. This runs as a normal queue item
+so interactive requests (hover, completion) can be promoted ahead of it by
+takeFirstContentQueueItem.
+*)
+handleContent[content:KeyValuePattern["method" -> "textDocument/runIndexUpdate"]] :=
+Catch[
+Module[{params, doc, uri, entry, text, parseResult, curEntry,
+  previousUserSymbols, changedSymbols, affectedOpenURIs},
+
+  params = content["params"];
+  doc = params["textDocument"];
+  uri = doc["uri"];
+
+  entry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+  If[!AssociationQ[entry],
+    Throw[{}]
+  ];
+
+  text = Lookup[entry, "Text", Missing["NotAvailable"]];
+  If[!StringQ[text],
+    Throw[{}]
+  ];
+  If[NumberQ[$ClosedFileDiagnosticsMaxTextLength] &&
+      StringLength[text] > $ClosedFileDiagnosticsMaxTextLength,
+    $OpenFilesMap[uri] = KeyDrop[entry, "IndexUpdatePending"];
+    Throw[{}]
+  ];
+
+  previousUserSymbols = Replace[
+    Lookup[entry, "PreviousUserSymbols", Lookup[entry, "UserSymbols", {}]],
+    Except[_List] -> {}
+  ];
+
+  (* If there is a newer didChange for this URI queued, skip — it will trigger
+     its own index update. *)
+  If[isStale[$ContentQueue, uri],
+    Throw[{}]
+  ];
+
+  (* ── YIELD POINT: serve any interactive requests before heavy index work ── *)
+  If[TrueQ[yieldToInteractiveRequests[uri]],
+    log[1, "runIndexUpdate: stale after yield, aborting"];
+    Throw[{}]
+  ];
+  If[isStale[$ContentQueue, uri], Throw[{}]];
+
+  parseResult = UpdateFileIndex[uri, text];
+
+  (* ── YIELD POINT: serve interactive requests after index work ── *)
+  yieldToInteractiveRequests[uri];
+  If[isStale[$ContentQueue, uri], Throw[{}]];
+
+  If[ListQ[parseResult] && Length[parseResult] == 3,
+    curEntry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+    If[AssociationQ[curEntry] && Lookup[curEntry, "LastChange", Missing["NotAvailable"]] === entry["LastChange"],
+      curEntry = KeyDrop[curEntry, "IndexUpdatePending"];
+      curEntry["CST"] = parseResult[[1]];
+      If[!StringContainsQ[text, "\t"], curEntry["CSTTabs"] = parseResult[[1]]];
+      curEntry["Agg"] = parseResult[[2]];
+      curEntry["AST"] = parseResult[[3]];
+      curEntry["PreviousAST"] = parseResult[[3]];
+      With[{syms = findAllUserSymbols[parseResult[[3]]]},
+        curEntry["UserSymbols"]         = syms;
+        curEntry["PreviousUserSymbols"] = syms
+      ];
+      $OpenFilesMap[uri] = curEntry
+    ,
+      log[0, "DBG-ST: didChange index result stale; skipping refresh for ", uri]
+    ];
+    If[AssociationQ[Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]]] &&
+       Lookup[$OpenFilesMap[uri], "LastChange", Missing["NotAvailable"]] === entry["LastChange"],
+      changedSymbols = DeleteDuplicates[Join[
+        previousUserSymbols,
+        Replace[Lookup[$OpenFilesMap[uri], "UserSymbols", {}], Except[_List] -> {}]
+      ]];
+      affectedOpenURIs = DeleteDuplicates[Join[
+        {uri},
+        openFilesAffectedByDefinitions[changedSymbols]
+      ]];
+      Scan[
+        loadFeatureModule["Diagnostics"];
+        LSPServer`Diagnostics`Private`dispatchWorkspaceDiagnostics,
+        affectedOpenURIs
+      ];
+      queueWorkspaceDiagnosticsSweep[];
+      If[$SemanticTokens,
+        queuePendingSemanticTokenFenceposts[
+          uri,
+          "DBG-ST: didChange indexed; queuing pending semantic-token fenceposts"
+        ]
+      ];
+      appendContentsToContentQueue[{
+        <|
+          "method" -> "textDocument/runFastDiagnostics",
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+        |>
+      }]
+    ]
+  ,
+    curEntry = Lookup[$OpenFilesMap, uri, Missing["NotAvailable"]];
+    If[AssociationQ[curEntry] && Lookup[curEntry, "LastChange", Missing["NotAvailable"]] === entry["LastChange"],
+      $OpenFilesMap[uri] = KeyDrop[curEntry, "IndexUpdatePending"]
+    ]
+  ];
+
+  {}
+]]
+
+
 exitGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING GRACEFULLY"];
   log[0, "\n\n"];
-  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    Quiet[AbortKernels[$DiagnosticsKernel]];
-    Quiet[CloseKernels[$DiagnosticsKernel]];
-    $DiagnosticsKernel = None
-  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   (
   (* :!CodeAnalysis::BeginBlock:: *)
@@ -2833,11 +3590,6 @@ exitSemiGracefully[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING SEMI-GRACEFULLY"];
   log[0, "\n\n"];
-  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    Quiet[AbortKernels[$DiagnosticsKernel]];
-    Quiet[CloseKernels[$DiagnosticsKernel]];
-    $DiagnosticsKernel = None
-  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   (
   (* :!CodeAnalysis::BeginBlock:: *)
@@ -2863,11 +3615,6 @@ exitHard[] := (
   log[0, "\n\n"];
   log[0, "KERNEL IS EXITING HARD"];
   log[0, "\n\n"];
-  If[$DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
-    Quiet[AbortKernels[$DiagnosticsKernel]];
-    Quiet[CloseKernels[$DiagnosticsKernel]];
-    $DiagnosticsKernel = None
-  ];
   shutdownLSPComm[$commProcess, $initializedComm];
   (
   (* :!CodeAnalysis::BeginBlock:: *)
@@ -2881,16 +3628,22 @@ exitHard[] := (
 (*
 now cleanup Startup Messages handling
 *)
-Module[{name},
+Module[{name, startupMessagesText},
 
   If[!FailureQ[$startupMessagesFile],
 
-    name = Close[$startupMessagesFile];
+    name = Quiet[Check[Close[$startupMessagesFile], $Failed]];
 
-    $startupMessagesText = Import[name, "Text"];
+    startupMessagesText = If[StringQ[name] && FileExistsQ[name],
+      Replace[Quiet[Check[Import[name, "Text"], ""]], Except[_String] -> ""],
+      ""
+    ];
 
-    DeleteFile[name];
+    If[StringQ[name] && FileExistsQ[name],
+      Quiet[Check[DeleteFile[name], Null]]
+    ];
 
+    $startupMessagesText = startupMessagesText;
     $Messages = $oldMessages
   ]
 ]

@@ -7,6 +7,39 @@ Needs["CodeParser`"];
 
 
 VerificationTest[
+  Module[{cst, agg, ast, lhs, signatureInfo},
+    cst = CodeParser`CodeConcreteParse[
+      "conditionedSignatureFn[x_String] /; x := x\n",
+      "FileFormat" -> "Package"
+    ];
+    cst[[1]] = File;
+    agg = CodeParser`Abstract`Aggregate[cst];
+    ast = CodeParser`Abstract`Abstract[agg];
+    lhs = First[
+      Cases[ast,
+        CodeParser`CallNode[
+          CodeParser`LeafNode[Symbol, "SetDelayed", _],
+          {lhsNode_, _},
+          _
+        ] :> lhsNode,
+        Infinity
+      ]
+    ];
+    signatureInfo = LSPServer`PacletIndex`ExtractFunctionSignatureInfo[
+      "conditionedSignatureFn",
+      lhs
+    ];
+    {
+      ToString[Lookup[signatureInfo, "InputPatterns", {}], InputForm],
+      Lookup[signatureInfo, "Variadic", Missing["NotFound"]]
+    }
+  ],
+  {"{_String}", False},
+  TestID -> "PacletIndex-Conditioned-LHS-Signature-Uses-Inner-Call"
+]
+
+
+VerificationTest[
   {
     Names["LSPServer`Hover`Private`GetVisibleSymbolDefinitions"],
     Names["LSPServer`Completion`Private`GetVisibleSymbolDefinitions"],
@@ -121,86 +154,69 @@ VerificationTest[
 
 
 VerificationTest[
-  Module[{uri, text},
+  Module[{uri, text, result},
     uri = "file:///tmp/FormattingCommentList.wl";
-    text = "{\n  a,\n  (*\n    c\n  *)\n  b\n}\n";
+    text = StringJoin["{\n  a,\n  (", "*\n    c\n  *", ")\n  b\n}\n"];
 
     Block[{
       LSPServer`$ContentQueue = {},
       LSPServer`$CancelMap = <||>,
       LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text|>|>
     },
-      Lookup[
-        First[Lookup[
-          First[LSPServer`handleContent[<|
+      result = LSPServer`handleContent[<|
         "method" -> "textDocument/formatting",
         "id" -> 501,
         "params" -> <|
           "textDocument" -> <|"uri" -> uri|>,
           "options" -> <|"tabSize" -> 2, "insertSpaces" -> True|>
         |>
-      |>],
-          "result",
-          {}
-        ]],
+      |>];
+      Lookup[
+        Lookup[First[result], "result", <||>],
         "newText",
         Missing["NotFound"]
       ]
     ]
   ],
-  "{\n  a,\n  (*\n    c\n  *)\n  b\n}\n",
+  StringJoin["{\n  a,\n  (", "*\n    c\n  *", ")\n  b\n}\n"],
   TestID -> "Formatting-List-Comment-Block-Stays-Inert"
 ]
 
 
 VerificationTest[
-  Module[{uri, text},
+  Module[{uri, text, result},
     uri = "file:///tmp/FormattingCommentAssociation.wl";
-    text = "<|\n  \"a\" -> 1,\n  (*\n    c\n  *)\n  \"b\" -> 2\n|>\n";
+    text = StringJoin["<|\n  \"a\" -> 1,\n  (", "*\n    c\n  *", ")\n  \"b\" -> 2\n|>\n"];
 
     Block[{
       LSPServer`$ContentQueue = {},
       LSPServer`$CancelMap = <||>,
       LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text|>|>
     },
-      Lookup[
-        First[Lookup[
-          First[LSPServer`handleContent[<|
+      result = LSPServer`handleContent[<|
         "method" -> "textDocument/formatting",
         "id" -> 502,
         "params" -> <|
           "textDocument" -> <|"uri" -> uri|>,
           "options" -> <|"tabSize" -> 2, "insertSpaces" -> True|>
         |>
-      |>],
-          "result",
-          {}
-        ]],
+      |>];
+      Lookup[
+        Lookup[First[result], "result", <||>],
         "newText",
         Missing["NotFound"]
       ]
     ]
   ],
-  "<|\n  \"a\" -> 1,\n  (*\n    c\n  *)\n  \"b\" -> 2\n|>\n",
+  StringJoin["<|\n  \"a\" -> 1,\n  (", "*\n    c\n  *", ")\n  \"b\" -> 2\n|>\n"],
   TestID -> "Formatting-Association-Comment-Block-Stays-Inert"
 ]
 
 
 VerificationTest[
   Module[{uri, result},
-    uri = "file:///tmp/AsyncHover.wl";
+    uri = "file:///tmp/SyncHover.wl";
     Block[{
-      LSPServer`$DiagnosticsKernel = "fake-kernel",
-      LSPServer`$DiagnosticsTask = None,
-      LSPServer`$DiagnosticsTaskURI = None,
-      LSPServer`$DiagnosticsTaskKind = None,
-      LSPServer`$DiagnosticsTaskResult = None,
-      LSPServer`$DiagnosticsTaskStartTime = None,
-      LSPServer`$HoverTask = None,
-      LSPServer`$HoverTaskURI = None,
-      LSPServer`$HoverTaskID = None,
-      LSPServer`$HoverTaskResult = None,
-      LSPServer`$HoverTaskStartTime = None,
       LSPServer`$ContentQueue = {},
       LSPServer`$CancelMap = <||>,
       LSPServer`$OpenFilesMap = <|uri -> <|
@@ -209,77 +225,12 @@ VerificationTest[
         "LastChange" -> Now,
         "ScheduledJobs" -> {}
       |>|>,
-      LSPServer`$WorkspaceRootPath = "/tmp",
-      LSPServer`$ConfidenceLevel = 0.50,
-      LSPServer`PacletIndex`$PacletIndex = <|
-        "Symbols" -> <||>,
-        "Files" -> <||>,
-        "Contexts" -> <||>,
-        "Dependencies" -> {},
-        "ContextAliases" -> <||>
-      |>,
-      LSPServer`Private`cancelCurrentDiagnosticsTask = Function[{}, Null],
-      ParallelSubmit = Function[{kernels, expr}, "hover-task"]
-    },
-      result = LSPServer`handleContent[<|
-        "method" -> "textDocument/hoverFencepost",
-        "id" -> 91,
-        "params" -> <|
-          "textDocument" -> <|"uri" -> uri|>,
-          "position" -> <|"line" -> 0, "character" -> 1|>
-        |>
-      |>];
-      {
-        result,
-        LSPServer`$HoverTask,
-        LSPServer`$HoverTaskURI,
-        LSPServer`$HoverTaskID
-      }
-    ]
-  ],
-  {{}, "hover-task", "file:///tmp/AsyncHover.wl", 91},
-  TestID -> "HoverFencepost-Dispatches-Async-Worker"
-]
-
-
-VerificationTest[
-  Module[{uri, result},
-    uri = "file:///tmp/BusyDiagnosticsHover.wl";
-    Block[{
-      LSPServer`$DiagnosticsKernel = "fake-kernel",
-      LSPServer`$DiagnosticsTask = "busy-task",
-      LSPServer`$DiagnosticsTaskURI = uri,
-      LSPServer`$DiagnosticsTaskKind = "open-file",
-      LSPServer`$DiagnosticsTaskResult = None,
-      LSPServer`$DiagnosticsTaskStartTime = AbsoluteTime[],
-      LSPServer`$HoverTask = None,
-      LSPServer`$HoverTaskURI = None,
-      LSPServer`$HoverTaskID = None,
-      LSPServer`$HoverTaskResult = None,
-      LSPServer`$HoverTaskStartTime = None,
-      LSPServer`$ContentQueue = {},
-      LSPServer`$CancelMap = <||>,
-      LSPServer`$OpenFilesMap = <|uri -> <|
-        "Text" -> "Sin[x]\n",
-        "AST" -> HoldComplete[Null],
-        "LastChange" -> Now,
-        "ScheduledJobs" -> {}
-      |>|>,
-      LSPServer`$WorkspaceRootPath = "/tmp",
-      LSPServer`$ConfidenceLevel = 0.50,
-      LSPServer`PacletIndex`$PacletIndex = <|
-        "Symbols" -> <||>,
-        "Files" -> <||>,
-        "Contexts" -> <||>,
-        "Dependencies" -> {},
-        "ContextAliases" -> <||>
-      |>,
       ParallelSubmit = Function[{kernels, expr}, Throw["ParallelSubmitCalled", "parallel"]]
     },
       result = Catch[
         LSPServer`handleContent[<|
           "method" -> "textDocument/hoverFencepost",
-          "id" -> 92,
+          "id" -> 91,
           "params" -> <|
             "textDocument" -> <|"uri" -> uri|>,
             "position" -> <|"line" -> 0, "character" -> 1|>
@@ -288,76 +239,35 @@ VerificationTest[
         "parallel"
       ];
       {
-        result,
-        LSPServer`$HoverTask,
-        LSPServer`$DiagnosticsTask
+        MatchQ[result, {KeyValuePattern[{"jsonrpc" -> "2.0", "id" -> 91, "result" -> _Association}]}],
+        result =!= "ParallelSubmitCalled"
       }
     ]
   ],
-  {{{<|"jsonrpc" -> "2.0", "id" -> 92, "result" -> Null|>}, None, "busy-task"}},
-  TestID -> "HoverFencepost-Skips-Async-While-Diagnostics-Busy"
+  {True, True},
+  TestID -> "HoverFencepost-Runs-Synchronously-Without-Worker"
 ]
 
 
 VerificationTest[
-  Module[{uri, result},
-    uri = "file:///tmp/AsyncHoverPublish.wl";
-    Block[{
-      LSPServer`$ContentQueue = {},
-      LSPServer`$HoverTaskResult = <|
-        "URI" -> uri,
-        "ID" -> 77,
-        "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>
-      |>
-    },
-      result = LSPServer`handleContent[<|
-        "method" -> "textDocument/publishHoverResult",
-        "id" -> 77,
-        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
-      |>];
-      {result, LSPServer`$HoverTaskResult}
-    ]
-  ],
-  {
-    {<|"jsonrpc" -> "2.0", "id" -> 77, "result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>|>},
-    None
-  },
-  TestID -> "PublishHoverResult-Returns-Worker-Response"
-]
-
-
-VerificationTest[
-  Module[{uri, oldStamp, newStamp, result},
-    uri = "file:///tmp/AsyncHoverStale.wl";
-    oldStamp = Now - Quantity[2, "Seconds"];
-    newStamp = Now;
-    Block[{
-      LSPServer`$ContentQueue = {},
-      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> "Sin[x]\n", "AST" -> HoldComplete[Null], "LastChange" -> newStamp|>|>,
-      LSPServer`$HoverTaskResult = <|
-        "URI" -> uri,
-        "ID" -> 78,
-        "LastChange" -> oldStamp,
-        "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "stale hover"|>|>
-      |>
-    },
-      result = LSPServer`handleContent[<|
-        "method" -> "textDocument/publishHoverResult",
-        "id" -> 78,
-        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
-      |>];
-      {result, LSPServer`$HoverTaskResult}
-    ]
-  ],
-  {{}, None},
-  TestID -> "PublishHoverResult-Drops-Stale-LastChange"
+  Lookup[
+    First @ LSPServer`handleContent[<|
+      "method" -> "textDocument/publishHoverResult",
+      "id" -> 77,
+      "params" -> <|"textDocument" -> <|"uri" -> "file:///tmp/RemovedAsyncHover.wl"|>|>
+    |>],
+    "error",
+    <||>
+  ]["code"],
+  LSPServer`Private`$ErrorCodes["MethodNotFound"],
+  TestID -> "PublishHoverResult-Removed-MethodNotFound"
 ]
 
 
 VerificationTest[
   Module[{text, cst, folds},
     text = "config = Module[{x},\n  x = 1;\n  x\n]\n\nfoo[a_] := Module[{y},\n  y = a;\n  y\n]\n";
-    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst = Quiet[CodeParser`CodeConcreteParse[text, "FileFormat" -> "Package"]];
     cst[[1]] = File;
     folds = LSPServer`FoldingRange`Private`filterAssignmentAnchoredFoldingRanges[
       cst,
@@ -411,6 +321,28 @@ VerificationTest[
   ],
   {{}, False},
   TestID -> "ServerInitiatedResponse-Clears-PendingTokenRefresh"
+]
+
+
+VerificationTest[
+  Module[{requestResult, notificationResult},
+    requestResult = LSPServer`LSPEvaluate[<|
+      "method" -> "workspace/unknownUnitTestMethod",
+      "id" -> 999,
+      "params" -> <||>
+    |>];
+    notificationResult = LSPServer`LSPEvaluate[<|
+      "method" -> "workspace/unknownUnitTestNotification",
+      "params" -> <||>
+    |>];
+    {
+      Lookup[First[requestResult], "id", Missing["NotFound"]],
+      Lookup[Lookup[First[requestResult], "error", <||>], "code", Missing["NotFound"]],
+      notificationResult
+    }
+  ],
+  {999, LSPServer`Private`$ErrorCodes["MethodNotFound"], {}},
+  TestID -> "UnknownMethods-ReturnErrorForRequests-AndIgnoreNotifications"
 ]
 
 
@@ -722,8 +654,8 @@ VerificationTest[
       LSPServer`$DiagnosticsTaskURI
     }
   ],
-  {0, {"initialized"}, "fake-task", "open-file", "file:///tmp/OpenFile.wl"},
-  TestID -> "DispatchWorkspaceDiagnostics-Uses-Background-Task-With-Live-Kernel"
+  {1, {"textDocument/runWorkspaceDiagnostics", "initialized"}, None, None, None},
+  TestID -> "DispatchWorkspaceDiagnostics-Dedupes-Synchronous-Work-With-Live-Kernel"
 ]
 
 
@@ -928,7 +860,7 @@ VerificationTest[
     text = "x = 1\ny[z_] := z + 1\n";
 
     (* Simulate didOpenFencepost: parse and store CST/AST but no SemanticTokens *)
-    cst = Quiet[CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst = Quiet[CodeParser`CodeConcreteParse[text, "FileFormat" -> "Package"]];
     cst[[1]] = File;
     agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
     ast = Quiet[CodeParser`Abstract`Abstract[agg]];
@@ -1048,6 +980,108 @@ VerificationTest[
   ],
   {True, False, {"textDocument/runScopingData"}},
   TestID -> "SemanticTokens-First-Pass-Uses-Fast-Classifier"
+]
+
+
+VerificationTest[
+  Module[{uri, text, cst, agg, ast, result},
+    uri = "file:///tmp/test_semantic_tokens_large_file_fast_only.wl";
+    text = "x = 1\ny[z_] := Module[{a}, a + z]\n";
+
+    cst = Quiet[CodeParser`CodeConcreteParse[text, "FileFormat" -> "Package"]];
+    cst[[1]] = File;
+    agg = Quiet[CodeParser`Abstract`Aggregate[cst]];
+    ast = Quiet[CodeParser`Abstract`Abstract[agg]];
+
+    Block[{
+      LSPServer`SemanticTokens`Private`$SemanticTokensScopingTextLengthLimit = 5,
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> text, "CST" -> cst, "Agg" -> agg, "AST" -> ast|>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$PendingSemanticTokenRequests = <|uri -> {42}|>,
+      LSPServer`$CancelMap = <||>
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/semanticTokens/fullFencepost",
+        "id" -> 42,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      {
+        MatchQ[result, {<|"jsonrpc" -> "2.0", "id" -> 42, "result" -> KeyValuePattern["data" -> _List]|>}],
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokens"],
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokensIncomplete"]
+      }
+    ]
+  ],
+  {True, Missing["NotFound"], True, False},
+  TestID -> "SemanticTokens-LargeFile-Skips-Scoping-Followup"
+]
+
+
+VerificationTest[
+  Module[{uri, text, result},
+    uri = "file:///tmp/test_large_file_index_skip.wl";
+    text = "largeIndexSkipValue = <|\"a\" -> 1, \"b\" -> 2|>\n";
+
+    Block[{
+      LSPServer`PacletIndex`Private`$LargeFileIndexTextLengthLimit = 5,
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>
+    },
+      result = LSPServer`PacletIndex`UpdateFileIndex[uri, text];
+      {
+        MatchQ[result, {_, _, _}],
+        Lookup[LSPServer`PacletIndex`$PacletIndex["Files", uri], "Symbols", Missing["NotFound"]],
+        KeyExistsQ[LSPServer`PacletIndex`$PacletIndex["Symbols"], "largeIndexSkipValue"]
+      }
+    ]
+  ],
+  {True, {}, False},
+  TestID -> "PacletIndex-LargeFile-Skips-SymbolExtraction"
+]
+
+
+VerificationTest[
+  Module[{uri, text, result},
+    uri = "file:///tmp/test_runscopingdata_large_file_keeps_fast_tokens.wl";
+    text = "x = 1\ny[z_] := Module[{a}, a + z]\n";
+
+    Block[{
+      LSPServer`SemanticTokens`Private`$SemanticTokensScopingTextLengthLimit = 5,
+      LSPServer`$SemanticTokens = True,
+      LSPServer`$PendingTokenRefresh = False,
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> text,
+        "AST" -> HoldComplete[Null],
+        "SemanticTokens" -> {1, 2, 3},
+        "SemanticTokensIncomplete" -> True
+      |>|>,
+      LSPServer`$ContentQueue = {}
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/runScopingData",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      {
+        result,
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "ScopingData"],
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokens"],
+        KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokensIncomplete"],
+        Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]],
+        LSPServer`$PendingTokenRefresh
+      }
+    ]
+  ],
+  {{}, True, True, False, Missing["NotFound"], False},
+  TestID -> "RunScopingData-LargeFile-KeepsFastTokensWithoutRefresh"
 ]
 
 
@@ -1224,10 +1258,43 @@ VerificationTest[
     ]
   ],
   {
-    {<|"jsonrpc" -> "2.0", "id" -> 42, "result" -> Null|>},
+    {},
     {42}
   },
   TestID -> "SemanticTokens-Stale-Fencepost-Keeps-Pending-Request"
+]
+
+
+VerificationTest[
+  Module[{uri, result},
+    uri = "file:///tmp/test_didclose_stale_fencepost.wl";
+
+    Block[{
+      LSPServer`$ContentQueue = {
+        <|
+          "method" -> "textDocument/didCloseFencepost",
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+        |>
+      },
+      LSPServer`$PendingSemanticTokenRequests = <|uri -> {42}|>
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/semanticTokens/fullFencepost",
+        "id" -> 42,
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+
+      {
+        result,
+        Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]]
+      }
+    ]
+  ],
+  {
+    {<|"jsonrpc" -> "2.0", "id" -> 42, "result" -> Null|>},
+    Missing["NotFound"]
+  },
+  TestID -> "SemanticTokens-DidClose-Stale-Fencepost-Clears-Pending-Request"
 ]
 
 

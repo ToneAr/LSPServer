@@ -20,7 +20,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 1,
       "result" -> <|"contents" -> <|
         "kind" -> "markdown",
-        "value" -> "**Definitions**\n\n```wolfram\ncomputeSquare[x_Integer]\n```\n\n---\n**Doc Comments**\n\nCompute the square of an integer.  \n**Parameters:** `_Integer`  \n**Returns:** `_Integer`"
+        "value" -> "**Delayed Definitions**\n\n```wolfram\ncomputeSquare[x_Integer]\n```\n\n---\n**Doc Comments**\n\nCompute the square of an integer.  \n**Parameters:** `_Integer`  \n**Returns:** `_Integer`"
         |>
       |>
     |>
@@ -43,7 +43,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 2,
       "result" -> <|"contents" -> <|
         "kind" -> "markdown",
-        "value" -> "**Definitions**\n\n```wolfram\ngreet[name_String]\ngreet[x_]\n```\n\n---\n**Doc Comments**\n\nGreet a person.  \n**Parameters:** `_String`  \n**Returns:** `_String`\n\nGreet a person.  \n**Returns:** `_String`"
+        "value" -> "**Delayed Definitions**\n\n```wolfram\ngreet[name_String]\ngreet[x_]\n```\n\n---\n**Doc Comments**\n\nGreet a person.  \n**Parameters:** `_String`  \n**Returns:** `_String`\n\nGreet a person.  \n**Returns:** `_String`"
         |>
       |>
     |>
@@ -66,7 +66,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 3,
       "result" -> <|"contents" -> <|
         "kind" -> "markdown",
-        "value" -> "**Definitions**\n\n```wolfram\ngreet[name_String]\ngreet[x_]\n```\n\n---\n**Doc Comments**\n\nGreet a person.  \n**Parameters:** `_String`  \n**Returns:** `_String`\n\nGreet a person.  \n**Returns:** `_String`"
+        "value" -> "**Delayed Definitions**\n\n```wolfram\ngreet[name_String]\ngreet[x_]\n```\n\n---\n**Doc Comments**\n\nGreet a person.  \n**Parameters:** `_String`  \n**Returns:** `_String`\n\nGreet a person.  \n**Returns:** `_String`"
         |>
       |>
     |>
@@ -457,4 +457,204 @@ VerificationTest[
     |>
   },
   TestID -> "IDE-Test-Block-ClosureReturnInteger"
+]
+
+
+docCommentTestLines = StringSplit[
+  ReadString[FileNameJoin[{DirectoryName[$TestFileName], "DocCommentTest.wl"}]],
+  {"\r\n", "\n", "\r"},
+  All
+];
+lineContaining[needle_String] := First[FirstPosition[
+  docCommentTestLines,
+  line_String /; StringContainsQ[line, needle]
+]] - 1;
+
+(* ___[All] homogeneous call arguments -> ___Integer *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 19,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["seqAllHomogeneous ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 19,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `___Integer`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-SequenceAllHomogeneous"
+]
+
+(* ___[All] mixed call arguments -> exact PatternSequence of inferred heads *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 20,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["seqAllMixed ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 20,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `PatternSequence[_Integer, _Integer, _Real, _Complex]`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-SequenceAllMixed"
+]
+
+(* ___[All] empty call arguments -> ___ *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 21,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["seqAllEmpty ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 21,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `___`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-SequenceAllEmpty"
+]
+
+(* __[All] homogeneous call arguments -> __Integer *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 22,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["seqAllRequiredHomogeneous ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 22,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `__Integer`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-SequenceRequiredAllHomogeneous"
+]
+
+(* ___[1, All] homogeneous list elements -> ___Integer *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 23,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["seqFromListHomogeneous ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 23,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `___Integer`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-SequenceNestedListHomogeneous"
+]
+
+(* Apply[applyTarget, {1, 2}] replaces List with applyTarget -> _String *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 24,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["applyHeadFromList ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 24,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `_String`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-ApplyHeadFromList"
+]
+
+(* Apply[applyTarget, wrapper[1, 2]] uses wrapper's arguments as applyTarget arguments. *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 25,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["applyHeadFromExpression ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 25,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `_String`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-ApplyHeadFromExpression"
+]
+
+(* Apply[List, wrapper[1, 2, 3]] reconstructs a list from wrapper's arguments. *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 26,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["applyListHeadFromExpression ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 26,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `{___Integer}`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-ApplyListHeadFromExpression"
+]
+
+(* Apply[seqAll, {...}] composes with ___[All] sequence-return inference. *)
+VerificationTest[
+  LSPServer`handleContent[
+    <|"method" -> "textDocument/hoverFencepost",
+      "id" -> 27,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>,
+        "position" -> <|"line" -> lineContaining["applySequenceHeadFromList ="], "character" -> 0|>|>
+    |>
+  ],
+  {
+    <|"jsonrpc" -> "2.0", "id" -> 27,
+      "result" -> <|"contents" -> <|
+        "kind" -> "markdown",
+        "value" -> "**Inferred Pattern:** `PatternSequence[_Integer, _Integer, _Real, _Complex]`"
+        |>
+      |>
+    |>
+  },
+  TestID -> "IDE-Test-DocComment-ApplySequenceHeadFromList"
 ]

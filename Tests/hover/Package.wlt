@@ -29,7 +29,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "`` MyPackages`Test` ``\n\nUsage message of testFunction.\n\n**Definitions**\n\n```wolfram\ntestFunction[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
+    value == "`` MyPackages`Test` ``\n\nUsage message of testFunction.\n\n**Delayed Definitions**\n\n```wolfram\ntestFunction[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
   ],
   True,
   TestID -> "IDE-Test-ContextDepth-1-In-Package"
@@ -48,7 +48,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "`` MyPackages`Test` ``\n\nUsage message of testFunction.\n\n**Definitions**\n\n```wolfram\ntestFunction[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
+    value == "`` MyPackages`Test` ``\n\nUsage message of testFunction.\n\n**Delayed Definitions**\n\n```wolfram\ntestFunction[a_][b_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
   ],
   True,
   TestID -> "IDE-Test-ContextDepth-2-In-Package"
@@ -64,7 +64,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "`` MyPackages`Test` ``\n\nFirst usage message of multiUsageFunction.\n\nSecond usage message of multiUsageFunction.\n\n**Definitions**\n\n```wolfram\nmultiUsageFunction[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
+    value == "`` MyPackages`Test` ``\n\nFirst usage message of multiUsageFunction.\n\nSecond usage message of multiUsageFunction.\n\n**Delayed Definitions**\n\n```wolfram\nmultiUsageFunction[x_]\n```\n\n---\n**Doc Comments**\n\n**Returns:** `_Integer`"
   ],
   True,
   TestID -> "IDE-Test-MultipleUsage-In-Package"
@@ -80,7 +80,7 @@ VerificationTest[
       |>
     ];
     value = result[[1]]["result"]["contents"]["value"];
-    value == "`` MyPackages`Test`Private` ``\n\n**Definitions**\n\n```wolfram\nfoo[]\n```"
+    value == "`` MyPackages`Test`Private` ``\n\n**Delayed Definitions**\n\n```wolfram\nfoo[]\n```"
   ],
   True,
   TestID -> "IDE-Test-Tab-Function-In-Package"
@@ -99,7 +99,7 @@ VerificationTest[
     <|"jsonrpc" -> "2.0", "id" -> 6,
       "result" -> <|"contents" -> <|
         "kind" -> "markdown",
-        "value" -> "**Definitions**\n\n```wolfram\nf[g[x_]]\n```"
+        "value" -> "**Delayed Definitions**\n\n```wolfram\nf[g[x_]]\n```"
         |>
       |>
     |>

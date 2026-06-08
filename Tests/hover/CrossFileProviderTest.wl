@@ -11,6 +11,8 @@ crossFileFunc[x_] := x^2;
 
 crossFileFunc[x_, y_] := x^2 + y^2;
 
+crossFileFunc[] = 0;
+
 crossFileConst = 42;
 
 helperFunc[x_] := x + 1;

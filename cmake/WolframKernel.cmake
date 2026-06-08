@@ -68,6 +68,39 @@ else()
 	set(MATHLINK_LIB_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/Linux-x86-64/CompilerAdditions)
 endif()
 
+function(RunWolframKernelScript CODE OUTPUT_VARIABLE_NAME RESULT_VARIABLE_NAME)
+
+	if(NOT EXISTS ${WOLFRAMKERNEL})
+	message(FATAL_ERROR "WOLFRAMKERNEL does not exist. WOLFRAMKERNEL: ${WOLFRAMKERNEL}")
+	endif()
+
+	set(_script_code "Pause[${KERNEL_PAUSE}]\n${CODE}\n")
+	string(MD5 _script_hash "${_script_code}")
+	set(_script_dir ${PROJECT_BINARY_DIR}/CMakeFiles/WolframKernelScripts)
+	set(_script ${_script_dir}/${_script_hash}.wl)
+
+	file(MAKE_DIRECTORY ${_script_dir})
+	file(WRITE ${_script} "${_script_code}")
+
+	execute_process(
+		COMMAND
+			${WOLFRAMKERNEL} -noinit -noprompt -nopaclet -nostartuppaclets -script ${_script}
+		OUTPUT_VARIABLE
+			_script_output
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		WORKING_DIRECTORY
+			${PROJECT_SOURCE_DIR}
+		TIMEOUT
+			${KERNEL_TIMEOUT}
+		RESULT_VARIABLE
+			_script_result
+	)
+
+	set(${OUTPUT_VARIABLE_NAME} "${_script_output}" PARENT_SCOPE)
+	set(${RESULT_VARIABLE_NAME} "${_script_result}" PARENT_SCOPE)
+
+endfunction(RunWolframKernelScript)
+
 macro(CheckWolframKernel)
 
 	if(NOT EXISTS ${WOLFRAMKERNEL})
@@ -77,19 +110,7 @@ macro(CheckWolframKernel)
 	#
 	# get $Version
 	#
-	execute_process(
-		COMMAND
-			${WOLFRAMKERNEL} -noinit -noprompt -nopaclet -nostartuppaclets -runfirst Pause[${KERNEL_PAUSE}]\;Print[OutputForm[$Version]]\;Exit[]
-		OUTPUT_VARIABLE
-			VERSION
-		OUTPUT_STRIP_TRAILING_WHITESPACE
-		WORKING_DIRECTORY
-			${PROJECT_SOURCE_DIR}
-		TIMEOUT
-			${KERNEL_TIMEOUT}
-		RESULT_VARIABLE
-			VERSION_RESULT
-	)
+	RunWolframKernelScript("Print[OutputForm[$Version]]" VERSION VERSION_RESULT)
 
 	message(STATUS "VERSION: ${VERSION}")
 
@@ -100,19 +121,7 @@ macro(CheckWolframKernel)
 	#
 	# get $VersionNumber
 	#
-	execute_process(
-		COMMAND
-			${WOLFRAMKERNEL} -noinit -noprompt -nopaclet -nostartuppaclets -runfirst Pause[${KERNEL_PAUSE}]\;Print[OutputForm[Floor[100\ $VersionNumber\ +\ $ReleaseNumber]]]\;Exit[]
-		OUTPUT_VARIABLE
-			VERSION_NUMBER
-		OUTPUT_STRIP_TRAILING_WHITESPACE
-		WORKING_DIRECTORY
-			${PROJECT_SOURCE_DIR}
-		TIMEOUT
-			${KERNEL_TIMEOUT}
-		RESULT_VARIABLE
-			VERSION_NUMBER_RESULT
-	)
+	RunWolframKernelScript("Print[OutputForm[Floor[100 $VersionNumber + $ReleaseNumber]]]" VERSION_NUMBER VERSION_NUMBER_RESULT)
 
 	message(STATUS "VERSION_NUMBER: ${VERSION_NUMBER}")
 
@@ -127,19 +136,7 @@ macro(CheckWolframKernel)
 	#
 	# get $SystemID
 	#
-	execute_process(
-		COMMAND
-			${WOLFRAMKERNEL} -noinit -noprompt -nopaclet -nostartuppaclets -runfirst Pause[${KERNEL_PAUSE}]\;Print[OutputForm[$SystemID]]\;Exit[]
-		OUTPUT_VARIABLE
-			SYSTEMID
-		OUTPUT_STRIP_TRAILING_WHITESPACE
-		WORKING_DIRECTORY
-			${PROJECT_SOURCE_DIR}
-		TIMEOUT
-			${KERNEL_TIMEOUT}
-		RESULT_VARIABLE
-			SYSTEMID_RESULT
-	)
+	RunWolframKernelScript("Print[OutputForm[$SystemID]]" SYSTEMID SYSTEMID_RESULT)
 
 	message(STATUS "SYSTEMID: ${SYSTEMID}")
 
@@ -150,19 +147,7 @@ macro(CheckWolframKernel)
 	#
 	# get $SystemWordLength
 	#
-	execute_process(
-		COMMAND
-			${WOLFRAMKERNEL} -noinit -noprompt -nopaclet -nostartuppaclets -runfirst Pause[${KERNEL_PAUSE}]\;Print[OutputForm[$SystemWordLength]]\;Exit[]
-		OUTPUT_VARIABLE
-			SYSTEMWORDLENGTH
-		OUTPUT_STRIP_TRAILING_WHITESPACE
-		WORKING_DIRECTORY
-			${PROJECT_SOURCE_DIR}
-		TIMEOUT
-			${KERNEL_TIMEOUT}
-		RESULT_VARIABLE
-			SYSTEMWORDLENGTH_RESULT
-	)
+	RunWolframKernelScript("Print[OutputForm[$SystemWordLength]]" SYSTEMWORDLENGTH SYSTEMWORDLENGTH_RESULT)
 
 	message(STATUS "SYSTEMWORDLENGTH: ${SYSTEMWORDLENGTH}")
 
