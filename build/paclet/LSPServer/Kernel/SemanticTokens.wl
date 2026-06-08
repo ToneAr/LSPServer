@@ -1260,10 +1260,15 @@ Module[{params, doc, uri, entry, ast, scopingData, scopingTimedOut},
   If[ListQ[scopingData],
     If[TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]],
       warmSemanticTokenClassifierCaches[];
-      entry = KeyDrop[entry, {"SemanticTokens", "SemanticTokensIncomplete"}];
-      $OpenFilesMap[uri] = entry;
-      LSPServer`Private`queueSemanticTokensRefresh[
-        "DBG-ST runScopingData: cached scoping ready; queueing semantic-tokens refresh for " <> uri
+      (* Recompute full (scoping-aware) tokens into the cache instead of dropping
+         it, then deliver. computeAndCacheSemanticTokens clears the stale and
+         incomplete flags, so capture staleness first. *)
+      With[{wasStaleBefore = TrueQ[Lookup[entry, "SemanticTokensStale", False]]},
+        LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri];
+        LSPServer`Private`deliverFreshSemanticTokens[uri,
+          "DBG-ST runScopingData: cached scoping ready; delivering fresh tokens for " <> uri,
+          wasStaleBefore
+        ]
       ]
     ];
     log[0, "DBG-ST runScopingData: ALREADY CACHED uri=", uri];
@@ -1288,15 +1293,20 @@ Module[{params, doc, uri, entry, ast, scopingData, scopingTimedOut},
   entry["ScopingData"] = scopingData;
   If[TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]],
     If[scopingTimedOut,
-      entry = KeyDrop[entry, "SemanticTokensIncomplete"];
+      entry = KeyDrop[entry, {"SemanticTokensIncomplete", "SemanticTokensStale"}];
       $OpenFilesMap[uri] = entry;
       log[0, "DBG-ST runScopingData: timed out; keeping fast semantic tokens uri=", uri]
     ,
-      warmSemanticTokenClassifierCaches[];
-      entry = KeyDrop[entry, {"SemanticTokens", "SemanticTokensIncomplete"}];
       $OpenFilesMap[uri] = entry;
-      LSPServer`Private`queueSemanticTokensRefresh[
-        "DBG-ST runScopingData: computed scoping; queueing semantic-tokens refresh for " <> uri
+      warmSemanticTokenClassifierCaches[];
+      (* Recompute full tokens into cache (clears stale + incomplete) and deliver.
+         Capture staleness before the recompute clears the flag. *)
+      With[{wasStaleBefore = TrueQ[Lookup[entry, "SemanticTokensStale", False]]},
+        LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri];
+        LSPServer`Private`deliverFreshSemanticTokens[uri,
+          "DBG-ST runScopingData: computed scoping; delivering fresh tokens for " <> uri,
+          wasStaleBefore
+        ]
       ]
     ]
   ,

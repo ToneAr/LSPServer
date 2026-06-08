@@ -2583,6 +2583,9 @@ semanticTokensRefreshQueuedQ[] :=
   ]
 
 
+(* Stub — real implementation lands in the fresh-token delivery task. *)
+deliverFreshSemanticTokens[args___] := Null
+
 queueSemanticTokensRefresh[reason_String:""] :=
   If[$SemanticTokens && !TrueQ[$PendingTokenRefresh] && !semanticTokensRefreshQueuedQ[],
     If[reason =!= "",

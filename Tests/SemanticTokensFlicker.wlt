@@ -157,3 +157,36 @@ VerificationTest[
   {1, 2, 3, 4, 5},
   TestID -> "refresh-handler-keeps-cache"
 ]
+
+(* After runScopingData processes an entry whose tokens were stale, the cache
+   must remain populated (not dropped). *)
+VerificationTest[
+  Module[{uri = "file:///scoping.wl", cst, agg, ast, entry},
+    cst = CodeParser`CodeConcreteParse["f[x_] := Module[{a}, a]\n", "FileFormat" -> "Package"];
+    cst[[1]] = File;
+    agg = CodeParser`Abstract`Aggregate[cst];
+    ast = CodeParser`Abstract`Abstract[agg];
+    LSPServer`$SemanticTokens = True;
+    LSPServer`$ContentQueue = {};
+    LSPServer`$PreExpandContentQueue = {};
+    LSPServer`$PendingSemanticTokenRequests = <||>;
+    LSPServer`$OpenFilesMap = <|
+      uri -> <|
+        "Text" -> "f[x_] := Module[{a}, a]\n",
+        "CST" -> cst,
+        "AST" -> ast,
+        "SemanticTokens" -> {0, 0, 1, 2, 0},
+        "SemanticTokensStale" -> True,
+        "SemanticTokensIncomplete" -> True
+      |>
+    |>;
+    LSPServer`handleContent[<|
+      "method" -> "textDocument/runScopingData",
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+    |>];
+    entry = LSPServer`$OpenFilesMap[uri];
+    KeyExistsQ[entry, "SemanticTokens"]
+  ],
+  True,
+  TestID -> "runScopingData-keeps-cache-populated"
+]
