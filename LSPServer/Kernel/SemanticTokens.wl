@@ -805,7 +805,7 @@ Module[{entry, cst, ast, rawScopingData, scopingData, scopingTimedOut, scopingEl
 
   semanticTokens = transformed;
   entry["SemanticTokens"] = semanticTokens;
-  entry = KeyDrop[entry, "SemanticTokensIncomplete"];
+  entry = KeyDrop[entry, {"SemanticTokensIncomplete", "SemanticTokensStale"}];
   $OpenFilesMap[uri] = entry;
 
   log[0, "DBG-ST computeAndCacheSemanticTokens: COMPUTED tokens=", Length[semanticTokens], " uri=", uri];
@@ -1102,6 +1102,7 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   semanticTokens = transformed;
 
   entry["SemanticTokens"] = semanticTokens;
+  entry = KeyDrop[entry, "SemanticTokensStale"];
   If[needsScopingFollowupQ,
     entry["SemanticTokensIncomplete"] = True,
     entry = KeyDrop[entry, "SemanticTokensIncomplete"]

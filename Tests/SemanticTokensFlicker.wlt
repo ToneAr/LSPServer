@@ -14,3 +14,27 @@ VerificationTest[
   True,
   TestID -> "SemanticTokensFlicker-loader-smoke"
 ]
+
+(* A fresh compute via computeAndCacheSemanticTokens must clear any stale flag. *)
+VerificationTest[
+  Module[{uri = "file:///clearflag.wl", cst, agg, ast, entry},
+    cst = CodeParser`CodeConcreteParse["f[x_] := x\n", "FileFormat" -> "Package"];
+    cst[[1]] = File;
+    agg = CodeParser`Abstract`Aggregate[cst];
+    ast = CodeParser`Abstract`Abstract[agg];
+    LSPServer`$OpenFilesMap = <|
+      uri -> <|
+        "Text" -> "f[x_] := x\n",
+        "CST" -> cst,
+        "AST" -> ast,
+        "SemanticTokens" -> {0, 0, 1, 2, 0},
+        "SemanticTokensStale" -> True
+      |>
+    |>;
+    LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri];
+    entry = LSPServer`$OpenFilesMap[uri];
+    TrueQ[Lookup[entry, "SemanticTokensStale", False]]
+  ],
+  False,
+  TestID -> "computeAndCache-clears-stale-flag"
+]
