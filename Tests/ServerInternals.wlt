@@ -100,10 +100,10 @@ VerificationTest[
   ],
   {
     {<|"jsonrpc" -> "2.0", "id" -> -1, "method" -> "workspace/semanticTokens/refresh"|>},
-    False,
+    True,
     1
   },
-  TestID -> "SemanticTokens-Refresh-Clears-Cache"
+  TestID -> "SemanticTokens-Refresh-Keeps-Cache"
 ]
 
 
@@ -1123,8 +1123,8 @@ VerificationTest[
       }
     ]
   ],
-  {{}, True, False, False, {"workspace/semanticTokens/refresh"}, True},
-  TestID -> "RunScopingData-Invalidates-Incomplete-Tokens-And-Queues-Refresh"
+  {{}, True, True, False, {"workspace/semanticTokens/refresh"}, True},
+  TestID -> "RunScopingData-Recomputes-Incomplete-Tokens-And-Queues-Refresh"
 ]
 
 
@@ -1221,7 +1221,7 @@ VerificationTest[
       {
         Lookup[First[responses], "method", None] === "workspace/semanticTokens/refresh",
         queuedIDs,
-        recoveredData =!= {} && First[recoveredData] =!= {9, 9, 9},
+        recoveredData =!= {} && First[recoveredData] === {9, 9, 9},
         Lookup[LSPServer`$PendingSemanticTokenRequests, uri, Missing["NotFound"]],
         KeyExistsQ[LSPServer`$OpenFilesMap[uri], "SemanticTokens"]
       }

@@ -1438,6 +1438,14 @@ finishWorkspaceIndexing[] :=
           entry = Lookup[$OpenFilesMap, uri, Null];
           If[AssociationQ[entry],
             entry["WorkspaceLints"] = Null;
+            (* Indexing changed symbol classification (newly-indexed dependency
+               symbols). Mark cached tokens stale so the refresh below recomputes
+               them with the new classification instead of serving a cache-hit.
+               The serve path keeps showing the stale tokens until the fresh ones
+               are ready, so coloring never blanks. *)
+            If[KeyExistsQ[entry, "SemanticTokens"],
+              entry["SemanticTokensStale"] = True
+            ];
             $OpenFilesMap[uri] = entry
           ]
         ]

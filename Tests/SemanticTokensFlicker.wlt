@@ -269,3 +269,24 @@ VerificationTest[
   False,
   TestID -> "stuck-refresh-resets-after-3s"
 ]
+
+(* After indexing completes, classification may have changed (new dependency
+   symbols), so finishWorkspaceIndexing must mark open files' cached tokens stale
+   (kept, not dropped) before its refresh, so the client's re-fetch recomputes
+   with the new classification rather than hitting a stale cache. *)
+VerificationTest[
+  Module[{uri = "file:///idxdone.wl", entry},
+    LSPServer`$SemanticTokens = True;
+    LSPServer`$IndexingWasActive = True;
+    LSPServer`$ContentQueue = {};
+    LSPServer`$PendingTokenRefresh = False;
+    LSPServer`$WorkspaceRootPath = None;
+    LSPServer`$WorkspaceDiagnosticsSweepURIs = {};
+    LSPServer`$OpenFilesMap = <|uri -> <|"SemanticTokens" -> {1, 2, 3}, "Text" -> "x\n"|>|>;
+    Quiet[LSPServer`Private`finishWorkspaceIndexing[]];
+    entry = LSPServer`$OpenFilesMap[uri];
+    {TrueQ[Lookup[entry, "SemanticTokensStale", False]], KeyExistsQ[entry, "SemanticTokens"]}
+  ],
+  {True, True},
+  TestID -> "finishWorkspaceIndexing-marks-tokens-stale"
+]

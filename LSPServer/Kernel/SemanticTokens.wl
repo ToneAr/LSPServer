@@ -1263,7 +1263,7 @@ Module[{params, doc, uri, entry, ast, scopingData, scopingTimedOut},
       (* Recompute full (scoping-aware) tokens into the cache instead of dropping
          it, then deliver. computeAndCacheSemanticTokens clears the stale and
          incomplete flags, so capture staleness first. *)
-      With[{wasStaleBefore = TrueQ[Lookup[entry, "SemanticTokensStale", False]]},
+      With[{wasStaleBefore = TrueQ[Lookup[entry, "SemanticTokensStale", False]] || TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]]},
         LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri];
         LSPServer`Private`deliverFreshSemanticTokens[uri,
           "DBG-ST runScopingData: cached scoping ready; delivering fresh tokens for " <> uri,
@@ -1301,7 +1301,7 @@ Module[{params, doc, uri, entry, ast, scopingData, scopingTimedOut},
       warmSemanticTokenClassifierCaches[];
       (* Recompute full tokens into cache (clears stale + incomplete) and deliver.
          Capture staleness before the recompute clears the flag. *)
-      With[{wasStaleBefore = TrueQ[Lookup[entry, "SemanticTokensStale", False]]},
+      With[{wasStaleBefore = TrueQ[Lookup[entry, "SemanticTokensStale", False]] || TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]]},
         LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri];
         LSPServer`Private`deliverFreshSemanticTokens[uri,
           "DBG-ST runScopingData: computed scoping; delivering fresh tokens for " <> uri,
