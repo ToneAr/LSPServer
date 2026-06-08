@@ -83,6 +83,8 @@ In `LSPServer/Kernel/SemanticTokens.wl` (`handleContent[... "fullFencepost"]`):
 - **Prefer stale-but-complete over fresh-but-incomplete:** do not serve the "fast" global-only pass
   when complete stale tokens are available — this removes the color-*change* flash where locals and
   parameters momentarily recolor as global symbols.
+  **(SUPERSEDED — see Implementation amendment 3: this froze coloring and was reverted. The fast pass
+  is served on the natural re-fetch; only the monochrome blank is eliminated, not the color-change.)**
 - `Null` only for: closed file, never-opened file, superseded request (existing correct paths).
 
 ### Section 3 — Recompute & fresh-token delivery
@@ -192,12 +194,18 @@ Three refinements were made beyond the original sections above; they are part of
    `stale || incomplete` before recomputing — otherwise the full (scoping-aware) tokens would sit in
    cache undelivered.
 
-3. **Prefer stale-complete over fast-incomplete (Section 2, third bullet — now implemented).** When an
-   edit leaves stale-but-complete tokens and scoping is not yet cached (`needsScopingFollowupQ`), the
-   `fullFencepost` handler serves the stale set and marks the entry incomplete, rather than computing a
-   fast/global-only pass that would recolor locals/params for a frame. The queued scoping followup then
-   recomputes and delivers the full set. This eliminates the fast→full *color-change* flicker (the
-   monochrome blank was already eliminated by Sections 1–2).
+3. **Prefer stale-complete over fast-incomplete (Section 2, third bullet) — TRIED, THEN REVERTED.**
+   This was briefly implemented (serve stale + mark incomplete on `needsScopingFollowupQ`) but caused a
+   worse regression: **coloring stopped refreshing.** Serving stale on the client's *natural* post-edit
+   re-request shifts all base freshness onto the server-push `workspace/semanticTokens/refresh` loop,
+   which is racy (the `$PendingTokenRefresh` coalescing can suppress the one refresh that matters) and
+   varies by client — so the client kept showing old-text coloring and the fresh push often never
+   landed. **Resolution:** on `needsScopingFollowupQ` the handler now recomputes the **fast pass for the
+   current text** and serves that (current-text-correct, self-healing on the client's own request),
+   exactly as before this change. The scoping followup still upgrades locals/params to full
+   classification via one refresh (original behavior). The monochrome blank stays fixed by Sections 1–2;
+   the minor fast→full *color-change* on scoping-eligible files is accepted as the lesser issue. Test:
+   `fullFencepost-recomputes-fresh-on-natural-refetch`.
 
 Additional regression tests cover (1) (`finishWorkspaceIndexing-marks-tokens-stale`) and (3)
 (`fullFencepost-prefers-stale-over-fast-pass`); (2) is covered by the updated

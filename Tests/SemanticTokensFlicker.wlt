@@ -291,14 +291,15 @@ VerificationTest[
   TestID -> "finishWorkspaceIndexing-marks-tokens-stale"
 ]
 
-(* PREFER STALE-COMPLETE over a fast/global-only pass: when the entry is ready
-   (CST/AST present) but scoping is not yet cached (needsScopingFollowupQ) and the
-   tokens are stale, the fencepost serves the stale set rather than computing a
-   fast pass that would recolor locals/params. The exact stale data is returned,
-   proving no fast recompute happened, and the entry is marked incomplete so the
-   queued scoping followup delivers the full set. *)
+(* On the client's natural re-fetch after an edit (CST/AST present, scoping not
+   yet cached, tokens stale), the fencepost must RECOMPUTE current-text tokens
+   (the fast pass) and clear the stale flag — NOT serve the stale set. Serving
+   stale here would make base coloring depend on a racy server-push refresh and
+   can freeze coloring. The fast pass is current-text-correct and self-healing on
+   the client's own request; it marks the entry incomplete so the queued scoping
+   followup later upgrades locals/params to full classification. *)
 VerificationTest[
-  Module[{uri = "file:///preferstale.wl", cst, agg, ast, res, entry},
+  Module[{uri = "file:///refetch.wl", cst, agg, ast, res, data, entry},
     cst = CodeParser`CodeConcreteParse["f[x_] := Module[{a}, a]\n", "FileFormat" -> "Package"];
     cst[[1]] = File;
     agg = CodeParser`Abstract`Aggregate[cst];
@@ -320,9 +321,12 @@ VerificationTest[
       "id" -> 11,
       "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
     |>];
+    data = Lookup[Lookup[First[res, <||>], "result", <||>], "data", Missing["x"]];
     entry = LSPServer`$OpenFilesMap[uri];
-    {res, TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]]}
+    {ListQ[data] && data =!= {7, 7, 7, 7, 7},
+     TrueQ[Lookup[entry, "SemanticTokensStale", False]],
+     TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]]}
   ],
-  {{<|"jsonrpc" -> "2.0", "id" -> 11, "result" -> <|"data" -> {7, 7, 7, 7, 7}|>|>}, True},
-  TestID -> "fullFencepost-prefers-stale-over-fast-pass"
+  {True, False, True},
+  TestID -> "fullFencepost-recomputes-fresh-on-natural-refetch"
 ]
