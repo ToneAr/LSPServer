@@ -3424,6 +3424,16 @@ Module[{params, doc, uri, text, lastChange, entry, changes, oldEntry,
     "PreviousUserSymbols" -> Lookup[oldEntry, "PreviousUserSymbols", Lookup[oldEntry, "UserSymbols", Missing["NotAvailable"]]]
   |>;
 
+  (* Never-blank: carry the last-good semantic tokens across the edit and mark
+     them stale. The serve path will display these (rather than nothing) until
+     fresh tokens are computed, so coloring never goes monochrome on a keystroke. *)
+  With[{oldTokens = Lookup[oldEntry, "SemanticTokens", Null]},
+    If[oldTokens =!= Null,
+      entry["SemanticTokens"] = oldTokens;
+      entry["SemanticTokensStale"] = True
+    ]
+  ];
+
   (* Pre-process .ipwl files so the parse handlers use annotation-free source *)
   If[StringEndsQ[uri, ".ipwl"],
     entry["PreprocessedText"] = LSPServer`TypeWL`PreprocessIPWL[text][[1]]

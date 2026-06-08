@@ -38,3 +38,28 @@ VerificationTest[
   False,
   TestID -> "computeAndCache-clears-stale-flag"
 ]
+
+(* An edit must NOT discard the cached tokens; it preserves them and marks them stale. *)
+VerificationTest[
+  Module[{uri = "file:///edit.wl", entry},
+    LSPServer`$ContentQueue = {};
+    LSPServer`$OpenFilesMap = <|
+      uri -> <|
+        "Text" -> "f[x_] := x\n",
+        "SemanticTokens" -> {0, 0, 3, 2, 0},
+        "AST" -> Null
+      |>
+    |>;
+    LSPServer`handleContent[<|
+      "method" -> "textDocument/didChangeFencepost",
+      "params" -> <|
+        "textDocument" -> <|"uri" -> uri|>,
+        "contentChanges" -> {<|"text" -> "g[y_] := y\n"|>}
+      |>
+    |>];
+    entry = LSPServer`$OpenFilesMap[uri];
+    {Lookup[entry, "SemanticTokens", Missing["x"]], TrueQ[Lookup[entry, "SemanticTokensStale", False]]}
+  ],
+  {{0, 0, 3, 2, 0}, True},
+  TestID -> "didChangeFencepost-preserves-stale-tokens"
+]
