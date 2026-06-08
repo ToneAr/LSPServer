@@ -138,3 +138,22 @@ VerificationTest[
   False,
   TestID -> "fullFencepost-stale-cache-recomputes-fresh"
 ]
+
+(* The refresh handler must NOT drop cached tokens. Tokens are fresh in cache by
+   the time a refresh is emitted; keeping them makes the re-fetch an instant
+   cache-hit with no blank gap. *)
+VerificationTest[
+  Module[{uri = "file:///refresh.wl"},
+    LSPServer`$SemanticTokens = True;
+    LSPServer`$ContentQueue = {};
+    LSPServer`$PendingSemanticTokenRequests = <||>;
+    LSPServer`$InternalRequestId = -100;
+    LSPServer`$OpenFilesMap = <|
+      uri -> <|"SemanticTokens" -> {1, 2, 3, 4, 5}|>
+    |>;
+    LSPServer`handleContent[<|"method" -> "workspace/semanticTokens/refresh"|>];
+    Lookup[LSPServer`$OpenFilesMap[uri], "SemanticTokens", Missing["x"]]
+  ],
+  {1, 2, 3, 4, 5},
+  TestID -> "refresh-handler-keeps-cache"
+]

@@ -2612,9 +2612,10 @@ Module[{id, invalidated = 0, recovered = 0},
     Function[{uri},
       Module[{entry = Lookup[$OpenFilesMap, uri, Null], recoveredCount = 0},
         If[AssociationQ[entry],
+          (* Do NOT drop cached tokens. They are already fresh by the time a
+             refresh is emitted, so keeping them makes the client's re-fetch an
+             instant cache-hit with no blank gap. *)
           If[KeyExistsQ[entry, "SemanticTokens"],
-            (* Clear cached tokens so VS Code fetches fresh ones. *)
-            $OpenFilesMap[uri] = KeyDrop[entry, "SemanticTokens"];
             invalidated += 1
           ];
 
