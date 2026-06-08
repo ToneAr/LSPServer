@@ -963,7 +963,22 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
   ];
 
   If[needsScopingFollowupQ,
-    queueSemanticTokenScopingFollowup[uri]
+    queueSemanticTokenScopingFollowup[uri];
+    (* Prefer serving the last-good (stale) tokens over a fresh fast/global-only
+       pass, which would briefly recolor locals/params as global symbols. Mark the
+       entry incomplete so the queued scoping followup recomputes and delivers the
+       full (scoping-aware) set. *)
+    If[staleQ && semanticTokens =!= Null,
+      Module[{staleEntry = Lookup[$OpenFilesMap, uri, Null]},
+        If[AssociationQ[staleEntry],
+          staleEntry["SemanticTokensIncomplete"] = True;
+          $OpenFilesMap[uri] = staleEntry
+        ]
+      ];
+      clearPending[];
+      log[0, "DBG-ST fencepost: SERVE STALE (prefer over fast pass) id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
+      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
+    ]
   ,
     If[scopingEligibleQ && LSPServer`SemanticTokens`computeAndCacheSemanticTokens[uri],
       entry = Lookup[$OpenFilesMap, uri, Null];

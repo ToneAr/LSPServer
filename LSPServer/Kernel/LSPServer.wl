@@ -2594,7 +2594,8 @@ semanticTokensRefreshQueuedQ[] :=
 (*
 deliverFreshSemanticTokens[uri, reason, wasStale]
 
-Called after fresh semantic tokens have been written to $OpenFilesMap[uri].
+Called when fresh tokens are available — or, as in runIndexUpdate, will be
+recomputed by the re-fetch this triggers — so the client is brought up to date.
 `wasStale` says whether the tokens the client is currently displaying were the
 stale, carried-across-the-edit set (callers capture this BEFORE the recompute,
 which clears the SemanticTokensStale flag). Delivery is gap-free:

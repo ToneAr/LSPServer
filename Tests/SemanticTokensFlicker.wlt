@@ -290,3 +290,39 @@ VerificationTest[
   {True, True},
   TestID -> "finishWorkspaceIndexing-marks-tokens-stale"
 ]
+
+(* PREFER STALE-COMPLETE over a fast/global-only pass: when the entry is ready
+   (CST/AST present) but scoping is not yet cached (needsScopingFollowupQ) and the
+   tokens are stale, the fencepost serves the stale set rather than computing a
+   fast pass that would recolor locals/params. The exact stale data is returned,
+   proving no fast recompute happened, and the entry is marked incomplete so the
+   queued scoping followup delivers the full set. *)
+VerificationTest[
+  Module[{uri = "file:///preferstale.wl", cst, agg, ast, res, entry},
+    cst = CodeParser`CodeConcreteParse["f[x_] := Module[{a}, a]\n", "FileFormat" -> "Package"];
+    cst[[1]] = File;
+    agg = CodeParser`Abstract`Aggregate[cst];
+    ast = CodeParser`Abstract`Abstract[agg];
+    LSPServer`$ContentQueue = {};
+    LSPServer`$PreExpandContentQueue = {};
+    LSPServer`$PendingSemanticTokenRequests = <||>;
+    LSPServer`$OpenFilesMap = <|
+      uri -> <|
+        "Text" -> "f[x_] := Module[{a}, a]\n",
+        "CST" -> cst,
+        "AST" -> ast,
+        "SemanticTokens" -> {7, 7, 7, 7, 7},
+        "SemanticTokensStale" -> True
+      |>
+    |>;
+    res = LSPServer`handleContent[<|
+      "method" -> "textDocument/semanticTokens/fullFencepost",
+      "id" -> 11,
+      "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+    |>];
+    entry = LSPServer`$OpenFilesMap[uri];
+    {res, TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]]}
+  ],
+  {{<|"jsonrpc" -> "2.0", "id" -> 11, "result" -> <|"data" -> {7, 7, 7, 7, 7}|>|>}, True},
+  TestID -> "fullFencepost-prefers-stale-over-fast-pass"
+]
