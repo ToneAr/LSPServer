@@ -175,3 +175,33 @@ paclet (`~/.Wolfram/Paclets/Repository/LSPServer--*/Kernel/`) via `cp` (do not e
 - `LSPServer/Kernel/SemanticTokens.wl` — token computation, `fullFencepost`, `runScopingData`.
 - `LSPServer/Kernel/LSPServer.wl` — `didChangeFencepost`, `runIndexUpdate`, refresh handler,
   `finishWorkspaceIndexing`, `queueSemanticTokensRefresh`, pending-fencepost recovery helpers.
+
+## Implementation amendments (discovered during execution)
+
+Three refinements were made beyond the original sections above; they are part of the shipped design:
+
+1. **Indexing reclassification (Section 3 consequence).** Because the refresh handler no longer drops
+   caches, `finishWorkspaceIndexing` must now mark open files' cached tokens stale
+   (`SemanticTokensStale -> True`) before its `workspace/semanticTokens/refresh`. Otherwise newly-indexed
+   dependency symbols would be served from a stale cache-hit instead of being reclassified. The serve
+   path shows the stale tokens until the recompute lands, so coloring still never blanks.
+
+2. **Fast→full delivery gate.** `deliverFreshSemanticTokens` only actively delivers (recover pending,
+   else one coalesced refresh) when the displayed tokens were **stale OR incomplete**. After full
+   scoping, the displayed set is *incomplete* (fast pass), not *stale*, so `runScopingData` captures
+   `stale || incomplete` before recomputing — otherwise the full (scoping-aware) tokens would sit in
+   cache undelivered.
+
+3. **Prefer stale-complete over fast-incomplete (Section 2, third bullet — now implemented).** When an
+   edit leaves stale-but-complete tokens and scoping is not yet cached (`needsScopingFollowupQ`), the
+   `fullFencepost` handler serves the stale set and marks the entry incomplete, rather than computing a
+   fast/global-only pass that would recolor locals/params for a frame. The queued scoping followup then
+   recomputes and delivers the full set. This eliminates the fast→full *color-change* flicker (the
+   monochrome blank was already eliminated by Sections 1–2).
+
+Additional regression tests cover (1) (`finishWorkspaceIndexing-marks-tokens-stale`) and (3)
+(`fullFencepost-prefers-stale-over-fast-pass`); (2) is covered by the updated
+`RunScopingData-Recomputes-Incomplete-Tokens-And-Queues-Refresh` test in `Tests/ServerInternals.wlt`.
+Three pre-existing `ServerInternals.wlt` tests that encoded the old drop-cache / clear-on-refresh
+contract were updated to the new behavior. The suite is otherwise unchanged from its 7 pre-existing,
+unrelated failures.
