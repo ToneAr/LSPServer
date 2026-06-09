@@ -42,7 +42,7 @@ Stages 2 and 3 will be specced when reached; this document fully specifies Stage
 
 ### Components & changes (all in `LSPServer/Kernel/LSPServer.wl` unless noted)
 
-1. **Correct-binary launch.** Replace the bare `LaunchKernels[1]` with a launch that explicitly uses the running kernel binary `$CommandLine[[1]]`. Use the `SubKernels`LocalKernels`` configuration API to construct a local kernel whose program is that binary (the exact constructor is resolved during implementation; fallback chain: explicit binary → bare `LaunchKernels[1]` → `$Failed`). New helper `launchWorkerKernel[]` returns the kernel object or `$Failed`. `launchDiagnosticsKernel[]` delegates to it.
+1. **Robust launch with error capture.** New helper `launchWorkerKernel[]` returns the kernel object or `$Failed`. Sequence: `Quiet[Needs["Parallel`"]]`; set `Parallel`Settings`$RelaunchFailedKernels = True` (built-in auto-relaunch of dead subkernels); then `kernel = Check[LaunchKernels[1], $Failed, …]` capturing the actual failure message(s) into `$WorkerLastFailureReason`. (Spike finding: bare `LaunchKernels[1]` succeeds in this environment using the default local-kernel config; `$CommandLine[[1]]` is a valid binary path but `SubKernels`LocalKernels`` configuration symbols are not available until after a launch, so an explicit-binary override is **not** the primary path.) **Fallback chain:** bare `LaunchKernels[1]` → (only if that fails and the captured error implies a bad/missing kernel command) a best-effort retry that sets the local-kernel command to `$CommandLine[[1]]` via whatever `SubKernels`LocalKernels`` API is available once `Parallel`` has loaded → `$Failed`. The captured error reason is what makes the binary question answerable instead of guessed. `launchDiagnosticsKernel[]` delegates to this helper.
 
 2. **Health check.** New helper `workerKernelHealthyQ[kernel]`: run `TimeConstrained[ParallelEvaluate[1+1, kernel], 5, $TimedOut]` and require the result `=== 2`. Only mark the worker live after this passes. Used right after launch and to detect a dead worker before submitting work. (Pre-submit health checks during normal operation use a short 0.2 s timeout so a hung worker doesn't stall the main loop.)
 
@@ -62,6 +62,7 @@ Stages 2 and 3 will be specced when reached; this document fully specifies Stage
 
 - No new work is offloaded (that is Stage 3). Stage 1 only makes the *existing* worker usage (diagnostics, hover) reliable and observable, and lays the launch foundation.
 - No change to what runs synchronously vs async beyond fixing the launch.
+- **Stage 1 will not, by itself, make editing faster.** Semantic-token computation and `UpdateFileIndex` run synchronously on the main kernel regardless of worker status; the per-edit speedups come from Stage 2 (remove redundant work) and Stage 3 (offload tokens/index). Stage 1's value is a reliable, observable foundation and graceful degradation.
 
 ### Error handling
 
