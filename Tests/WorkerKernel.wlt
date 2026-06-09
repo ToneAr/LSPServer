@@ -11,3 +11,11 @@ VerificationTest[
   True,
   TestID -> "WorkerKernel-loader-smoke"
 ]
+
+(* Health check returns False for non-kernel sentinels without touching ParallelEvaluate. *)
+VerificationTest[
+  {LSPServer`Private`workerKernelHealthyQ[None],
+   LSPServer`Private`workerKernelHealthyQ[$Failed]},
+  {False, False},
+  TestID -> "workerKernelHealthyQ-rejects-sentinels"
+]

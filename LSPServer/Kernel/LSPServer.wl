@@ -1179,6 +1179,14 @@ Module[{contents, lastContents},
 ]
 
 
+(*
+workerKernelHealthyQ[kernel] — True only if kernel is a live subkernel that
+answers a trivial round-trip within a timeout. Never throws.
+*)
+workerKernelHealthyQ[kernel_] :=
+  kernel =!= None && kernel =!= $Failed &&
+  Quiet[TimeConstrained[ParallelEvaluate[1 + 1, kernel], 5, $TimedOut]] === 2
+
 launchDiagnosticsKernel[] :=
 Module[{kernel = $Failed, setupResult = $Failed},
   If[$DiagnosticsKernel =!= None || $DiagnosticsTask =!= None,
