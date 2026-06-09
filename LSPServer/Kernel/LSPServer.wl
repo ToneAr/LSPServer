@@ -82,6 +82,9 @@ $DiagnosticsTaskKind
 $DiagnosticsTaskResult
 $DiagnosticsTaskStartTime
 $DiagnosticsKernelLaunchAfter
+$WorkerLaunchAttempts
+$WorkerLastFailureReason
+$WorkerStatusNotified
 $HoverTask
 $HoverTaskURI
 $HoverTaskID
@@ -851,6 +854,13 @@ $DiagnosticsTaskKind = None
 $DiagnosticsTaskResult = None
 $DiagnosticsTaskStartTime = None
 $DiagnosticsKernelLaunchAfter = None
+$WorkerLaunchAttempts = 0
+$WorkerLastFailureReason = None
+$WorkerStatusNotified = False
+$WorkerMaxLaunchAttempts = 4
+$WorkerBackoffSchedule = {5, 15, 45, 120}
+$WorkerHealthCheckInterval = 10
+$WorkerLastHealthCheck = 0
 $HoverTask = None
 $HoverTaskURI = None
 $HoverTaskID = None
@@ -918,6 +928,10 @@ Module[{logFile, logFileStream,
   $DiagnosticsTaskResult        = None;
   $DiagnosticsTaskStartTime     = None;
   $DiagnosticsKernelLaunchAfter = None;
+  $WorkerLaunchAttempts         = 0;
+  $WorkerLastFailureReason      = None;
+  $WorkerStatusNotified         = False;
+  $WorkerLastHealthCheck        = 0;
   $HoverTask                    = None;
   $HoverTaskURI                 = None;
   $HoverTaskID                  = None;
