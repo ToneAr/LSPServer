@@ -1187,6 +1187,30 @@ workerKernelHealthyQ[kernel_] :=
   kernel =!= None && kernel =!= $Failed &&
   Quiet[TimeConstrained[ParallelEvaluate[1 + 1, kernel], 5, $TimedOut]] === 2
 
+(*
+notifyWorkerStatus[ok, reason] — enqueue a window/showMessage so the user knows
+whether the background worker started. Failures always notify (Warning, with
+reason). Success notifies once (Info), guarded by $WorkerStatusNotified.
+*)
+notifyWorkerStatus[ok_, reason_] :=
+Module[{type, message},
+  If[TrueQ[ok],
+    If[TrueQ[$WorkerStatusNotified], Return[Null]];
+    $WorkerStatusNotified = True;
+    type = $MessageType["Info"];
+    message = "LSPServer: background worker kernel started."
+  ,
+    type = $MessageType["Warning"];
+    message = "LSPServer: background worker kernel failed to start; " <>
+      "diagnostics and coloring will run on the main thread (slower). Reason: " <>
+      ToString[reason]
+  ];
+  appendContentsToContentQueue[{
+    <|"method" -> "window/showMessage", "params" -> <|"type" -> type, "message" -> message|>|>
+  }];
+  Null
+]
+
 launchDiagnosticsKernel[] :=
 Module[{kernel = $Failed, setupResult = $Failed},
   If[$DiagnosticsKernel =!= None || $DiagnosticsTask =!= None,
