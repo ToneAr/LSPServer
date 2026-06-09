@@ -1192,6 +1192,24 @@ notifyWorkerStatus[ok, reason] — enqueue a window/showMessage so the user know
 whether the background worker started. Failures always notify (Warning, with
 reason). Success notifies once (Info), guarded by $WorkerStatusNotified.
 *)
+(*
+scheduleWorkerRelaunch[] — schedule the next launch attempt with exponential
+backoff, or give up (leaving $DiagnosticsKernelLaunchAfter = None) once the
+attempt cap is reached. $WorkerLaunchAttempts is the count of attempts already made.
+*)
+scheduleWorkerRelaunch[] :=
+Module[{idx, delay},
+  If[$WorkerLaunchAttempts >= $WorkerMaxLaunchAttempts,
+    $DiagnosticsKernelLaunchAfter = None;
+    Return[Null]
+  ];
+  idx = Min[$WorkerLaunchAttempts, Length[$WorkerBackoffSchedule]];
+  idx = Max[idx, 1];
+  delay = $WorkerBackoffSchedule[[idx]];
+  $DiagnosticsKernelLaunchAfter = AbsoluteTime[] + delay;
+  Null
+]
+
 notifyWorkerStatus[ok_, reason_] :=
 Module[{type, message},
   If[TrueQ[ok],

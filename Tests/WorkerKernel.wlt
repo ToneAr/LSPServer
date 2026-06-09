@@ -48,3 +48,33 @@ VerificationTest[
   1,
   TestID -> "notifyWorkerStatus-success-once"
 ]
+
+(* First few failures schedule a future relaunch with increasing backoff. *)
+VerificationTest[
+  Module[{t0, sched1, sched2},
+    LSPServer`$WorkerLaunchAttempts = 1;
+    LSPServer`$DiagnosticsKernelLaunchAfter = None;
+    t0 = AbsoluteTime[];
+    LSPServer`Private`scheduleWorkerRelaunch[];
+    sched1 = LSPServer`$DiagnosticsKernelLaunchAfter;
+    LSPServer`$WorkerLaunchAttempts = 2;
+    LSPServer`$DiagnosticsKernelLaunchAfter = None;
+    LSPServer`Private`scheduleWorkerRelaunch[];
+    sched2 = LSPServer`$DiagnosticsKernelLaunchAfter;
+    {NumberQ[sched1] && sched1 > t0, NumberQ[sched2] && sched2 >= sched1}
+  ],
+  {True, True},
+  TestID -> "scheduleWorkerRelaunch-backoff-increases"
+]
+
+(* After the attempt cap, no further relaunch is scheduled. *)
+VerificationTest[
+  Module[{},
+    LSPServer`$WorkerLaunchAttempts = 99;
+    LSPServer`$DiagnosticsKernelLaunchAfter = None;
+    LSPServer`Private`scheduleWorkerRelaunch[];
+    LSPServer`$DiagnosticsKernelLaunchAfter
+  ],
+  None,
+  TestID -> "scheduleWorkerRelaunch-stops-after-cap"
+]
