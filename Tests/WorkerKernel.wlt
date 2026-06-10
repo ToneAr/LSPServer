@@ -120,3 +120,38 @@ VerificationTest[
   {True, True, True, True},
   TestID -> "launchWorkerKernel-failure-notifies-and-retries"
 ]
+
+(* maybeRelaunchDeadWorker: if the worker is supposed to be live but is unhealthy,
+   it is marked failed and a relaunch is scheduled. *)
+VerificationTest[
+  Module[{},
+    (* A bogus non-kernel value stands in for a dead kernel: healthyQ -> False. *)
+    LSPServer`$DiagnosticsKernel = "deadkernel";
+    LSPServer`$WorkerLaunchAttempts = 1;
+    LSPServer`$DiagnosticsKernelLaunchAfter = None;
+    LSPServer`$WorkerLastHealthCheck = 0;
+    LSPServer`Private`maybeRelaunchDeadWorker[];
+    {LSPServer`$DiagnosticsKernel, NumberQ[LSPServer`$DiagnosticsKernelLaunchAfter]}
+  ],
+  {None, True},
+  TestID -> "maybeRelaunchDeadWorker-detects-dead"
+]
+
+(* The relaunch trigger must fire for a failed worker ($Failed), not only None —
+   otherwise the backoff retry scheduled by a failed launch never runs. *)
+VerificationTest[
+  Module[{due},
+    LSPServer`$DiagnosticsKernel = $Failed;
+    LSPServer`$DiagnosticsKernelLaunchAfter = AbsoluteTime[] - 1;
+    due = {LSPServer`Private`workerRelaunchDueQ[]};
+    LSPServer`$DiagnosticsKernel = None;
+    AppendTo[due, LSPServer`Private`workerRelaunchDueQ[]];
+    LSPServer`$DiagnosticsKernelLaunchAfter = AbsoluteTime[] + 1000;
+    AppendTo[due, LSPServer`Private`workerRelaunchDueQ[]];
+    LSPServer`$DiagnosticsKernelLaunchAfter = None;
+    AppendTo[due, LSPServer`Private`workerRelaunchDueQ[]];
+    due
+  ],
+  {True, True, False, False},
+  TestID -> "workerRelaunchDueQ-fires-for-failed-and-none"
+]

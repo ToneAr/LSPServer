@@ -1330,6 +1330,42 @@ Module[{kernel = $Failed, setupResult = $Failed, reason = "unknown"},
 
 
 (*
+workerRelaunchDueQ[] — True when a (re)launch attempt is due: no live worker
+(None or $Failed) and the scheduled launch time has arrived. Must accept
+$Failed, not just None, or the backoff retry after a failed launch never runs.
+*)
+workerRelaunchDueQ[] :=
+  ($DiagnosticsKernel === None || $DiagnosticsKernel === $Failed) &&
+  NumberQ[$DiagnosticsKernelLaunchAfter] &&
+  AbsoluteTime[] >= $DiagnosticsKernelLaunchAfter
+
+
+(*
+maybeRelaunchDeadWorker[] — throttled liveness check. If we believe we have a
+worker ($DiagnosticsKernel is not None/$Failed) but it fails a health check,
+mark it dead (None) and schedule a relaunch. Throttled by $WorkerHealthCheckInterval.
+*)
+maybeRelaunchDeadWorker[] :=
+Module[{},
+  If[$DiagnosticsKernel === None || $DiagnosticsKernel === $Failed,
+    Return[Null]
+  ];
+  If[AbsoluteTime[] - $WorkerLastHealthCheck < $WorkerHealthCheckInterval,
+    Return[Null]
+  ];
+  $WorkerLastHealthCheck = AbsoluteTime[];
+  If[!workerKernelHealthyQ[$DiagnosticsKernel],
+    log[0, "WARNING: worker kernel became unresponsive; relaunching"];
+    Quiet[AbortKernels[$DiagnosticsKernel]];
+    Quiet[CloseKernels[$DiagnosticsKernel]];
+    $DiagnosticsKernel = None;
+    scheduleWorkerRelaunch[]
+  ];
+  Null
+]
+
+
+(*
 Back-compat wrapper: existing call sites use launchDiagnosticsKernel[].
 *)
 launchDiagnosticsKernel[] := launchWorkerKernel[]
@@ -1587,12 +1623,13 @@ Module[{openFilesMapCopy, entryCopy, jobs, res, methods, contents, toRemove, job
     Throw[Null]
   ];
 
-  If[$DiagnosticsKernel === None &&
-     NumberQ[$DiagnosticsKernelLaunchAfter] &&
-     AbsoluteTime[] >= $DiagnosticsKernelLaunchAfter,
+  If[workerRelaunchDueQ[],
     $DiagnosticsKernelLaunchAfter = None;
-    launchDiagnosticsKernel[]
+    launchWorkerKernel[]
   ];
+
+  (* Detect a worker that died/hung and schedule a relaunch (throttled). *)
+  maybeRelaunchDeadWorker[];
 
   If[$HoverTask =!= None && $DiagnosticsKernel =!= $Failed && $DiagnosticsKernel =!= None,
     Module[{taskResult, taskURI, taskID},
