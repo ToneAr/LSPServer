@@ -7,21 +7,63 @@ if(NOT DEFINED MATHEMATICA_INSTALL_DIR)
 			"$ENV{HOME}/Wolfram/Wolfram/*/Executables/wolframscript"
 			"$ENV{HOME}/Wolfram/WolframEngine/*/Executables/wolframscript"
 			"$ENV{HOME}/Wolfram/Mathematica/*/Executables/wolframscript"
+			"/usr/local/Wolfram/Wolfram/*/Executables/wolframscript"
 			"/usr/local/Wolfram/WolframEngine/*/Executables/wolframscript"
 			"/usr/local/Wolfram/Mathematica/*/Executables/wolframscript"
 		)
 		if(_ws_candidates)
-			list(SORT _ws_candidates)
+			if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
+				# Natural compare so e.g. 15.0 sorts after 9.0
+				list(SORT _ws_candidates COMPARE NATURAL)
+			else()
+				list(SORT _ws_candidates)
+			endif()
 			list(GET _ws_candidates -1 _WOLFRAMSCRIPT)
 		endif()
 	endif()
 	if(_WOLFRAMSCRIPT)
+		#
+		# A bare expression makes wolframscript print only its value.
+		# Print[$InstallationDirectory] must NOT be used here: -code also prints
+		# the value of the last expression, so Print emits the directory AND a
+		# trailing "Null" line, which would be captured into the variable and
+		# embed a newline in every derived path.
+		#
 		execute_process(
-			COMMAND ${_WOLFRAMSCRIPT} -code "Print[$InstallationDirectory]"
+			COMMAND ${_WOLFRAMSCRIPT} -code "$InstallationDirectory"
 			OUTPUT_VARIABLE MATHEMATICA_INSTALL_DIR
+			RESULT_VARIABLE _ws_result
 			OUTPUT_STRIP_TRAILING_WHITESPACE
 			TIMEOUT 60
 		)
+		# Keep only the first line, in case of startup/licensing banners.
+		string(REGEX REPLACE "\r?\n.*" "" MATHEMATICA_INSTALL_DIR "${MATHEMATICA_INSTALL_DIR}")
+		if(NOT _ws_result EQUAL 0 OR NOT EXISTS "${MATHEMATICA_INSTALL_DIR}")
+			message(WARNING "wolframscript (${_WOLFRAMSCRIPT}) did not report a usable $InstallationDirectory (exit ${_ws_result}: \"${MATHEMATICA_INSTALL_DIR}\"); falling back")
+			unset(MATHEMATICA_INSTALL_DIR)
+		endif()
+	endif()
+	if(NOT MATHEMATICA_INSTALL_DIR)
+		# Look for an installed kernel layout directly.
+		file(GLOB _wk_candidates
+			"$ENV{HOME}/Wolfram/Wolfram/*/Executables/WolframKernel"
+			"$ENV{HOME}/Wolfram/WolframEngine/*/Executables/WolframKernel"
+			"$ENV{HOME}/Wolfram/Mathematica/*/Executables/WolframKernel"
+			"/usr/local/Wolfram/Wolfram/*/Executables/WolframKernel"
+			"/usr/local/Wolfram/WolframEngine/*/Executables/WolframKernel"
+			"/usr/local/Wolfram/Mathematica/*/Executables/WolframKernel"
+		)
+		if(_wk_candidates)
+			if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
+				list(SORT _wk_candidates COMPARE NATURAL)
+			else()
+				list(SORT _wk_candidates)
+			endif()
+			list(GET _wk_candidates -1 _wk_found)
+			get_filename_component(_wk_exec_dir ${_wk_found} DIRECTORY)
+			get_filename_component(MATHEMATICA_INSTALL_DIR ${_wk_exec_dir} DIRECTORY)
+			message(STATUS "Found kernel layout without wolframscript: ${MATHEMATICA_INSTALL_DIR}")
+		endif()
 	endif()
 	if(NOT MATHEMATICA_INSTALL_DIR)
 		if(CMAKE_HOST_WIN32)
@@ -62,7 +104,13 @@ elseif(CMAKE_HOST_APPLE)
 	set(MATHLINK_INCLUDE_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/MacOSX-x86-64/CompilerAdditions)
 	set(MATHLINK_LIB_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/MacOSX-x86-64/CompilerAdditions)
 else()
-	set(WOLFRAMKERNEL_DEFAULT ${MATHEMATICA_INSTALL_DIR}/Executables/WolframKernel)
+	if(NOT EXISTS ${MATHEMATICA_INSTALL_DIR}/Executables/WolframKernel
+			AND EXISTS ${MATHEMATICA_INSTALL_DIR}/Executables/wolfram)
+		# Some Wolfram Engine layouts ship only the lowercase launcher
+		set(WOLFRAMKERNEL_DEFAULT ${MATHEMATICA_INSTALL_DIR}/Executables/wolfram)
+	else()
+		set(WOLFRAMKERNEL_DEFAULT ${MATHEMATICA_INSTALL_DIR}/Executables/WolframKernel)
+	endif()
 	set(WOLFRAMLIBRARY_INCLUDE_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/IncludeFiles/C)
 	set(MATHLINK_INCLUDE_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/Linux-x86-64/CompilerAdditions)
 	set(MATHLINK_LIB_DIR_DEFAULT ${MATHEMATICA_INSTALL_DIR}/SystemFiles/Links/MathLink/DeveloperKit/Linux-x86-64/CompilerAdditions)
