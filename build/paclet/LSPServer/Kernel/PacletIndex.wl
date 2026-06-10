@@ -2943,6 +2943,11 @@ Module[{definitions, docComments, structuredContexts, packageContext, packageSco
     "ExportedSymbols" -> Replace[Lookup[exportedDeclaredSymbols, "name", {}], _Missing -> {}],
     "ScopedSymbols" -> Replace[Lookup[scopedDeclaredSymbols, "name", {}], _Missing -> {}]
   |>];
+  (* Precomputed once per file; walkASTForDefinitions must not rebuild these per node. *)
+  structuredContexts = Join[structuredContexts, <|
+    "ExportedNameSet" -> AssociationMap[True &, structuredContexts["ExportedSymbols"]],
+    "ScopedNameSet" -> AssociationMap[True &, structuredContexts["ScopedSymbols"]]
+  |>];
   definitions = Internal`Bag[];
   walkASTForDefinitions[definitions, ast, None, False, uri, docComments, structuredContexts];
   resolveInferredPatterns[Join[Internal`BagPart[definitions, All], declaredSymbols], uri]
@@ -2964,6 +2969,11 @@ Module[{definitions, structuredContexts, packageContext, packageScopeContext,
   structuredContexts = Join[structuredContexts, <|
     "ExportedSymbols" -> Replace[Lookup[exportedDeclaredSymbols, "name", {}], _Missing -> {}],
     "ScopedSymbols" -> Replace[Lookup[scopedDeclaredSymbols, "name", {}], _Missing -> {}]
+  |>];
+  (* Precomputed once per file; walkASTForDefinitions must not rebuild these per node. *)
+  structuredContexts = Join[structuredContexts, <|
+    "ExportedNameSet" -> AssociationMap[True &, structuredContexts["ExportedSymbols"]],
+    "ScopedNameSet" -> AssociationMap[True &, structuredContexts["ScopedSymbols"]]
   |>];
   definitions = Internal`Bag[];
   walkASTForDefinitions[definitions, ast, None, False, uri, <||>, structuredContexts];
@@ -3776,29 +3786,48 @@ Arguments:
   uri - file URI
   docComments - Association of endLine -> parsed doc-comment (from extractDocComments)
 *)
+(*
+Context/visibility resolution for a definition name, using the name sets
+precomputed by extractDefinitions ("ExportedNameSet"/"ScopedNameSet").
+Falls back to building the set from the symbol lists if the precomputed keys
+are absent (defensive; only pays at definition nodes, not per AST node).
+*)
+walkNameSet[structuredContexts_, setKey_String, listKey_String] :=
+  Lookup[structuredContexts, setKey,
+    AssociationMap[True &, Lookup[structuredContexts, listKey, {}]]]
+
+walkDefinitionContextFor[name_String, structuredContexts_, currentContext_] :=
+Which[
+  TrueQ[Lookup[walkNameSet[structuredContexts, "ExportedNameSet", "ExportedSymbols"], name, False]] &&
+      StringQ[Lookup[structuredContexts, "PackageContext", None]],
+    Lookup[structuredContexts, "PackageContext", None],
+  TrueQ[Lookup[walkNameSet[structuredContexts, "ScopedNameSet", "ScopedSymbols"], name, False]] &&
+      StringQ[Lookup[structuredContexts, "PackageScopeContext", None]],
+    Lookup[structuredContexts, "PackageScopeContext", None],
+  True, currentContext
+]
+
+walkDefinitionVisibilityFor[name_String, structuredContexts_, inPrivate_] :=
+Which[
+  TrueQ[Lookup[walkNameSet[structuredContexts, "ExportedNameSet", "ExportedSymbols"], name, False]], "public",
+  TrueQ[Lookup[walkNameSet[structuredContexts, "ScopedNameSet", "ScopedSymbols"], name, False]], "package",
+  inPrivate, "private",
+  True, "public"
+]
+
+
+(*
+Leaf fast-path: a LeafNode can match no definition/context pattern and has no
+children — visiting it must cost nothing. The bulk of AST nodes are leaves.
+*)
+walkASTForDefinitions[_, LeafNode[_, _, _], _, _, _, _, _] := Null
+
 walkASTForDefinitions[bag_, node_, currentContext_, inPrivate_, uri_, docComments_, structuredContexts_] :=
-Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, structuredPackageScopeContext,
-  structuredPrivateContext, exportedNames, scopedNames, definitionContextFor, definitionVisibilityFor},
+Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
 
   newContext = currentContext;
   newInPrivate = inPrivate;
-  structuredPackageContext = Lookup[structuredContexts, "PackageContext", None];
-  structuredPackageScopeContext = Lookup[structuredContexts, "PackageScopeContext", None];
   structuredPrivateContext = Lookup[structuredContexts, "PrivateContext", None];
-  exportedNames = AssociationMap[True &, Lookup[structuredContexts, "ExportedSymbols", {}]];
-  scopedNames = AssociationMap[True &, Lookup[structuredContexts, "ScopedSymbols", {}]];
-
-  definitionContextFor[name_String] := Which[
-    TrueQ[Lookup[exportedNames, name, False]] && StringQ[structuredPackageContext], structuredPackageContext,
-    TrueQ[Lookup[scopedNames, name, False]] && StringQ[structuredPackageScopeContext], structuredPackageScopeContext,
-    True, newContext
-  ];
-  definitionVisibilityFor[name_String] := Which[
-    TrueQ[Lookup[exportedNames, name, False]], "public",
-    TrueQ[Lookup[scopedNames, name, False]], "package",
-    newInPrivate, "private",
-    True, "public"
-  ];
 
   If[StringQ[structuredPrivateContext] && !StringQ[newContext],
     newContext = structuredPrivateContext;
@@ -3901,8 +3930,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
                   "uri" -> uri,
                   "source" -> src,
                   "kind" -> "function",
-                  "context" -> definitionContextFor[def[[2]]],
-                  "visibility" -> definitionVisibilityFor[def[[2]]],
+                  "context" -> walkDefinitionContextFor[def[[2]], structuredContexts, newContext],
+                  "visibility" -> walkDefinitionVisibilityFor[def[[2]], structuredContexts, newInPrivate],
                   "DocComment" -> docComment,
                   "InputPatterns" -> signatureInfo["InputPatterns"],
                   "Variadic" -> signatureInfo["Variadic"],
@@ -3953,8 +3982,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
           "uri" -> uri,
           "source" -> src,
           "kind" -> "function",
-          "context" -> definitionContextFor[lhsHead],
-          "visibility" -> definitionVisibilityFor[lhsHead],
+          "context" -> walkDefinitionContextFor[lhsHead, structuredContexts, newContext],
+          "visibility" -> walkDefinitionVisibilityFor[lhsHead, structuredContexts, newInPrivate],
           "DocComment" -> docComment,
           "InputPatterns" -> signatureInfo["InputPatterns"],
           "Variadic" -> signatureInfo["Variadic"],
@@ -3992,8 +4021,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
                 "uri" -> uri,
                 "source" -> src,
                 "kind" -> "constant",
-                "context" -> definitionContextFor[def[[2]]],
-                "visibility" -> definitionVisibilityFor[def[[2]]],
+                "context" -> walkDefinitionContextFor[def[[2]], structuredContexts, newContext],
+                "visibility" -> walkDefinitionVisibilityFor[def[[2]], structuredContexts, newInPrivate],
                 "DocComment" -> docComment,
                 "InferredPattern" -> inferredPat,
                 "rhsCallHead" -> rhsCallHead,
@@ -4017,8 +4046,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
           "uri" -> uri,
           "source" -> node[[3, Key[Source]]],
           "kind" -> "option",
-          "context" -> definitionContextFor[node[[2, 1, 2, 1, 2]]],
-          "visibility" -> definitionVisibilityFor[node[[2, 1, 2, 1, 2]]],
+          "context" -> walkDefinitionContextFor[node[[2, 1, 2, 1, 2]], structuredContexts, newContext],
+          "visibility" -> walkDefinitionVisibilityFor[node[[2, 1, 2, 1, 2]], structuredContexts, newInPrivate],
           "DocComment" -> None,
           "OptionNames" -> optionData["OptionNames"],
           "OptionTargets" -> optionData["OptionTargets"]
@@ -4035,8 +4064,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPackageContext, stru
         "uri" -> uri,
         "source" -> node[[3, Key[Source]]],
         "kind" -> "attribute",
-        "context" -> definitionContextFor[node[[2, 1, 2, 1, 2]]],
-        "visibility" -> definitionVisibilityFor[node[[2, 1, 2, 1, 2]]],
+        "context" -> walkDefinitionContextFor[node[[2, 1, 2, 1, 2]], structuredContexts, newContext],
+        "visibility" -> walkDefinitionVisibilityFor[node[[2, 1, 2, 1, 2]], structuredContexts, newInPrivate],
         "DocComment" -> None
       |>]
   ];
