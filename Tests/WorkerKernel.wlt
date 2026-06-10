@@ -78,3 +78,22 @@ VerificationTest[
   None,
   TestID -> "scheduleWorkerRelaunch-stops-after-cap"
 ]
+
+(* Status command returns a report assoc reflecting current worker state. *)
+VerificationTest[
+  Module[{res, report},
+    LSPServer`$DiagnosticsKernel = None;
+    LSPServer`$WorkerLaunchAttempts = 3;
+    LSPServer`$WorkerLastFailureReason = "nope";
+    res = LSPServer`handleContent[<|
+      "method" -> "workspace/executeCommand",
+      "id" -> 5,
+      "params" -> <|"command" -> "worker_kernel_status"|>
+    |>];
+    report = Lookup[First[res, <||>], "result", <||>];
+    {Lookup[report, "running", "?"], Lookup[report, "attempts", "?"],
+     Lookup[report, "lastFailureReason", "?"]}
+  ],
+  {False, 3, "nope"},
+  TestID -> "worker-kernel-status-command"
+]

@@ -29,7 +29,7 @@ Module[{params, id, command, res},
   params = content["params"];
   command = params["command"];
 
-  Switch[command,
+  res = Switch[command,
     (*
     toggle_inlay_hints toggles $InlayHints on/off.
     Returns the new state so the client can display a notification.
@@ -127,6 +127,13 @@ Module[{params, id, command, res},
             log[1, "payload_responsiveness_test:> \n\n"];
 
             {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> {} |>, <| "method" -> "payloadTest", "payload" -> StringJoin@Flatten@Table[CharacterRange["a", "z"], 100000] |>}
+          ,
+          (*
+          worker_kernel_status returns the background-worker status report.
+          *)
+          "worker_kernel_status",
+
+            {<| "jsonrpc" -> "2.0", "id" -> id, "result" -> LSPServer`Private`workerStatusReport[] |>}
           ,
           _,
 

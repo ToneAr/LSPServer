@@ -389,6 +389,10 @@ $ExecuteCommandProvider = <|
     *)
     "toggle_inlay_hints",
     (*
+    worker_kernel_status reports background-worker launch state (debug/diagnosis)
+    *)
+    "worker_kernel_status",
+    (*
     roundtrip_responsiveness_test is an undocumented, debug command
     *)
     "roundtrip_responsiveness_test",
@@ -1228,6 +1232,18 @@ Module[{type, message},
   }];
   Null
 ]
+
+(*
+workerStatusReport[] — a plain association describing worker state, for the
+worker_kernel_status execute-command and logging.
+*)
+workerStatusReport[] :=
+  <|
+    "running" -> (workerKernelHealthyQ[$DiagnosticsKernel]),
+    "kernelBin" -> Replace[$DiagnosticsKernelBin, Except[_String] -> Null],
+    "attempts" -> $WorkerLaunchAttempts,
+    "lastFailureReason" -> Replace[$WorkerLastFailureReason, Except[_String] -> Null]
+  |>
 
 launchDiagnosticsKernel[] :=
 Module[{kernel = $Failed, setupResult = $Failed},
