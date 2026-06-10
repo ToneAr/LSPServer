@@ -97,3 +97,26 @@ VerificationTest[
   {False, 3, "nope"},
   TestID -> "worker-kernel-status-command"
 ]
+
+(* A failed launch records the reason, notifies the user, and schedules a retry. *)
+VerificationTest[
+  Module[{notified, scheduled},
+    LSPServer`$ContentQueue = {};
+    LSPServer`$WorkerStatusNotified = False;
+    LSPServer`$WorkerLaunchAttempts = 0;
+    LSPServer`$DiagnosticsKernel = None;
+    LSPServer`$DiagnosticsKernelLaunchAfter = None;
+    LSPServer`$WorkerLastFailureReason = None;
+    (* Force LaunchKernels to fail. *)
+    Block[{Parallel`Kernels`LaunchKernels = ($Failed &), LaunchKernels = ($Failed &)},
+      LSPServer`Private`launchWorkerKernel[]
+    ];
+    notified = Count[LSPServer`$ContentQueue, KeyValuePattern["method" -> "window/showMessage"]] >= 1;
+    scheduled = NumberQ[LSPServer`$DiagnosticsKernelLaunchAfter];
+    {LSPServer`$DiagnosticsKernel === $Failed,
+     LSPServer`$WorkerLaunchAttempts >= 1,
+     notified, scheduled}
+  ],
+  {True, True, True, True},
+  TestID -> "launchWorkerKernel-failure-notifies-and-retries"
+]

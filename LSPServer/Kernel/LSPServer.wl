@@ -1245,66 +1245,94 @@ workerStatusReport[] :=
     "lastFailureReason" -> Replace[$WorkerLastFailureReason, Except[_String] -> Null]
   |>
 
-launchDiagnosticsKernel[] :=
-Module[{kernel = $Failed, setupResult = $Failed},
-  If[$DiagnosticsKernel =!= None || $DiagnosticsTask =!= None,
+(*
+launchWorkerKernel[] — robustly launch the background worker subkernel.
+Increments $WorkerLaunchAttempts. On success: provisions the kernel, sets
+$DiagnosticsKernel and $DiagnosticsKernelBin, notifies (once). On failure:
+records $WorkerLastFailureReason, sets $DiagnosticsKernel = $Failed, notifies,
+and schedules a backoff retry. Always returns Null.
+*)
+launchWorkerKernel[] :=
+Module[{kernel = $Failed, setupResult = $Failed, reason = "unknown"},
+  If[$DiagnosticsKernel =!= None && $DiagnosticsKernel =!= $Failed,
+    Return[Null]
+  ];
+  If[$DiagnosticsTask =!= None,
+    (* A stale in-flight task from a dead worker: requeue + clear before relaunching. *)
     cleanupDiagnosticsWorker[True]
   ];
 
+  $WorkerLaunchAttempts = $WorkerLaunchAttempts + 1;
+
   Quiet[Needs["Parallel`"]];
-  CheckAbort[
-    kernel = Quiet[Check[
-      Module[{kernels = LaunchKernels[1]},
-        If[ListQ[kernels] && Length[kernels] > 0, First[kernels], $Failed]
-      ],
-      $Failed
-    ]];
-    If[kernel =!= $Failed,
-      setupResult = Quiet[Check[
-        ParallelEvaluate[
-          Needs["CodeParser`"];
-          Needs["CodeInspector`"];
-          Needs["CodeFormatter`"],
-          kernel
+  (* Built-in auto-relaunch of dead subkernels, belt-and-suspenders with our own. *)
+  Quiet[Parallel`Settings`$RelaunchFailedKernels = True];
+
+  kernel = Quiet[
+    CheckAbort[
+      Check[
+        Module[{ks = LaunchKernels[1]},
+          If[ListQ[ks] && Length[ks] > 0, First[ks], $Failed]
         ],
         $Failed
-      ]];
-      If[setupResult =!= $Failed,
-        setupResult = Quiet[Check[
-          DistributeDefinitions[
-            "LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
-            "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
-            "LSPServer`Diagnostics`Private`",
-            kernel
-          ],
-          $Failed
-        ]]
-      ];
-      If[setupResult =!= $Failed,
-        $DiagnosticsKernel = kernel;
-        $DiagnosticsKernelBin = $CommandLine[[1]]
-      ,
-        Quiet[AbortKernels[kernel]];
-        Quiet[CloseKernels[kernel]];
-        $DiagnosticsKernel = $Failed;
-        $DiagnosticsKernelBin = $Failed
-      ]
-    ,
-      $DiagnosticsKernel = $Failed;
-      $DiagnosticsKernelBin = $Failed
-    ],
-    If[kernel =!= $Failed,
-      Quiet[AbortKernels[kernel]];
-      Quiet[CloseKernels[kernel]]
-    ];
-    $DiagnosticsKernel = $Failed;
-    $DiagnosticsKernelBin = $Failed
+      ],
+      $Failed
+    ]
   ];
 
-  If[$DiagnosticsKernel === $Failed,
-    log[0, "WARNING: LaunchKernels failed - workspace diagnostics will run synchronously"]
-  ]
+  If[!workerKernelHealthyQ[kernel],
+    If[kernel =!= $Failed && kernel =!= None,
+      Quiet[AbortKernels[kernel]]; Quiet[CloseKernels[kernel]]
+    ];
+    reason = "LaunchKernels failed or returned an unhealthy kernel (attempt " <>
+      ToString[$WorkerLaunchAttempts] <> ")";
+    $WorkerLastFailureReason = reason;
+    $DiagnosticsKernel = $Failed;
+    $DiagnosticsKernelBin = $Failed;
+    log[0, "WARNING: worker kernel launch failed (attempt ", $WorkerLaunchAttempts, "): ", reason];
+    notifyWorkerStatus[False, reason];
+    scheduleWorkerRelaunch[];
+    Return[Null]
+  ];
+
+  setupResult = Quiet[Check[
+    ParallelEvaluate[
+      Needs["CodeParser`"]; Needs["CodeInspector`"]; Needs["CodeFormatter`"],
+      kernel
+    ];
+    DistributeDefinitions[
+      "LSPServer`", "LSPServer`Private`", "LSPServer`Utils`",
+      "LSPServer`PacletIndex`", "LSPServer`Diagnostics`",
+      "LSPServer`Diagnostics`Private`",
+      kernel
+    ],
+    $Failed
+  ]];
+
+  If[setupResult === $Failed,
+    Quiet[AbortKernels[kernel]]; Quiet[CloseKernels[kernel]];
+    $WorkerLastFailureReason = "worker provisioning (Needs/DistributeDefinitions) failed";
+    $DiagnosticsKernel = $Failed;
+    $DiagnosticsKernelBin = $Failed;
+    log[0, "WARNING: worker kernel provisioning failed (attempt ", $WorkerLaunchAttempts, ")"];
+    notifyWorkerStatus[False, $WorkerLastFailureReason];
+    scheduleWorkerRelaunch[];
+    Return[Null]
+  ];
+
+  $DiagnosticsKernel = kernel;
+  $DiagnosticsKernelBin = $CommandLine[[1]];
+  $WorkerLastFailureReason = None;
+  log[0, "worker kernel launched (attempt ", $WorkerLaunchAttempts, ")"];
+  notifyWorkerStatus[True, ""];
+  Null
 ]
+
+
+(*
+Back-compat wrapper: existing call sites use launchDiagnosticsKernel[].
+*)
+launchDiagnosticsKernel[] := launchWorkerKernel[]
 
 
 clearDiagnosticsTaskState[requeueClosedFileSweep_:False] :=
