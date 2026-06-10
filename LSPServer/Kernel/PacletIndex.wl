@@ -738,13 +738,13 @@ Module[{text, cst, ast, uri, symbols, definitions, usages, fileDeps,
     Throw[Null]
   ];
 
-  definitions = extractDefinitions[ast, cst, uri];
+  structuredMetadata = structuredPackageMetadata[filePath, ast];
+  definitions = extractDefinitions[ast, cst, uri, structuredMetadata];
   usages = extractUsages[ast, uri];
   symbols = extractSymbolReferences[cst, uri];
   fileDeps = extractDependencies[ast];
   contextLoads = extractContextLoads[ast];
   explicitContextRefs = extractExplicitContextRefs[cst];
-  structuredMetadata = structuredPackageMetadata[filePath, ast];
   mergedStructuredData = mergeStructuredDependencyData[fileDeps, contextLoads, structuredMetadata];
   fileDeps = Lookup[mergedStructuredData, "Dependencies", fileDeps];
   contextLoads = Lookup[mergedStructuredData, "ContextLoads", contextLoads];
@@ -2930,10 +2930,20 @@ Extract definitions from AST, with doc-comment association via CST.
 The overload with cst_ builds the docComments map and threads it into walkASTForDefinitions.
 *)
 extractDefinitions[ast_, cst_, uri_] :=
+  extractDefinitions[ast, cst, uri, Automatic]
+
+(*
+The 4-arg form lets UpdateFileIndex pass its already-computed
+structuredPackageMetadata instead of recomputing it (~60-95 ms per update).
+*)
+extractDefinitions[ast_, cst_, uri_, structuredMetadataIn_] :=
 Module[{definitions, docComments, structuredContexts, packageContext, packageScopeContext,
   exportedDeclaredSymbols, scopedDeclaredSymbols, declaredSymbols},
   docComments = ExtractDocComments[cst];
-  structuredContexts = structuredPackageMetadata[uriPath[uri], ast];
+  structuredContexts = If[structuredMetadataIn === Automatic,
+    structuredPackageMetadata[uriPath[uri], ast],
+    structuredMetadataIn
+  ];
   packageContext = Lookup[structuredContexts, "PackageContext", None];
   packageScopeContext = Lookup[structuredContexts, "PackageScopeContext", None];
   exportedDeclaredSymbols = structuredPackageDeclaredSymbols[ast, uri, "PackageExported", "public", packageContext];
@@ -4744,13 +4754,13 @@ Module[{cst, agg, ast, filePath, definitions, usages, symbols, fileDeps,
     Throw[{cst, agg, ast}]
   ];
 
-  definitions = extractDefinitions[ast, cst, uri];
+  structuredMetadata = structuredPackageMetadata[filePath, ast];
+  definitions = extractDefinitions[ast, cst, uri, structuredMetadata];
   usages = extractUsages[ast, uri];
   symbols = extractSymbolReferences[cst, uri];
   fileDeps = extractDependencies[ast];
   contextLoads = extractContextLoads[ast];
   explicitContextRefs = extractExplicitContextRefs[cst];
-  structuredMetadata = structuredPackageMetadata[filePath, ast];
   mergedStructuredData = mergeStructuredDependencyData[fileDeps, contextLoads, structuredMetadata];
   fileDeps = Lookup[mergedStructuredData, "Dependencies", fileDeps];
   contextLoads = Lookup[mergedStructuredData, "ContextLoads", contextLoads];
