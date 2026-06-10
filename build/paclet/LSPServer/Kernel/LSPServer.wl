@@ -1186,9 +1186,12 @@ Module[{contents, lastContents},
 (*
 workerKernelHealthyQ[kernel] — True only if kernel is a live subkernel that
 answers a trivial round-trip within a timeout. Never throws.
+The KernelObject head guard is load-bearing: ParallelEvaluate on anything else
+launches the default parallel kernels (~5 s main-thread stall), and aborting
+that launch via TimeConstrained leaves Parallel` half-initialized.
 *)
 workerKernelHealthyQ[kernel_] :=
-  kernel =!= None && kernel =!= $Failed &&
+  MatchQ[kernel, _KernelObject] &&
   Quiet[TimeConstrained[ParallelEvaluate[1 + 1, kernel], 5, $TimedOut]] === 2
 
 (*
@@ -1246,6 +1249,15 @@ workerStatusReport[] :=
   |>
 
 (*
+workerLaunchKernels[] — indirection seam over LaunchKernels[1] so tests can
+simulate launch failure. Tests must not Block System`LaunchKernels itself:
+it carries an autoload stub (OwnValue), and Block-ing it across the load
+discards the real definitions for the rest of the session.
+*)
+workerLaunchKernels[] := LaunchKernels[1]
+
+
+(*
 launchWorkerKernel[] — robustly launch the background worker subkernel.
 Increments $WorkerLaunchAttempts. On success: provisions the kernel, sets
 $DiagnosticsKernel and $DiagnosticsKernelBin, notifies (once). On failure:
@@ -1268,20 +1280,23 @@ Module[{kernel = $Failed, setupResult = $Failed, reason = "unknown"},
   (* Built-in auto-relaunch of dead subkernels, belt-and-suspenders with our own. *)
   Quiet[Parallel`Settings`$RelaunchFailedKernels = True];
 
+  (* Judge the launch by its result shape + health check, not by messages:
+     LaunchKernels can emit benign messages on success, and treating those as
+     failure would leak a live kernel while reporting $Failed. *)
   kernel = Quiet[
     CheckAbort[
-      Check[
-        Module[{ks = LaunchKernels[1]},
-          If[ListQ[ks] && Length[ks] > 0, First[ks], $Failed]
-        ],
-        $Failed
+      Module[{ks = workerLaunchKernels[]},
+        If[ListQ[ks] && Length[ks] > 0 && MatchQ[First[ks], _KernelObject],
+          First[ks],
+          $Failed
+        ]
       ],
       $Failed
     ]
   ];
 
   If[!workerKernelHealthyQ[kernel],
-    If[kernel =!= $Failed && kernel =!= None,
+    If[MatchQ[kernel, _KernelObject],
       Quiet[AbortKernels[kernel]]; Quiet[CloseKernels[kernel]]
     ];
     reason = "LaunchKernels failed or returned an unhealthy kernel (attempt " <>
@@ -1356,8 +1371,10 @@ Module[{},
   $WorkerLastHealthCheck = AbsoluteTime[];
   If[!workerKernelHealthyQ[$DiagnosticsKernel],
     log[0, "WARNING: worker kernel became unresponsive; relaunching"];
-    Quiet[AbortKernels[$DiagnosticsKernel]];
-    Quiet[CloseKernels[$DiagnosticsKernel]];
+    If[MatchQ[$DiagnosticsKernel, _KernelObject],
+      Quiet[AbortKernels[$DiagnosticsKernel]];
+      Quiet[CloseKernels[$DiagnosticsKernel]]
+    ];
     $DiagnosticsKernel = None;
     scheduleWorkerRelaunch[]
   ];

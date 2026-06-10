@@ -107,8 +107,10 @@ VerificationTest[
     LSPServer`$DiagnosticsKernel = None;
     LSPServer`$DiagnosticsKernelLaunchAfter = None;
     LSPServer`$WorkerLastFailureReason = None;
-    (* Force LaunchKernels to fail. *)
-    Block[{Parallel`Kernels`LaunchKernels = ($Failed &), LaunchKernels = ($Failed &)},
+    (* Force the launch to fail via the seam. Do NOT Block System`LaunchKernels:
+       it carries an autoload stub, and Block-ing it across the package load
+       discards the real definitions for the rest of the session. *)
+    Block[{LSPServer`Private`workerLaunchKernels = ($Failed &)},
       LSPServer`Private`launchWorkerKernel[]
     ];
     notified = Count[LSPServer`$ContentQueue, KeyValuePattern["method" -> "window/showMessage"]] >= 1;
@@ -154,4 +156,37 @@ VerificationTest[
   ],
   {True, True, False, False},
   TestID -> "workerRelaunchDueQ-fires-for-failed-and-none"
+]
+
+(* OPT-IN integration test: actually launch a subkernel and round-trip. Set the
+   environment variable LSP_WORKER_INTEGRATION=1 to run it; otherwise it is a
+   trivial pass so the suite stays fast/hermetic. *)
+VerificationTest[
+  If[Environment["LSP_WORKER_INTEGRATION"] === "1",
+    Module[{ks, ok},
+      (* Judge by result shape, not Check: LaunchKernels can emit benign
+         messages on success, which would make Check mis-report failure. *)
+      ks = Quiet[LaunchKernels[1]];
+      ok = LSPServer`Private`workerKernelHealthyQ[
+        If[ListQ[ks] && Length[ks] > 0, First[ks], $Failed]];
+      If[ListQ[ks], Quiet[CloseKernels[ks]]];
+      ok
+    ],
+    True
+  ],
+  True,
+  TestID -> "worker-launch-integration-optin"
+]
+
+(* Health check must reject non-KernelObject values instantly. Calling
+   ParallelEvaluate on a bogus value silently launches default kernels (~5 s
+   main-thread stall) and aborting that launch corrupts Parallel` state. *)
+VerificationTest[
+  Module[{t0, ok},
+    t0 = AbsoluteTime[];
+    ok = LSPServer`Private`workerKernelHealthyQ["deadkernel"];
+    {ok, AbsoluteTime[] - t0 < 1.0}
+  ],
+  {False, True},
+  TestID -> "workerKernelHealthyQ-rejects-non-kernels-fast"
 ]

@@ -204,6 +204,12 @@ Module[{bytess, line},
   (* ================= Read Write Loop =============================== *)
 readEvalWriteLoop["Socket", sock_]:=
 Module[{content, contents},
+
+  (* Install yield-point thunks so long-running handlers can serve
+     interactive requests mid-computation. *)
+  LSPServer`$TryQueueThunk = Function[TryQueue["Socket", sock]];
+  LSPServer`$WriteLSPResultThunk = Function[{c}, writeLSPResult["Socket", sock, c]];
+
   While[True,
 
     TryQueue["Socket", sock];
@@ -211,7 +217,7 @@ Module[{content, contents},
     ProcessScheduledJobs[];
 
     If[LSPServer`Private`contentQueueEmptyQ[],
-      Pause[0.1];
+      Pause[0.01];
       Continue[]
     ];
 
