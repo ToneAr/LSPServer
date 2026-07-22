@@ -77,6 +77,25 @@ VerificationTest[
 ]
 
 
+(* SubValue definitions should not check the first LHS call as a call site. *)
+VerificationTest[
+  Module[{result, diags},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/publishDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>
+    ];
+    diags = result[[1, "params", "diagnostics"]];
+    Select[diags,
+      StringStartsQ[Lookup[#, "code", ""], "DocCommentInputMismatch"] &&
+        #["range"]["start"]["line"] === 198 &]
+  ]
+  ,
+  {},
+  TestID -> "IDE-Test-DocComment-SubValueDefinition-NoInputMismatch"
+]
+
+
 (* ── Test 10: StringLength[3] triggers a builtin-pattern mismatch warning ── *)
 (*
 builtinStrLen = StringLength[ 3 ] is on line 101 (1-based) = line 100 (0-based).

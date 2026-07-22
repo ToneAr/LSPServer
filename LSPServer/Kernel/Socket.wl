@@ -17,7 +17,7 @@ Needs["CodeParser`Utils`"]
 (* ================   Socket functions   ==================== *)
 (* ========================================================== *)
 
-lspMsgAssoc = <| "lspMsg" -> "", "msgInQueue" -> "" |>
+lspMsgAssoc = <|"lspMsg" -> "", "lspMsgs" -> {}, "msgInQueue" -> ""|>
 
 (* =================   Initialize   ======================= *)
 
@@ -29,52 +29,90 @@ initializeLSPComm["Socket"] := SocketConnect[5555, "TCP"]
 
 checkContent[str_] := StringContainsQ[str, "Content-Length: "]
 
-checkStartPosition[str_] := First @ Flatten @ StringPosition[str, "Content"] === 1
+checkStartPosition[str_] := StringStartsQ[str, "Content"]
 
-checkMsgLength[str_] :=
-Module[{numStrs, pos, requiredLength, maxMsgLength},
-  (* Position of the header *)
-  numStrs = StringCases[str, "Content-Length: " ~~ length:NumberString :> length];
-  requiredLength = ToExpression[First[numStrs]];
-  (* Extract the header*)
-  pos = StringPosition[str, "Content-Length: " <> # <> "\r\n\r\n"]& /@ numStrs // Flatten;
-  maxMsgLength = StringLength @ StringTake[str, {pos[[2]] + 1, StringLength[str]}];
+contentLengthFromHeader[header_String] :=
+	Module[{lengths},
+		lengths =
+			StringCases[
+				header,
+				"Content-Length:" ~~
+				WhitespaceCharacter.. ~~
+				length:DigitCharacter.. :> length
+			];
+		If[lengths === {}, Missing["NotFound"], FromDigits[First[lengths]]]
+	]
 
-  maxMsgLength >= requiredLength
-]
+parseCompleteMessageBodies[buffer_String] :=
+	Module[
+		{
+			remaining = buffer,
+			separator = "\r\n\r\n",
+			headerPosition,
+			header,
+			msgLength,
+			bodyStart,
+			available,
+			reaped
+		},
+		reaped =
+			Reap[
+				While[
+					True,
+					headerPosition = StringPosition[remaining, separator, 1];
+					If[headerPosition === {}, Break[]];
+					header = StringTake[remaining, First[headerPosition][[1]] - 1];
+					msgLength = contentLengthFromHeader[header];
+					If[!IntegerQ[msgLength] || msgLength < 0, Break[]];
+					bodyStart = First[headerPosition][[2]] + 1;
+					available = StringLength[remaining] - bodyStart + 1;
+					If[available < msgLength, Break[]];
+					Sow[
+						If[msgLength == 0,
+							"",
+							StringTake[
+								remaining,
+								{bodyStart, bodyStart + msgLength - 1}
+							]
+						]
+					];
+					remaining =
+						StringDrop[remaining, bodyStart + msgLength - 1]
+				]
+			][[2]];
+		{If[reaped === {}, {}, First[reaped]], remaining}
+	]
 
-msgContainsQ[str_] :=
-Module[{res},
-  If[checkContent[str],
-    If[checkStartPosition[str] && checkMsgLength[str],
-      res = True;
-      ,
-      res = False;
-    ]
-    ,
-    res = False;
-  ];
-  res
-]
+checkMsgLength[str_] := msgContainsQ[str]
 
-findMessageParts[str_] :=
-Module[{numStrs, msgLength, headerPosition},
-  If[checkContent[lspMsgAssoc["msgInQueue"] <> str],
-    If[checkStartPosition[str] && checkMsgLength[str],
-      numStrs = First @ StringCases[str, "Content-Length: " ~~ length:NumberString :> length];
-      msgLength = ToExpression[numStrs];
-      headerPosition = Flatten @ StringPosition[str, "Content-Length: " <> numStrs <> "\r\n\r\n"];
+msgContainsQ[str_] := First[parseCompleteMessageBodies[str]] =!= {}
 
-      lspMsgAssoc["lspMsg"]   = StringTake[str, {headerPosition[[2]] + 1, headerPosition[[2]] + msgLength}];
-      lspMsgAssoc["msgInQueue"] = StringTake[str, {headerPosition[[2]] + 1 + msgLength, StringLength[str]}];
-      ,
-      lspMsgAssoc["msgInQueue"] = lspMsgAssoc["msgInQueue"] <> str;
-    ]
-    ,
-    lspMsgAssoc["msgInQueue"] = lspMsgAssoc["msgInQueue"] <> str;
-  ];
-  lspMsgAssoc
-]
+findMessageParts[str_String] :=
+	Module[{msgBodies, remaining},
+		{msgBodies, remaining} =
+			parseCompleteMessageBodies[
+				StringJoin[Lookup[lspMsgAssoc, "msgInQueue", ""], str]
+			];
+		lspMsgAssoc["lspMsgs"] = msgBodies;
+		lspMsgAssoc["lspMsg"] = If[msgBodies === {}, "", First[msgBodies]];
+		lspMsgAssoc["msgInQueue"] = remaining;
+		lspMsgAssoc
+	]
+
+readParsedMessages[] :=
+	Module[{msgBodies, contents},
+		msgBodies = Lookup[lspMsgAssoc, "lspMsgs", {}];
+		If[msgBodies === {},
+			{},
+			contents = Developer`ReadRawJSONString /@ msgBodies;
+			lspMsgAssoc["lspMsgs"] = {};
+			lspMsgAssoc["lspMsg"] = "";
+			contents
+		]
+	]
+
+socketInputReadyQ[sockObj_] :=
+	TrueQ[Quiet[Check[SocketReadyQ[sockObj, 0], False]]]
 
 
 
@@ -88,41 +126,28 @@ Module[{getMethods},
 ]
 
 readMessage["Socket", sockObj_] :=
-Module[{sockMessage, lspMsgEmptyQ},
-  (* First check if a valid msg is available in the queue *)
-  (* When a valid message is available in the queue: No need to read new message from socket *)
-  If[msgContainsQ[lspMsgAssoc["msgInQueue"]],
-
-    log[2, "Valid message is availble in the MessageQueue :> "];
-    log[2, "\nmsgInQueue :> \n"];
-    log[2, InputForm[lspMsgAssoc["msgInQueue"]]];
-    findMessageParts[lspMsgAssoc["msgInQueue"]];
-    ,
-
-    (* When no valid message is available in the queue: read from socket *)
-    log[2, "No valid message is availble in the MessageQueue :> "];
-    log[2, "\nmsgInQueue :> \n"];
-    log[2, InputForm[lspMsgAssoc["msgInQueue"]]];
-
-    lspMsgEmptyQ = True;
-    While[lspMsgEmptyQ,
-      sockMessage = SocketReadMessage[sockObj];
-
-      If[FailureQ[sockMessage],
-        log[0, "Read failure from client.\n"];
-        exitHard[]
-      ];
-
-      sockMessage = ByteArrayToString[sockMessage];
-      lspMsgEmptyQ = Not @ msgContainsQ @ (lspMsgAssoc["msgInQueue"] <> sockMessage);
-      (* Extract a valid message from the queue and update  lspMsgAssoc *)
-      findMessageParts[lspMsgAssoc["msgInQueue"] <> sockMessage];
-    ];
-
-  ];
-
-  {Developer`ReadRawJSONString[lspMsgAssoc["lspMsg"]]}
-]
+	Module[{sockMessage, contentsIn},
+		contentsIn = readParsedMessages[];
+		If[contentsIn =!= {},
+			Return[contentsIn]
+		];
+		If[!socketInputReadyQ[sockObj],
+			Return[{}]
+		];
+		If[contentsIn === {},
+			While[
+				contentsIn === {} && socketInputReadyQ[sockObj],
+				sockMessage = SocketReadMessage[sockObj];
+				If[FailureQ[sockMessage],
+					log[0, "Read failure from client.\n"];
+					exitHard[]
+				];
+				findMessageParts[ByteArrayToString[sockMessage]];
+				contentsIn = readParsedMessages[];
+			];
+		];
+		contentsIn
+	]
 
 (* Read + Expand + Update *)
 
@@ -169,36 +194,39 @@ Module[{headerWrite, bodyWrite},
 
 (* contents is a list of Associations *)
 writeLSPResult["Socket", sockObject_, contents_] :=
-Module[{bytess, line},
-
-  Check[
-    bytess = StringToByteArray[Developer`WriteRawJSONString[#]]& /@ contents
-
-    ,
-    log[2, "\n\n"];
-    log[2, "message generated by contents: ", contents];
-    log[2, "\n\n"]
-    ,
-    {Export::jsonstrictencoding}
-  ];
-
-
-  (*
-  write out each byte array in bytess
-  *)
-  Do[
-    If[!ByteArrayQ[bytes],
-      log[0, "\n\n"];
-      log[0, "invalid bytes: ", bytes];
-      log[0, "\n\n"];
-      exitHard[]
-    ];
-    line = "Content-Length: " <> ToString[Length[bytes]] <> "\r\n\r\n";
-    writeSocket["Socket", sockObject, line, bytes];
-    ,
-    {bytes, bytess}
-  ](*Do bytess*)
-]
+	Module[{json, bytes, line},
+		(*
+		Write each response as soon as it is serialized so large batches do not
+		hold both all JSON strings and all byte arrays at once.
+		*)
+		Do[
+			json =
+				Check[
+					Developer`WriteRawJSONString[content],
+					log[2, "\n\n"];
+					log[2, "message generated by content: ", content];
+					log[2, "\n\n"];
+					exitHard[],
+					{Export::jsonstrictencoding}
+				];
+			If[FailureQ[json],
+				log[0, "\n\n"];
+				log[0, "Could not convert to JSON: ", content];
+				log[0, "\n\n"];
+				exitHard[]
+			];
+			bytes = StringToByteArray[json];
+			If[!ByteArrayQ[bytes],
+				log[0, "\n\n"];
+				log[0, "invalid bytes: ", bytes];
+				log[0, "\n\n"];
+				exitHard[]
+			];
+			line = "Content-Length: " <> ToString[Length[bytes]] <> "\r\n\r\n";
+			writeSocket["Socket", sockObject, line, bytes],
+			{content, contents}
+		]
+	]
 
 
   (* ================= Read Write Loop =============================== *)
@@ -217,7 +245,7 @@ Module[{content, contents},
     ProcessScheduledJobs[];
 
     If[LSPServer`Private`contentQueueEmptyQ[],
-      Pause[0.01];
+      Pause[LSPServer`$IdleLoopPause];
       Continue[]
     ];
 

@@ -13,7 +13,6 @@ Needs["LSPServer`"]
 Needs["LSPServer`PacletIndex`"]
 Needs["LSPServer`Utils`"]
 
-
 (*
 LSP Completion Item Kinds
 *)
@@ -253,27 +252,53 @@ Module[{id, params, doc, uri, position, entry, text, line, char, prefix,
   completions = DeleteDuplicatesBy[completions, #["label"]&];
 
   (*
-  For any completion whose label contains a backtick (context-qualified names and context
-  strings), add an explicit textEdit that replaces the full typed prefix with the label.
-  Without this, VSCode treats ` as a word separator and only replaces the text after the
-  last backtick - causing e.g. "Alias`" + insert "Alias`Symbol" = "Alias`Alias`Symbol`".
-  Items that already carry a textEdit (e.g. association key completions) are left alone.
+  For completions that contain a backtick (context-qualified names and
+  context strings), add an explicit textEdit that replaces the full typed
+  prefix with the label. Without this, VS Code treats ` as a word separator
+  and only replaces the text after the last backtick, causing e.g. "Alias`" +
+  insert "Alias`Symbol" = "Alias`Alias`Symbol`".
+
+  For $-prefixed completions, avoid textEdit. Editors also treat $ as a word
+  separator, so the typed $ is left in place and only the word after it is
+  replaced. Inserting the label would duplicate the $, so insert the label
+  without its leading $. This avoids the client textEdit path that can insert
+  an erroneous indentation tab before $.
   *)
-  If[StringContainsQ[prefix, "`"],
+  If[StringContainsQ[prefix, "`"] || StringStartsQ[prefix, "$"],
     Module[{lspLine0, lspPrefixStartChar0, lspPrefixEndChar0},
-      lspLine0         = line - 1;
-      lspPrefixEndChar0   = char - 1;
+      lspLine0 = line - 1;
+      lspPrefixEndChar0 = char - 1;
       lspPrefixStartChar0 = char - 1 - StringLength[prefix];
       completions = Map[
         Function[{item},
-          If[StringContainsQ[item["label"], "`"] && !KeyExistsQ[item, "textEdit"],
+          Which[
+            StringStartsQ[prefix, "$"] &&
+              StringStartsQ[item["label"], "$"] &&
+              !KeyExistsQ[item, "textEdit"],
+            Join[item, <|
+              "insertText" -> StringDrop[item["label"], 1],
+              "insertTextFormat" -> 1,
+              "filterText" -> item["label"]
+            |>],
+
+            StringContainsQ[prefix, "`"] &&
+              StringContainsQ[item["label"], "`"] &&
+              !KeyExistsQ[item, "textEdit"],
             Append[item, "textEdit" -> <|
               "range" -> <|
-                "start" -> <| "line" -> lspLine0, "character" -> lspPrefixStartChar0 |>,
-                "end"   -> <| "line" -> lspLine0, "character" -> lspPrefixEndChar0   |>
+                "start" -> <|
+                  "line" -> lspLine0,
+                  "character" -> lspPrefixStartChar0
+                |>,
+                "end" -> <|
+                  "line" -> lspLine0,
+                  "character" -> lspPrefixEndChar0
+                |>
               |>,
               "newText" -> item["label"]
             |>],
+
+            True,
             item
           ]
         ],
@@ -3394,7 +3419,12 @@ Module[{id, params, label, documentation, result},
   (*
   Try to get documentation for the symbol
   *)
-  documentation = getSymbolDocumentation[label];
+  documentation = Quiet[
+    Check[
+      getSymbolDocumentation[label],
+      None
+    ]
+  ];
 
   result = params;
 

@@ -49,12 +49,17 @@ Module[{params, id, doc, uri, res},
     Throw[{<| "method" -> "textDocument/documentColorFencepost", "id" -> id, "params" -> params, "stale" -> True |>}]
   ];
 
-  res = <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
-    "textDocument/concreteParse",
-    "textDocument/aggregateParse",
-    "textDocument/abstractParse",
-    "textDocument/documentColorFencepost"
-  };
+	  res =
+	    If[LSPServer`Private`highlightKernelAvailableQ[],
+	      {<| "method" -> "textDocument/documentColorFencepost", "id" -> id, "params" -> params |>}
+	    ,
+	      <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
+	        "textDocument/concreteParse",
+	        "textDocument/aggregateParse",
+	        "textDocument/abstractParse",
+	        "textDocument/documentColorFencepost"
+	      }
+	    ];
 
   log[1, "textDocument/documentColor: exit expand"];
 
@@ -95,13 +100,18 @@ Module[{id, params, doc, uri, colorInformations, ast, colorNodes, entry},
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
 
-  ast = Lookup[entry, "AST", Null];
+	  If[LSPServer`Private`dispatchHighlightDocumentColor[content],
+	    log[1, "textDocument/documentColorFencepost: dispatched highlight worker"];
+	    Throw[{}]
+	  ];
 
-  If[ast === Null || MissingQ[ast] || FailureQ[ast],
-    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
-  ];
+	  ast = Lookup[entry, "AST", Null];
 
-  colorNodes = Cases[ast,
+	  If[ast === Null || MissingQ[ast] || FailureQ[ast],
+	    Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> Null |>}]
+	  ];
+
+	  colorNodes = Cases[ast,
     CallNode[LeafNode[Symbol, "RGBColor" | "Hue" | "GrayLevel", _], _, _] |
     LeafNode[Symbol, "Red" | "Green" | "Blue" | "Black" | "White" | "Gray" | "Cyan" | "Magenta" | "Yellow" | "Brown" | "Orange" | "Pink" | "Purple" |
       "LightRed" | "LightGreen" | "LightBlue" | "LightGray" | "LightCyan" | "LightMagenta" | "LightYellow" | "LightBrown" | "LightOrange" | "LightPink" | "LightPurple" |

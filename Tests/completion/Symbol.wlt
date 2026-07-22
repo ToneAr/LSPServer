@@ -106,3 +106,38 @@ VerificationTest[
 ]
 
 
+
+
+(* Dollar-prefixed completions insert after the typed $, without textEdit. *)
+VerificationTest[
+  Module[{items, cloudBase},
+    items = completionResponse[uri, 8, 59, 5][[1, "result", "items"]];
+    cloudBase = SelectFirst[items, #["label"] === "$CloudBase"&];
+    <|
+      "insertText" -> cloudBase["insertText"],
+      "insertTextFormat" -> cloudBase["insertTextFormat"],
+      "filterText" -> cloudBase["filterText"],
+      "hasTextEdit" -> KeyExistsQ[cloudBase, "textEdit"]
+    |>
+  ]
+  ,
+  <|
+    "insertText" -> "CloudBase",
+    "insertTextFormat" -> 1,
+    "filterText" -> "$CloudBase",
+    "hasTextEdit" -> False
+  |>,
+  TestID -> "IDE-Test-Dollar-SystemSymbol-Inserts-After-Dollar"
+]
+
+
+VerificationTest[
+  LSPServer`handleContent[<|
+    "method" -> "completionItem/resolve",
+    "id" -> 9,
+    "params" -> <|"label" -> "$CloudBase"|>
+  |>][[1, "result", "label"]]
+  ,
+  "$CloudBase",
+  TestID -> "IDE-Test-Dollar-SystemSymbol-Resolve-Does-Not-Crash"
+]

@@ -31,3 +31,35 @@ VerificationTest[
   True,
   TestID -> "perf-update-file-index-under-budget"
 ]
+
+
+VerificationTest[
+  If[Environment["LSP_PERF"] === "1",
+    Module[{path, text, cst, agg, ast, t},
+      path = AbsoluteFileName[FileNameJoin[{
+        DirectoryName[$TestFileName],
+        "..",
+        "LSPServer",
+        "Kernel",
+        "Hover.wl"
+      }]];
+      text = Import[path, "Text"];
+      cst = CodeParser`CodeConcreteParse[
+        text,
+        "FileFormat" -> "Package"
+      ];
+      cst[[1]] = File;
+      agg = CodeParser`Abstract`Aggregate[cst];
+      ast = CodeParser`Abstract`Abstract[agg];
+      LSPServer`PacletIndex`Private`$StructuredPackageLoaderCache = <||>;
+      t = First[AbsoluteTiming[
+        LSPServer`PacletIndex`Private`structuredPackageMetadata[path, ast]
+      ]];
+      Print["Structured package loader cold: ", Round[1000 t], " ms"];
+      t < 0.75
+    ],
+    True
+  ],
+  True,
+  TestID -> "perf-structured-package-loader-cold-under-budget"
+]

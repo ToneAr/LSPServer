@@ -168,3 +168,21 @@ VerificationTest[
   {},
   TestID -> "IDE-Test-OptionsArity-RulesAndOptionsPatternForwardingEquivalent"
 ]
+
+
+(* Test 9: defaulted arguments should not produce arity warnings when omitted. *)
+VerificationTest[
+  Module[{result, diags},
+    result = LSPServer`handleContent[
+      <|"method" -> "textDocument/publishDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>
+    ];
+    diags = result[[1, "params", "diagnostics"]];
+    Select[diags,
+      StringStartsQ[Lookup[#, "code", ""], "DocCommentArityMismatch"] &&
+        StringContainsQ[Lookup[#, "message", ""], "defaultedArgTarget"] &]
+  ],
+  {},
+  TestID -> "IDE-Test-OptionsArity-NoArityWarnDefaultedArg"
+]

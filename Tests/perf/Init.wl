@@ -1,6 +1,11 @@
 (* Load LSPServer from the repository's build/paclet so in-tree changes are picked up. *)
-PacletDirectoryLoad[AbsoluteFileName[
-  FileNameJoin[{DirectoryName[$TestFileName], "..", "..", "build", "paclet"}]]];
+PacletDirectoryLoad[
+	AbsoluteFileName[
+		FileNameJoin[
+			{DirectoryName[$TestFileName], "..", "..", "build", "paclet"}
+		]
+	]
+];
 <<LSPServer`
 LSPServer`LoadAllFeatureModules[];
 

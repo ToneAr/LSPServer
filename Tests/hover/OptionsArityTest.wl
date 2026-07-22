@@ -72,3 +72,13 @@ sequenceFilterRulesTarget[
   1,
   Sequence @@ FilterRules[{Method -> "auto"}, Options[sequenceFilterRulesTarget]]
 ]
+
+(* Case H: defaulted arguments should be optional for arity checks while
+   preserving their declared pattern when the argument is supplied. *)
+defaultedArgTarget[x_String, y_Integer : 1] := y
+
+defaultedArgTarget["ok"]
+
+defaultedArgTarget["ok", 2]
+
+defaultedArgTarget["bad", "nope"]

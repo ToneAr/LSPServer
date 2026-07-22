@@ -2694,10 +2694,20 @@ interpretBox[OverscriptBox[a_, b_]] :=
 interpretBox[UnderoverscriptBox[a_, b_, c_, ___Rule]] :=
   interpretBox /@ {a, "+", b, "%", c}
 
-interpretBox[GridBox[_, ___Rule]] := (
-  Message[interpretBox::unhandledgridbox];
+gridBoxCellString[cell_] :=
+  StringJoin[Flatten[{interpretBox[cell]}]]
+
+gridBoxRowString[row_List] :=
+  StringRiffle[gridBoxCellString /@ row, " "]
+
+gridBoxRowString[row_] :=
+  gridBoxCellString[row]
+
+interpretBox[GridBox[rows_List, ___Rule]] :=
+  StringRiffle[gridBoxRowString /@ rows, "\n"]
+
+interpretBox[GridBox[_, ___Rule]] :=
   "\[UnknownGlyph]"
-)
 
 interpretBox[CheckboxBox[_]] := (
   Message[interpretBox::unhandled, "CheckboxBox"];

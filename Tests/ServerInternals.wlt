@@ -40,6 +40,69 @@ VerificationTest[
 
 
 VerificationTest[
+  Module[{cst, agg, ast, lhs, signatureInfo},
+    cst = CodeParser`CodeConcreteParse[
+      "defaultSignatureFn[x_String, y_Integer:1, z_Real:1.] := x\n",
+      "FileFormat" -> "Package"
+    ];
+    cst[[1]] = File;
+    agg = CodeParser`Abstract`Aggregate[cst];
+    ast = CodeParser`Abstract`Abstract[agg];
+    lhs = First[
+      Cases[ast,
+        CodeParser`CallNode[
+          CodeParser`LeafNode[Symbol, "SetDelayed", _],
+          {lhsNode_, _},
+          _
+        ] :> lhsNode,
+        Infinity
+      ]
+    ];
+    signatureInfo = LSPServer`PacletIndex`ExtractFunctionSignatureInfo[
+      "defaultSignatureFn",
+      lhs
+    ];
+    {
+      ToString[Lookup[signatureInfo, "InputPatterns", {}], InputForm],
+      Lookup[signatureInfo, "OptionalPositions", Missing["NotFound"]],
+      Lookup[signatureInfo, "Variadic", Missing["NotFound"]]
+    }
+  ],
+  {"{_String, _Integer, _Real}", {2, 3}, False},
+  TestID -> "PacletIndex-Defaulted-Arguments-Preserve-Signature"
+]
+
+
+VerificationTest[
+  Module[{def, accepts},
+    def = <|
+      "InputPatterns" -> {_String, _Integer, _Real},
+      "OptionalPositions" -> {2, 3},
+      "Variadic" -> False
+    |>;
+    accepts[samples_List] :=
+      LSPServer`PacletIndex`DefinitionAcceptsCallArgsQ[
+        "defaultSignatureFn",
+        def,
+        ConstantArray[Null, Length[samples]],
+        samples
+      ];
+    {
+      accepts[{""}],
+      accepts[{"", 0}],
+      accepts[{"", 0.}],
+      accepts[{"", 0, 0.}],
+      accepts[{}],
+      accepts[{"", "bad"}],
+      accepts[{"", 0., 0.}]
+    }
+  ],
+  {True, True, True, True, False, False, False},
+  TestID -> "PacletIndex-Defaulted-Arguments-Accept-Omitted-Positions"
+]
+
+
+VerificationTest[
   {
     Names["LSPServer`Hover`Private`GetVisibleSymbolDefinitions"],
     Names["LSPServer`Completion`Private`GetVisibleSymbolDefinitions"],
@@ -66,6 +129,99 @@ VerificationTest[
 
 
 VerificationTest[
+  Module[{text, cst, agg, ast, definitions},
+    text = StringRiffle[{
+      "wrapper[",
+      "  nestedValue = 10,",
+      "  nestedFunction[arg_] := arg,",
+      "  Module[{moduleLocal = 1},",
+      "    moduleLocal = 2; globalFromModule = 3]",
+      "]"
+    }, "\n"];
+    cst = CodeParser`CodeConcreteParse[text, "FileFormat" -> "Package"];
+    cst[[1]] = File;
+    agg = CodeParser`Abstract`Aggregate[cst];
+    ast = CodeParser`Abstract`Abstract[agg];
+    definitions = LSPServer`PacletIndex`Private`extractDefinitions[
+      ast,
+      cst,
+      "file:///tmp/nested-definitions.wl"
+    ];
+
+    Sort[Lookup[definitions, {"name", "kind"}]]
+  ],
+  Sort[{
+    {"globalFromModule", "constant"},
+    {"nestedFunction", "function"},
+    {"nestedValue", "constant"}
+  }],
+  TestID -> "PacletIndex-Extracts-Definitions-Nested-In-Expressions"
+]
+
+
+VerificationTest[
+  Module[{uri, text, cst, agg, ast, undefinedNames},
+    uri = "file:///tmp/nested-definition-diagnostic.wl";
+    text = "Identity[\n  nestedValue = 10\n]\n";
+    cst = CodeParser`CodeConcreteParse[text, "FileFormat" -> "Package"];
+    cst[[1]] = File;
+    agg = CodeParser`Abstract`Aggregate[cst];
+    ast = CodeParser`Abstract`Abstract[agg];
+
+    Block[{
+      LSPServer`$ConfidenceLevel = 0.5,
+      LSPServer`$WorkspaceRootPath = "/tmp",
+      LSPServer`$OpenFilesMap = <||>,
+      LSPServer`Private`$IndexingWasActive = False,
+      LSPServer`PacletIndex`$PendingIndexFiles = {},
+      LSPServer`PacletIndex`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`Private`$PendingExternalDepFiles = {},
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      LSPServer`PacletIndex`$WorkspaceRoot = "/tmp",
+      LSPServer`PacletIndex`Private`$WorkspaceIndexCache = <||>,
+      LSPServer`PacletIndex`Private`$WorkspaceIndexCacheDirty = False,
+      LSPServer`PacletIndex`Private`$WorkspaceCacheRoot = "/tmp",
+      LSPServer`PacletIndex`Private`$StructuredPackageLoaderCache = <||>,
+      LSPServer`PacletIndex`Private`$LoadedExternalDependencies = <||>,
+      LSPServer`PacletIndex`Private`scheduleDepDiscovery =
+        Function[{dependencies}, Null],
+      LSPServer`PacletIndex`GetKernelContextsCached =
+        Function[{}, {"System`", "Global`"}]
+    },
+      LSPServer`PacletIndex`UpdateFileIndex[uri, text];
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> text,
+        "CST" -> cst,
+        "Agg" -> agg,
+        "AST" -> ast,
+        "ScopingData" -> {},
+        "LastChange" -> Now
+      |>|>;
+      LSPServer`handleContent[<|
+        "method" -> "textDocument/runWorkspaceDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+      undefinedNames = Cases[
+        Lookup[LSPServer`$OpenFilesMap[uri], "WorkspaceLints", {}],
+        lint_ /; lint["Tag"] === "UndefinedSymbol" :>
+          Lookup[lint[[4]], "Argument", Missing["NotFound"]]
+      ]
+    ];
+
+    MemberQ[undefinedNames, "nestedValue"]
+  ],
+  False,
+  TestID -> "Diagnostics-Nested-Set-Is-Defined"
+]
+
+
+VerificationTest[
   Module[{cst, agg, ast},
     cst = CodeConcreteParse[
       "Needs[\"Foo`\"]\nGet[\"src/StrategySystem.m\"]\nGet[\"Bar`\"]\n"
@@ -76,6 +232,111 @@ VerificationTest[
   ],
   {"Foo`", "Bar`"},
   TestID -> "PacletIndex-Ignores-Get-File-Paths"
+]
+
+
+VerificationTest[
+  Module[{uri, suffix, directCtx, directAlias, needsCtx, needsAlias, importCtx,
+    importAlias, directSym, needsSym, importSym, text, result, aliases,
+    fileAliases, deps, loads, errors, directLabels, needsLabels, importLabels},
+    uri = "file:///tmp/test_context_alias_index.wl";
+    suffix = StringDelete[CreateUUID[], "-"];
+    directCtx = "LSPAliasDirect" <> suffix <> "`";
+    directAlias = "LSPAD" <> suffix <> "`";
+    needsCtx = "LSPAliasNeeds" <> suffix <> "`";
+    needsAlias = "LSPAN" <> suffix <> "`";
+    importCtx = "LSPAliasImport" <> suffix <> "`";
+    importAlias = "LSPAI" <> suffix <> "`";
+    directSym = "directCompletionFn";
+    needsSym = "needsCompletionFn";
+    importSym = "importCompletionFn";
+
+    Quiet[
+      Remove[Evaluate[directCtx <> directSym]];
+      Remove[Evaluate[needsCtx <> needsSym]];
+      Remove[Evaluate[importCtx <> importSym]],
+      {Remove::rmnsm}
+    ];
+    ToExpression[directCtx <> directSym <> "::usage = \"direct completion usage\""];
+    ToExpression[needsCtx <> needsSym <> "::usage = \"needs completion usage\""];
+    ToExpression[importCtx <> importSym <> "::usage = \"import completion usage\""];
+
+    text = StringRiffle[{
+      "$ContextAliases[\"" <> directAlias <> "\"] = \"" <> directCtx <> "\"",
+      "Needs[\"" <> needsCtx <> "\" -> \"" <> needsAlias <> "\"]",
+      "PackageImport[\"" <> importCtx <> "\" -> \"" <> importAlias <> "\"]",
+      directAlias <> directSym <> "[]",
+      needsAlias <> needsSym <> "[]",
+      importAlias <> importSym <> "[]"
+    }, "\n"];
+
+    result = Block[{
+      LSPServer`PacletIndex`$PacletIndex = <|
+        "Symbols" -> <||>,
+        "Files" -> <||>,
+        "Contexts" -> <||>,
+        "Dependencies" -> {},
+        "ContextAliases" -> <||>
+      |>,
+      LSPServer`PacletIndex`$WorkspaceRoot = "/tmp",
+      LSPServer`$OpenFilesMap = <||>,
+      LSPServer`PacletIndex`Private`$WorkspaceIndexCache = <||>,
+      LSPServer`PacletIndex`Private`$WorkspaceIndexCacheDirty = False,
+      LSPServer`PacletIndex`Private`$WorkspaceCacheRoot = "/tmp",
+      LSPServer`PacletIndex`Private`$StructuredPackageLoaderCache = <||>,
+      LSPServer`PacletIndex`Private`$LoadedExternalDependencies = <||>,
+      LSPServer`PacletIndex`Private`scheduleDepDiscovery = Function[{depContexts}, Null],
+      LSPServer`PacletIndex`GetKernelContextsCached = Function[{}, {"System`", "Global`"}]
+    },
+      LSPServer`PacletIndex`UpdateFileIndex[uri, text];
+      aliases = LSPServer`PacletIndex`GetContextAliases[];
+      fileAliases = Lookup[LSPServer`PacletIndex`$PacletIndex["Files", uri], "ContextAliases", {}];
+      deps = LSPServer`PacletIndex`GetDependencyContexts[];
+      loads = LSPServer`PacletIndex`GetFileContextLoads[uri];
+      errors = LSPServer`PacletIndex`GetContextLoadErrors[uri];
+      directLabels = Lookup[
+        LSPServer`Completion`Private`getAliasedSymbolCompletions[directAlias <> "direct"],
+        "label",
+        {}
+      ];
+      needsLabels = Lookup[
+        LSPServer`Completion`Private`getAliasedSymbolCompletions[needsAlias <> "needs"],
+        "label",
+        {}
+      ];
+      importLabels = Lookup[
+        LSPServer`Completion`Private`getAliasedSymbolCompletions[importAlias <> "import"],
+        "label",
+        {}
+      ];
+
+      {
+        Sort[deps] === Sort[{directCtx, needsCtx, importCtx}],
+        Lookup[aliases, directAlias, Missing["NotFound"]] === directCtx,
+        Lookup[aliases, needsAlias, Missing["NotFound"]] === needsCtx,
+        Lookup[aliases, importAlias, Missing["NotFound"]] === importCtx,
+        SortBy[{#["alias"], #["fullContext"]}& /@ fileAliases, First] ===
+          SortBy[{{directAlias, directCtx}, {needsAlias, needsCtx}, {importAlias, importCtx}}, First],
+        Count[loads, KeyValuePattern[{"context" -> directCtx, "alias" -> directAlias, "method" -> "$ContextAliases"}]] === 1,
+        Count[loads, KeyValuePattern[{"context" -> needsCtx, "alias" -> needsAlias, "method" -> "Needs"}]] === 1,
+        Count[loads, KeyValuePattern[{"context" -> importCtx, "alias" -> importAlias, "method" -> "PackageImport"}]] === 1,
+        errors === {},
+        MemberQ[directLabels, directAlias <> directSym],
+        MemberQ[needsLabels, needsAlias <> needsSym],
+        MemberQ[importLabels, importAlias <> importSym]
+      }
+    ];
+
+    Quiet[
+      Remove[Evaluate[directCtx <> directSym]];
+      Remove[Evaluate[needsCtx <> needsSym]];
+      Remove[Evaluate[importCtx <> importSym]],
+      {Remove::rmnsm}
+    ];
+    result
+  ],
+  {True, True, True, True, True, True, True, True, True, True, True, True},
+  TestID -> "PacletIndex-ContextAliases-Aliased-Needs-And-PackageImport-Index-For-Completions"
 ]
 
 
@@ -127,15 +388,41 @@ VerificationTest[
   Block[{
     LSPServer`$ContentQueue = {<|"method" -> "initialized"|>},
     LSPServer`$CancelMap = <||>
-  },
-    LSPServer`expandContentsAndAppendToContentQueue[{
-      <|"jsonrpc" -> "2.0", "id" -> -2, "result" -> Null|>,
-      <|"method" -> "workspace/didChangeConfiguration", "params" -> <||>|>
-    }];
-    Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]]
+	  },
+	    LSPServer`expandContentsAndAppendToContentQueue[{
+	      <|"jsonrpc" -> "2.0", "id" -> 2, "result" -> Null|>,
+	      <|"method" -> "workspace/didChangeConfiguration", "params" -> <||>|>
+	    }];
+	    Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]]
   ],
   {"initialized", "workspace/didChangeConfiguration"},
   TestID -> "Client-Responses-Without-Method-Are-Dropped-Before-Queueing"
+]
+
+
+VerificationTest[
+  Block[{
+    LSPServer`$ContentQueue = {},
+    LSPServer`$CancelMap = <||>,
+    LSPServer`$PendingTokenRefresh = True,
+    LSPServer`$PendingTokenRefreshTime = 123
+  },
+    Module[{queued},
+      LSPServer`expandContentsAndAppendToContentQueue[{
+        <|"jsonrpc" -> "2.0", "id" -> -2, "result" -> Null|>
+      }];
+      queued = LSPServer`Private`takeFirstContentQueueItem[];
+      LSPServer`handleContent[queued];
+      {
+        Lookup[queued, "id", Missing["NotFound"]],
+        TrueQ[LSPServer`$PendingTokenRefresh],
+        LSPServer`$PendingTokenRefreshTime,
+        LSPServer`$ContentQueue
+      }
+    ]
+  ],
+  {-2, False, None, {}},
+  TestID -> "Server-Initiated-Response-Clears-PendingRefresh-Through-Queue"
 ]
 
 
@@ -150,6 +437,135 @@ VerificationTest[
   ],
   {"textDocument/hoverFencepost", "textDocument/runFastDiagnostics"},
   TestID -> "Priority-Flag-Reorders-Queue"
+]
+
+
+VerificationTest[
+  Module[{makeFrame, first, second, parsed},
+    makeFrame[content_] :=
+      Module[{body},
+        body = Developer`WriteRawJSONString[content];
+        StringJoin[
+          "Content-Length: ",
+          ToString[Length[StringToByteArray[body]]],
+          "\r\n\r\n",
+          body
+        ]
+      ];
+    first = <|"jsonrpc" -> "2.0", "id" -> 101, "method" -> "one"|>;
+    second = <|"jsonrpc" -> "2.0", "id" -> 102, "method" -> "two"|>;
+    Block[{
+      LSPServer`Socket`lspMsgAssoc =
+        <|"lspMsg" -> "", "lspMsgs" -> {}, "msgInQueue" -> ""|>
+    },
+      parsed =
+        LSPServer`Socket`findMessageParts[
+          StringJoin[makeFrame[first], makeFrame[second]]
+        ];
+      {
+        Lookup[parsed, "msgInQueue", Missing["NotFound"]],
+        Developer`ReadRawJSONString /@ Lookup[parsed, "lspMsgs", {}]
+      }
+    ]
+  ],
+  {"", {
+    <|"jsonrpc" -> "2.0", "id" -> 101, "method" -> "one"|>,
+    <|"jsonrpc" -> "2.0", "id" -> 102, "method" -> "two"|>
+  }},
+  TestID -> "Socket-Parser-Extracts-Multiple-Frames"
+]
+
+
+VerificationTest[
+  Block[{
+    LSPServer`Socket`Private`lspMsgAssoc =
+      <|"lspMsg" -> "", "lspMsgs" -> {}, "msgInQueue" -> ""|>
+  },
+    LSPServer`Socket`Private`readMessage["Socket", None]
+  ],
+  {},
+  TestID -> "Socket-ReadMessage-NoInput-ReturnsEmptyBatch"
+]
+
+
+VerificationTest[
+  Module[{makeFrame, content, frame, firstPart, secondPart, parsed1, parsed2},
+    makeFrame[content_] :=
+      Module[{body},
+        body = Developer`WriteRawJSONString[content];
+        StringJoin[
+          "Content-Length: ",
+          ToString[Length[StringToByteArray[body]]],
+          "\r\n\r\n",
+          body
+        ]
+      ];
+    content =
+      <|"jsonrpc" -> "2.0", "id" -> 103, "method" -> "split"|>;
+    frame = makeFrame[content];
+    firstPart = StringTake[frame, 20];
+    secondPart = StringDrop[frame, 20];
+    Block[{
+      LSPServer`Socket`lspMsgAssoc =
+        <|"lspMsg" -> "stale", "lspMsgs" -> {"stale"}, "msgInQueue" -> ""|>
+    },
+      parsed1 = LSPServer`Socket`findMessageParts[firstPart];
+      parsed2 = LSPServer`Socket`findMessageParts[secondPart];
+      {
+        Lookup[parsed1, "lspMsgs", Missing["NotFound"]],
+        Lookup[parsed1, "lspMsg", Missing["NotFound"]],
+        Lookup[parsed2, "msgInQueue", Missing["NotFound"]],
+        Developer`ReadRawJSONString /@ Lookup[parsed2, "lspMsgs", {}]
+      }
+    ]
+  ],
+  {{}, "", "", {
+    <|"jsonrpc" -> "2.0", "id" -> 103, "method" -> "split"|>
+  }},
+  TestID -> "Socket-Parser-Does-Not-Replay-Stale-Body-On-Partial-Read"
+]
+
+
+VerificationTest[
+  Module[{makeFrame, first, second, secondFrame, parsed1, parsed2},
+    makeFrame[content_] :=
+      Module[{body},
+        body = Developer`WriteRawJSONString[content];
+        StringJoin[
+          "Content-Length: ",
+          ToString[Length[StringToByteArray[body]]],
+          "\r\n\r\n",
+          body
+        ]
+      ];
+    first = <|"jsonrpc" -> "2.0", "id" -> 104, "method" -> "ready"|>;
+    second = <|"jsonrpc" -> "2.0", "id" -> 105, "method" -> "tail"|>;
+    secondFrame = makeFrame[second];
+    Block[{
+      LSPServer`Socket`lspMsgAssoc =
+        <|"lspMsg" -> "", "lspMsgs" -> {}, "msgInQueue" -> ""|>
+    },
+      parsed1 =
+        LSPServer`Socket`findMessageParts[
+          StringJoin[makeFrame[first], StringTake[secondFrame, 16]]
+        ];
+      parsed2 =
+        LSPServer`Socket`findMessageParts[StringDrop[secondFrame, 16]];
+      {
+        Developer`ReadRawJSONString /@ Lookup[parsed1, "lspMsgs", {}],
+        Lookup[parsed1, "msgInQueue", Missing["NotFound"]] ===
+          StringTake[secondFrame, 16],
+        Lookup[parsed2, "msgInQueue", Missing["NotFound"]],
+        Developer`ReadRawJSONString /@ Lookup[parsed2, "lspMsgs", {}]
+      }
+    ]
+  ],
+  {{
+    <|"jsonrpc" -> "2.0", "id" -> 104, "method" -> "ready"|>
+  }, True, "", {
+    <|"jsonrpc" -> "2.0", "id" -> 105, "method" -> "tail"|>
+  }},
+  TestID -> "Socket-Parser-Keeps-Incomplete-Tail"
 ]
 
 
@@ -261,6 +677,15 @@ VerificationTest[
   ]["code"],
   LSPServer`Private`$ErrorCodes["MethodNotFound"],
   TestID -> "PublishHoverResult-Removed-MethodNotFound"
+]
+
+
+VerificationTest[
+  StringJoin[LSPServer`Hover`Private`interpretBox[
+    GridBox[{{"a", "b"}, {"c", StyleBox["d", "TI"]}}]
+  ]],
+  "a b\nc *d*",
+  TestID -> "Hover-InterpretBox-GridBox-Renders-Without-Message"
 ]
 
 
@@ -561,9 +986,14 @@ VerificationTest[
       LSPServer`$PendingExternalDepFiles = {},
       LSPServer`$PendingIndexFiles = {},
       LSPServer`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`$PendingIndexFiles = {},
+      LSPServer`PacletIndex`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`Private`$PendingExternalDepFiles = {},
+      LSPServer`PacletIndex`Private`$PendingDepDiscovery = {},
       LSPServer`$IndexingWasActive = False,
       LSPServer`$ContentQueue = {},
       LSPServer`$QueueLastNonEmptyTime = AbsoluteTime[] - 5,
+      LSPServer`$ClosedFileDiagnosticsLastRun = 0,
       LSPServer`$DiagnosticsTask = None,
       LSPServer`$DiagnosticsTaskKind = None,
       LSPServer`$DiagnosticsTaskURI = None,
@@ -821,6 +1251,10 @@ VerificationTest[
       LSPServer`$PendingExternalDepFiles = {},
       LSPServer`$PendingIndexFiles = {},
       LSPServer`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`$PendingIndexFiles = {},
+      LSPServer`PacletIndex`$PendingReferenceFiles = {},
+      LSPServer`PacletIndex`Private`$PendingExternalDepFiles = {},
+      LSPServer`PacletIndex`Private`$PendingDepDiscovery = {},
       LSPServer`$IndexingWasActive = False,
       LSPServer`$ContentQueue = {<|"method" -> "textDocument/documentSymbolFencepost"|>},
       LSPServer`$QueueLastNonEmptyTime = AbsoluteTime[],
@@ -2569,6 +3003,46 @@ VerificationTest[
     "private"
   },
   TestID -> "PacletIndex-Structured-Package-Contexts-And-Hidden-Imports"
+]
+
+
+VerificationTest[
+  Module[{root, sourceDir, targetPath, decoyPath, parseCount, result},
+    root = FileNameJoin[{
+      $TemporaryDirectory,
+      "lsp-loader-filter-" <> StringDelete[CreateUUID[], "-"],
+      "a",
+      "b",
+      "c",
+      "d",
+      "e"
+    }];
+    sourceDir = CreateDirectory[
+      FileNameJoin[{root, "Source"}],
+      CreateIntermediateDirectories -> True
+    ];
+    targetPath = FileNameJoin[{sourceDir, "Target.wl"}];
+    decoyPath = FileNameJoin[{sourceDir, "Decoy.wl"}];
+    Export[targetPath, "target[] := 1\n", "Text"];
+    Export[
+      decoyPath,
+      "(* PackageInitialize documentation, not a call. *)\ndecoy[] := 2\n",
+      "Text"
+    ];
+
+    parseCount = 0;
+    result = Block[{
+      LSPServer`PacletIndex`Private`$StructuredPackageLoaderCache = <||>,
+      LSPServer`PacletIndex`Private`parseAst =
+        Function[{path, format}, parseCount++; $Failed]
+    },
+      LSPServer`PacletIndex`Private`structuredPackageLoaderPath[sourceDir]
+    ];
+
+    {MissingQ[result], parseCount}
+  ],
+  {True, 0},
+  TestID -> "PacletIndex-Loader-Discovery-Skips-Ordinary-WL-Files"
 ]
 
 

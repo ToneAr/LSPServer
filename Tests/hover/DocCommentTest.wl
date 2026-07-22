@@ -194,3 +194,5 @@ applyHeadFromList = Apply[applyTarget, {1, 2}]
 applyHeadFromExpression = Apply[applyTarget, wrapper[1, 2]]
 applyListHeadFromExpression = Apply[List, wrapper[1, 2, 3]]
 applySequenceHeadFromList = Apply[seqAll, {1, 2, 3., 2 + I}]
+
+curried[x_Integer][y_] := x + y;

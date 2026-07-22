@@ -287,8 +287,53 @@ VerificationTest[
       LSPServer`$WorkspaceDiagnosticsSweepURIs
     ]
   ],
-  {"file:///tmp/testws/Closed.wl"},
-  TestID -> "WorkspaceDiagnosticsSweepQueuesClosedWorkspaceFilesOnly"
+  {},
+  TestID -> "WorkspaceDiagnosticsSweepNoArgDoesNotQueueFullWorkspace"
+]
+
+VerificationTest[
+  Module[{workspaceRoot, filePath, uri},
+    Internal`WithLocalSettings[
+      workspaceRoot = CreateDirectory[];
+      filePath = FileNameJoin[{workspaceRoot, "Changed.wl"}];
+      Export[filePath, "changed[] := 1", "Text"];
+      uri = "file://" <> filePath;
+      ,
+      Block[{
+        LSPServer`$WorkspaceRootPath = workspaceRoot,
+        LSPServer`$OpenFilesMap = <||>,
+        LSPServer`$ContentQueue = {},
+        LSPServer`$WorkspaceDiagnosticsSweepURIs = {},
+        LSPServer`$WorkspaceIndexingQueued = False,
+        LSPServer`$WorkspaceIndexingLastRun = 0,
+        LSPServer`PacletIndex`$PendingIndexFiles = {},
+        LSPServer`PacletIndex`$PendingReferenceFiles = {},
+        LSPServer`PacletIndex`Private`$PendingExternalDepFiles = {},
+        LSPServer`PacletIndex`Private`$PendingDepDiscovery = {},
+        LSPServer`PacletIndex`$PacletIndex = <|
+          "Symbols" -> <||>,
+          "Files" -> <||>,
+          "Contexts" -> <||>,
+          "Dependencies" -> {},
+          "ContextAliases" -> <||>
+        |>
+      },
+        LSPServer`handleContent[<|
+          "method" -> "workspace/didChangeWatchedFiles",
+          "params" -> <|"changes" -> {<|"uri" -> uri, "type" -> 2|>}|>
+        |>];
+        {
+          LSPServer`PacletIndex`$PendingIndexFiles,
+          LSPServer`$WorkspaceDiagnosticsSweepURIs,
+          Lookup[LSPServer`$ContentQueue, "method", Missing["NotFound"]]
+        }
+      ],
+      Quiet[DeleteDirectory[workspaceRoot, DeleteContents -> True]]
+    ]
+  ],
+  {{_String}, {_String}, {"workspace/processIndexing"}},
+  SameTest -> MatchQ,
+  TestID -> "WatchedFileChangeQueuesOnlyChangedClosedFile"
 ]
 
 VerificationTest[
@@ -493,8 +538,8 @@ VerificationTest[
       {EntityValue::conopen, EntityValue::nodat}
     ]
   ],
-  {True, True, False, True},
-  TestID -> "DidCloseSeedsClosedFileCacheAndQueuesSweep"
+  {True, True, False, False},
+  TestID -> "DidCloseSeedsClosedFileCacheWithoutQueueingSweep"
 ]
 
 VerificationTest[
@@ -540,6 +585,8 @@ VerificationTest[
       LSPServer`PacletIndex`$PendingIndexFiles = {},
       LSPServer`PacletIndex`$PendingReferenceFiles = {},
       LSPServer`PacletIndex`ProcessPendingIndexFiles = Function[{}, False],
+      LSPServer`Private`maybeRelaunchDeadWorker = Function[{}, Null],
+      LSPServer`Private`maybeRelaunchDeadHighlightWorker = Function[{}, Null],
       LSPServer`Private`queueSemanticTokensRefresh = Function[args, Null],
       LSPServer`Private`launchDiagnosticsKernel = Function[{}, Null],
       ParallelSubmit = Function[{kernels, expr}, "fake-task"]
@@ -646,9 +693,10 @@ VerificationTest[
       LSPServer`PacletIndex`$PendingIndexFiles = {},
       LSPServer`PacletIndex`$PendingReferenceFiles = {},
       LSPServer`PacletIndex`ProcessPendingIndexFiles = Function[{}, False],
+      LSPServer`Private`maybeRelaunchDeadWorker = Function[{}, Null],
+      LSPServer`Private`maybeRelaunchDeadHighlightWorker = Function[{}, Null],
       LSPServer`Private`queueSemanticTokensRefresh = Function[args, Null],
-      TimeConstrained = Function[{expr, timeout, alt}, expr],
-      WaitAll = Function[{task}, <|"URI" -> uri, "Notification" -> <||>|>]
+      LSPServer`Private`parallelTaskResult = Function[{task}, <|"URI" -> uri, "Notification" -> <||>|>]
     },
       LSPServer`ProcessScheduledJobs[];
       {
@@ -692,9 +740,10 @@ VerificationTest[
       LSPServer`$PendingReferenceFiles = {},
       LSPServer`PacletIndex`Private`$PendingDepDiscovery = {},
       LSPServer`Private`ProcessPendingIndexFiles = Function[{}, False],
+      LSPServer`Private`maybeRelaunchDeadWorker = Function[{}, Null],
+      LSPServer`Private`maybeRelaunchDeadHighlightWorker = Function[{}, Null],
       LSPServer`Private`queueSemanticTokensRefresh = Function[args, Null],
-      TimeConstrained = Function[{expr, timeout, alt}, expr],
-      WaitAll = Function[{task}, <|"URI" -> uri, "ID" -> 44, "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>|>]
+      LSPServer`Private`parallelTaskResult = Function[{task}, <|"URI" -> uri, "ID" -> 44, "Result" -> <|"contents" -> <|"kind" -> "markdown", "value" -> "hover"|>|>|>]
     },
       LSPServer`ProcessScheduledJobs[];
       {
@@ -765,8 +814,9 @@ VerificationTest[
 
 
 VerificationTest[
-  Module[{abortCalls = {}, closeCalls = {}, launchCount = 0, installDir},
+  Module[{abortCalls = {}, closeCalls = {}, launchCount = 0, installDir, fakeKernel},
     installDir = CreateDirectory[];
+    fakeKernel = Quiet[KernelObject["new-kernel"]];
     Module[{addonsApps, kernelObjDir, kernelBin, result},
       addonsApps = FileNameJoin[{installDir, "AddOns", "Applications"}];
       kernelObjDir = FileNameJoin[{installDir, "SystemFiles", "Components", "KernelObjects", "Kernel"}];
@@ -778,17 +828,21 @@ VerificationTest[
       Quiet[Export[kernelBin, "", "Text"]];
       result = Quiet[
         Block[{
-          LSPServer`$DiagnosticsKernel = "stale-kernel",
-          LSPServer`$DiagnosticsKernelBin = "/tmp/stale/WolframKernel",
+          LSPServer`$DiagnosticsKernel = $Failed,
+          LSPServer`$DiagnosticsKernelBin = $Failed,
           LSPServer`$DiagnosticsTask = "stale-task",
           LSPServer`$DiagnosticsTaskURI = "file:///tmp/testws/Closed.wl",
           LSPServer`$DiagnosticsTaskKind = "closed-file-sweep",
           LSPServer`$DiagnosticsTaskResult = <||>,
           LSPServer`$DiagnosticsTaskStartTime = AbsoluteTime[] - 10,
           LSPServer`$WorkspaceDiagnosticsSweepURIs = {},
+          LSPServer`$ContentQueue = {},
+          LSPServer`$WorkerLaunchAttempts = 0,
+          LSPServer`$WorkerStatusNotified = False,
           AbortKernels = Function[{kernel}, AppendTo[abortCalls, kernel]],
           CloseKernels = Function[{kernel}, AppendTo[closeCalls, kernel]],
-          LaunchKernels = Function[{n}, launchCount++; {"new-kernel"}],
+          LSPServer`Private`workerLaunchKernels = Function[{}, launchCount++; {fakeKernel}],
+          LSPServer`Private`workerKernelHealthyQ = Function[{kernel}, kernel === fakeKernel],
           ParallelEvaluate = Function[{expr, kernel}, Null, HoldAll],
           DistributeDefinitions = Function[args, Null, HoldAll],
           Get = Function[{path}, Null],
@@ -816,9 +870,9 @@ VerificationTest[
   ],
   {
     1,
-    {"stale-kernel"},
-    {"stale-kernel"},
-    "new-kernel",
+    {},
+    {},
+    KernelObject["new-kernel"],
     _String,
     None,
     None,
@@ -826,13 +880,14 @@ VerificationTest[
     {"file:///tmp/testws/Closed.wl"}
   },
   SameTest -> MatchQ,
-  TestID -> "LaunchDiagnosticsKernelCleansUpExistingWorkerFirst"
+  TestID -> "LaunchDiagnosticsKernelRequeuesStaleTaskBeforeRelaunch"
 ]
 
 
 VerificationTest[
-  Module[{abortCalls = {}, closeCalls = {}, launchCount = 0, installDir},
+  Module[{abortCalls = {}, closeCalls = {}, launchCount = 0, installDir, fakeKernel},
     installDir = CreateDirectory[];
+    fakeKernel = Quiet[KernelObject["new-kernel"]];
     Module[{addonsApps, kernelObjDir, kernelBin, result},
       addonsApps = FileNameJoin[{installDir, "AddOns", "Applications"}];
       kernelObjDir = FileNameJoin[{installDir, "SystemFiles", "Components", "KernelObjects", "Kernel"}];
@@ -851,11 +906,15 @@ VerificationTest[
           LSPServer`$DiagnosticsTaskKind = None,
           LSPServer`$DiagnosticsTaskResult = None,
           LSPServer`$DiagnosticsTaskStartTime = None,
+          LSPServer`$ContentQueue = {},
+          LSPServer`$WorkerLaunchAttempts = 0,
+          LSPServer`$WorkerStatusNotified = False,
           AbortKernels = Function[{kernel}, AppendTo[abortCalls, kernel]],
           CloseKernels = Function[{kernel}, AppendTo[closeCalls, kernel]],
-          LaunchKernels = Function[{n}, launchCount++; {"new-kernel"}],
-          ParallelEvaluate = Function[{expr, kernel}, $Failed, HoldAll],
-          DistributeDefinitions = Function[args, Throw["should-not-run", "dist"]],
+          LSPServer`Private`workerLaunchKernels = Function[{}, launchCount++; {fakeKernel}],
+          LSPServer`Private`workerKernelHealthyQ = Function[{kernel}, kernel === fakeKernel],
+          ParallelEvaluate = Function[{expr, kernel}, Null, HoldAll],
+          DistributeDefinitions = Function[args, $Failed, HoldAll],
           Get = Function[{path}, Null],
           Needs = Function[{ctx}, Null],
           $InstallationDirectory = installDir
@@ -877,8 +936,8 @@ VerificationTest[
   ],
   {
     1,
-    {"new-kernel"},
-    {"new-kernel"},
+    {KernelObject["new-kernel"]},
+    {KernelObject["new-kernel"]},
     $Failed,
     $Failed
   },
@@ -1167,7 +1226,149 @@ VerificationTest[
       }
     ]
   ],
-  {0, Missing["NotFound"], "fake-task", "open-file", _String},
+  {1, {"textDocument/runWorkspaceDiagnostics"}, None, None, None},
   SameTest -> MatchQ,
-  TestID -> "DispatchWorkspaceDiagnosticsUsesBackgroundTask"
+  TestID -> "DispatchWorkspaceDiagnosticsDedupesQueuedSyncWork"
+]
+
+(* ── Scoping dedupe: fast tier reuses scoping computed for the same text version ── *)
+
+VerificationTest[
+  Module[{uri, calls = 0, result},
+    uri = "file:///tmp/scoping-reuse.wl";
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "f[x_] := Module[{y}, y = x; y]\n",
+        "LastChange" -> 7,
+        "ScopingData" -> {},
+        "ScopingDataLastChange" -> 7
+      |>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$DiagnosticsKernel = $Failed,
+      LSPServer`$SemanticTokens = False,
+      LSPServer`Diagnostics`Private`safeDiagnosticsScopingData =
+        Function[ast, calls++; {}]
+    },
+      result = LSPServer`handleContent[<|
+        "method" -> "textDocument/runFastDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+      {calls,
+        AnyTrue[result, MatchQ[#, KeyValuePattern["method" -> "textDocument/publishDiagnostics"]]&]}
+    ]
+  ],
+  {0, True},
+  TestID -> "FastTierReusesFreshScopingData"
+]
+
+VerificationTest[
+  Module[{uri, calls = 0},
+    uri = "file:///tmp/scoping-stale-recompute.wl";
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "f[x_] := Module[{y}, y = x; y]\n",
+        "LastChange" -> 7,
+        "ScopingData" -> {},
+        "ScopingDataLastChange" -> 3
+      |>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$DiagnosticsKernel = $Failed,
+      LSPServer`$SemanticTokens = False,
+      LSPServer`Diagnostics`Private`safeDiagnosticsScopingData =
+        Function[ast, calls++; {}]
+    },
+      LSPServer`handleContent[<|
+        "method" -> "textDocument/runFastDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+      calls
+    ]
+  ],
+  1,
+  TestID -> "FastTierRecomputesStaleScopingData"
+]
+
+(* ── Workspace lints current for this text version survive the fast tier ── *)
+
+VerificationTest[
+  Module[{uri, entryAfter},
+    uri = "file:///tmp/workspace-lints-survive.wl";
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "x = 1 + 1\n",
+        "LastChange" -> 11,
+        "WorkspaceLints" -> {},
+        "WorkspaceLintsLastChange" -> 11
+      |>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$DiagnosticsKernel = $Failed,
+      LSPServer`$SemanticTokens = False
+    },
+      LSPServer`handleContent[<|
+        "method" -> "textDocument/runFastDiagnostics",
+        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+      |>];
+      entryAfter = LSPServer`$OpenFilesMap[uri];
+      {
+        Lookup[entryAfter, "WorkspaceLints", Null],
+        Count[
+          LSPServer`$ContentQueue,
+          KeyValuePattern["method" -> "textDocument/runWorkspaceDiagnostics"]
+        ]
+      }
+    ]
+  ],
+  {{}, 0},
+  TestID -> "FastTierKeepsCurrentWorkspaceLintsAndSkipsRedispatch"
+]
+
+(* ── Scoping followup is debounced while an index update is pending ── *)
+
+VerificationTest[
+  Module[{uri},
+    uri = "file:///tmp/scoping-followup-debounce.wl";
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "x = 1\n",
+        "LastChange" -> Now,
+        "IndexUpdatePending" -> True,
+        "ScheduledJobs" -> {Function[e, {{}, False}]}
+      |>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$HighlightPendingContents = {},
+      LSPServer`$HighlightTaskKind = None,
+      LSPServer`$HighlightTaskURI = None
+    },
+      LSPServer`SemanticTokens`Private`queueSemanticTokenScopingFollowup[uri];
+      Length[LSPServer`$ContentQueue]
+    ]
+  ],
+  0,
+  TestID -> "ScopingFollowupSkippedWhileIndexUpdatePending"
+]
+
+VerificationTest[
+  Module[{uri},
+    uri = "file:///tmp/scoping-followup-settled.wl";
+    Block[{
+      LSPServer`$OpenFilesMap = <|uri -> <|
+        "Text" -> "x = 1\n",
+        "LastChange" -> Now
+      |>|>,
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$HighlightPendingContents = {},
+      LSPServer`$HighlightTaskKind = None,
+      LSPServer`$HighlightTaskURI = None
+    },
+      LSPServer`SemanticTokens`Private`queueSemanticTokenScopingFollowup[uri];
+      Count[
+        LSPServer`$ContentQueue,
+        KeyValuePattern["method" -> "textDocument/runScopingData"]
+      ]
+    ]
+  ],
+  1,
+  TestID -> "ScopingFollowupQueuedOnceTextSettled"
 ]
