@@ -865,13 +865,18 @@ Module[{text, cst, ast, uri, definitions, usages, symbols, fileDeps,
   ast = Quiet[CodeParser`Abstract`Abstract[CodeParser`Abstract`Aggregate[cst]]];
   If[FailureQ[ast], Throw[$Failed]];
 
-  definitions        = extractDefinitions[ast, cst, uri];
+  structuredMetadata = structuredPackageMetadata[filePath, ast];
+  definitions        = extractDefinitions[
+    ast,
+    cst,
+    uri,
+    structuredMetadata
+  ];
   usages             = extractUsages[ast, uri];
   symbols            = extractSymbolReferences[cst, uri];
   fileDeps           = extractDependencies[ast];
   contextLoads       = extractContextLoads[ast];
   explicitContextRefs= extractExplicitContextRefs[cst];
-  structuredMetadata = structuredPackageMetadata[filePath, ast];
   mergedStructuredData = mergeStructuredDependencyData[fileDeps, contextLoads, structuredMetadata];
   fileDeps = Lookup[mergedStructuredData, "Dependencies", fileDeps];
   contextLoads = Lookup[mergedStructuredData, "ContextLoads", contextLoads];
@@ -1289,6 +1294,13 @@ stripNamedPatternWrapper[argNode_] :=
   ]
 
 
+optionalPatternNodeQ[argNode_] :=
+Module[{inner},
+  inner = stripNamedPatternWrapper[argNode];
+  MatchQ[inner, CallNode[LeafNode[Symbol, "Optional", _], {_, ___}, _]]
+]
+
+
 extractOptionNameFromLHS[lhsNode_] :=
   Which[
     MatchQ[lhsNode, LeafNode[Symbol, _String, _]],
@@ -1588,9 +1600,9 @@ extractArgPatternExpr[argNode_] :=
         KeyValuePattern[kvpairs]
       ]
     ,
-    (* Optional argument: conservative - accept anything *)
+    (* Optional argument: use the wrapped pattern; arity metadata handles omission. *)
     MatchQ[argNode, CallNode[LeafNode[Symbol, "Optional", _], _, _]],
-      Blank[]
+      extractArgPatternExpr[argNode[[2, 1]]]
     ,
     (* Complex patterns (PatternTest, Alternatives, Condition, etc.) -> _ conservative *)
     True,
@@ -1616,12 +1628,14 @@ Module[{lhsCallNode = definitionConditionLHSCallNode[lhsNode]},
 ]
 
 extractFunctionSignatureInfo[funcName_String, lhsNode_] :=
-Module[{lhsCallNode, args, inputPatterns, variadic, hasOptionsPattern, optionTargets, optionPatternBindings},
+Module[{lhsCallNode, args, inputPatterns, optionalPositions, variadic,
+  hasOptionsPattern, optionTargets, optionPatternBindings},
   lhsCallNode = definitionConditionLHSCallNode[lhsNode];
 
   If[!MatchQ[lhsCallNode, CallNode[_, _List, _]],
     Return[<|
       "InputPatterns" -> {},
+      "OptionalPositions" -> {},
       "Variadic" -> False,
       "HasOptionsPattern" -> False,
       "OptionTargets" -> {},
@@ -1631,6 +1645,7 @@ Module[{lhsCallNode, args, inputPatterns, variadic, hasOptionsPattern, optionTar
 
   args = lhsCallNode[[2]];
   inputPatterns = {};
+  optionalPositions = {};
   variadic = False;
   hasOptionsPattern = False;
   optionTargets = {};
@@ -1649,11 +1664,13 @@ Module[{lhsCallNode, args, inputPatterns, variadic, hasOptionsPattern, optionTar
           ]
         ],
         AppendTo[inputPatterns, extractArgPatternExpr[arg]];
+        If[optionalPatternNodeQ[arg],
+          AppendTo[optionalPositions, Length[inputPatterns]]
+        ];
         If[MatchQ[arg,
           CallNode[LeafNode[Symbol, "Pattern", _],
             {_, CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _], _, _]}, _] |
-          CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _], _, _] |
-          CallNode[LeafNode[Symbol, "Optional", _], _, _]
+          CallNode[LeafNode[Symbol, "BlankSequence" | "BlankNullSequence", _], _, _]
         ],
           variadic = True
         ]
@@ -1664,6 +1681,7 @@ Module[{lhsCallNode, args, inputPatterns, variadic, hasOptionsPattern, optionTar
 
   <|
     "InputPatterns" -> inputPatterns,
+    "OptionalPositions" -> optionalPositions,
     "Variadic" -> variadic,
     "HasOptionsPattern" -> hasOptionsPattern,
     "OptionTargets" -> If[hasOptionsPattern,
@@ -2251,13 +2269,44 @@ argSampleMatchesPatternQ[sample_, pat_] :=
     ]
 
 
+optionalPatternSpecsMatchSamplesQ[pats_List, optionalPositions_List,
+  samples_List] :=
+Module[{n, m, optionalSet, rec},
+  n = Length[pats];
+  m = Length[samples];
+  optionalSet = AssociationThread[optionalPositions -> True];
+
+  If[m > n || m < n - Length[optionalPositions],
+    Return[False]
+  ];
+
+  rec[i_, j_] := rec[i, j] = Which[
+    i > n && j > m,
+      True,
+    i > n,
+      False,
+    j > m,
+      AllTrue[Range[i, n], TrueQ[Lookup[optionalSet, #, False]] &],
+    True,
+      (TrueQ[Lookup[optionalSet, i, False]] && rec[i + 1, j]) ||
+        (argSampleMatchesPatternQ[samples[[j]], pats[[i]]] &&
+          rec[i + 1, j + 1])
+  ];
+
+  rec[1, 1]
+]
+
+
 definitionAcceptsCallArgsQ[funcName_String, def_Association, argNodes_List, argSamples_List, validateOptionNames_:False] :=
-Module[{pats, isVar, hasOptionsPattern, positionalNodes, optionNodes,
+Module[{pats, optionalPositions, isVar, hasOptionsPattern, positionalNodes, optionNodes,
   positionalSamples, optionSamples, fixedN, varElemPat, optionNames,
-  explicitOptionNames, allowedOptionNames},
+  explicitOptionNames, allowedOptionNames, fixedPats, fixedOptionalPositions},
 
   pats = Lookup[def, "InputPatterns", {}];
-  isVar = Lookup[def, "Variadic", False];
+  optionalPositions = Cases[Lookup[def, "OptionalPositions", {}], _Integer];
+  isVar = TrueQ[Lookup[def, "Variadic", False]] &&
+    Length[pats] > 0 &&
+    MatchQ[Last[pats], _BlankSequence | _BlankNullSequence];
   hasOptionsPattern = TrueQ[Lookup[def, "HasOptionsPattern", False]];
 
   {positionalNodes, optionNodes, positionalSamples, optionSamples} = If[hasOptionsPattern,
@@ -2292,23 +2341,30 @@ Module[{pats, isVar, hasOptionsPattern, positionalNodes, optionNodes,
 
   If[isVar && Length[pats] > 0,
     fixedN = Length[pats] - 1;
+    fixedPats = Take[pats, fixedN];
+    fixedOptionalPositions = Select[optionalPositions, # <= fixedN &];
     varElemPat = With[{lp = Last[pats]},
       If[Head[lp] === BlankSequence && Length[lp] === 1, Blank[lp[[1]]],
       If[Head[lp] === BlankNullSequence && Length[lp] === 1, Blank[lp[[1]]],
       Blank[]]]
     ];
-    Length[positionalSamples] >= fixedN &&
-    (fixedN === 0 || AllTrue[
-      Transpose[{Take[positionalSamples, fixedN], Take[pats, fixedN]}],
-      argSampleMatchesPatternQ[#[[1]], #[[2]]] &
-    ]) &&
-    AllTrue[Drop[positionalSamples, fixedN],
-      argSampleMatchesPatternQ[#, varElemPat] &
+    AnyTrue[Range[0, Min[Length[positionalSamples], fixedN]],
+      Function[{prefixLen},
+        optionalPatternSpecsMatchSamplesQ[
+          fixedPats,
+          fixedOptionalPositions,
+          Take[positionalSamples, prefixLen]
+        ] &&
+          If[Head[Last[pats]] === BlankSequence,
+            Length[positionalSamples] - prefixLen >= 1,
+            True
+          ] &&
+          AllTrue[Drop[positionalSamples, prefixLen],
+            argSampleMatchesPatternQ[#, varElemPat] &
+          ]
+      ]
     ],
-    Length[pats] === Length[positionalSamples] &&
-    AllTrue[Transpose[{positionalSamples, pats}],
-      argSampleMatchesPatternQ[#[[1]], #[[2]]] &
-    ]
+    optionalPatternSpecsMatchSamplesQ[pats, optionalPositions, positionalSamples]
   ]
 ]
 
@@ -2956,7 +3012,8 @@ Module[{definitions, docComments, structuredContexts, packageContext, packageSco
   (* Precomputed once per file; walkASTForDefinitions must not rebuild these per node. *)
   structuredContexts = Join[structuredContexts, <|
     "ExportedNameSet" -> AssociationMap[True &, structuredContexts["ExportedSymbols"]],
-    "ScopedNameSet" -> AssociationMap[True &, structuredContexts["ScopedSymbols"]]
+    "ScopedNameSet" -> AssociationMap[True &, structuredContexts["ScopedSymbols"]],
+    "LocalSymbolSourceSet" -> localSymbolSourceSet[ast]
   |>];
   definitions = Internal`Bag[];
   walkASTForDefinitions[definitions, ast, None, False, uri, docComments, structuredContexts];
@@ -2983,7 +3040,8 @@ Module[{definitions, structuredContexts, packageContext, packageScopeContext,
   (* Precomputed once per file; walkASTForDefinitions must not rebuild these per node. *)
   structuredContexts = Join[structuredContexts, <|
     "ExportedNameSet" -> AssociationMap[True &, structuredContexts["ExportedSymbols"]],
-    "ScopedNameSet" -> AssociationMap[True &, structuredContexts["ScopedSymbols"]]
+    "ScopedNameSet" -> AssociationMap[True &, structuredContexts["ScopedSymbols"]],
+    "LocalSymbolSourceSet" -> localSymbolSourceSet[ast]
   |>];
   definitions = Internal`Bag[];
   walkASTForDefinitions[definitions, ast, None, False, uri, <||>, structuredContexts];
@@ -3420,7 +3478,7 @@ tag = {LeafNode[String, "MyPackage`", ...], CallNode[List, {LeafNode[String, "De
 Also extracts Needs["Package`"] calls at the top level.
 *)
 extractDependencies[ast_] :=
-Module[{packageDeps, needsDeps, needsAliasDeps, structuredHiddenDeps, structuredImportDeps, allDeps},
+Module[{packageDeps, needsDeps, needsAliasDeps, contextAliasDeps, structuredHiddenDeps, structuredImportDeps, allDeps},
 
   (*
   Extract from PackageNode tags - dependencies are in the List following the main context
@@ -3455,10 +3513,27 @@ Module[{packageDeps, needsDeps, needsAliasDeps, structuredHiddenDeps, structured
     Infinity
   ];
 
+  (*
+  Also extract direct context alias assignments:
+    $ContextAliases["Alias`"] = "FullContext`"
+  Treat the full context as a dependency so its source can be discovered and
+  indexed for alias-qualified completions.
+  *)
+  contextAliasDeps = Cases[ast,
+    CallNode[LeafNode[Symbol, "Set", _],
+      {
+        CallNode[LeafNode[Symbol, "$ContextAliases" | "System`$ContextAliases", _],
+          {LeafNode[String, _, _]}, _],
+        LeafNode[String, s_String, _]
+      }, _] :>
+      normalizeContextString[s],
+    Infinity
+  ];
+
   structuredHiddenDeps = structuredPackageHiddenImports[ast];
   structuredImportDeps = Lookup[structuredPackageImportRecords[ast], "context", {}];
 
-  allDeps = DeleteDuplicates[Join[packageDeps, needsDeps, needsAliasDeps, structuredHiddenDeps, structuredImportDeps]];
+  allDeps = DeleteDuplicates[Join[packageDeps, needsDeps, needsAliasDeps, contextAliasDeps, structuredHiddenDeps, structuredImportDeps]];
 
   (* Filter out None values from failed parsing *)
   Select[allDeps, StringQ]
@@ -3470,7 +3545,7 @@ Extract detailed context loading information from AST.
 Returns a list of context load records with source locations.
 *)
 extractContextLoads[ast_] :=
-Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, structuredInitLoads, structuredImportLoads, initializeCalls, importCalls},
+Module[{loads, packageLoads, needsLoads, needsAliasLoads, contextAliasLoads, getLoads, structuredInitLoads, structuredImportLoads, initializeCalls, importCalls},
   loads = {};
 
   (*
@@ -3516,7 +3591,23 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, structuredIn
     Infinity
   ];
 
-  needsLoads = Join[needsLoads, needsAliasLoads];
+  (*
+  Extract direct $ContextAliases assignments with source locations.
+  Record the full context as loaded and keep the alias for file-local loaded
+  context checks.
+  *)
+  contextAliasLoads = Cases[ast,
+    CallNode[LeafNode[Symbol, "Set", _],
+      {
+        CallNode[LeafNode[Symbol, "$ContextAliases" | "System`$ContextAliases", _],
+          {LeafNode[String, a_String, _]}, _],
+        LeafNode[String, s_String, _]
+      }, KeyValuePattern[Source -> src_]] :>
+      <| "context" -> normalizeContextString[s], "alias" -> normalizeContextString[a], "source" -> src, "method" -> "$ContextAliases" |>,
+    Infinity
+  ];
+
+  needsLoads = Join[needsLoads, needsAliasLoads, contextAliasLoads];
 
   (*
   Extract Get["Package`"] calls with source locations
@@ -3547,22 +3638,27 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, structuredIn
   structuredImportLoads = Reap[
     Scan[
       Function[{call},
-        Module[{args, context, symbols},
+        Module[{args, importSpec, context, alias, symbols, record},
           args = callNodeArguments[call];
           If[Length[args] >= 1,
-            context = Replace[
-              stringNodeValue[args[[1]]],
+            importSpec = Replace[args[[1]],
               {
-                value_String /; validContextStringQ[value] :> normalizeContextString[value],
-                _ :> None
+                LeafNode[String, value_String, _] :>
+                  <|"context" -> normalizeContextString[value]|>,
+                CallNode[LeafNode[Symbol, "Rule", _],
+                  {LeafNode[String, fullCtx_String, _], LeafNode[String, aliasCtx_String, _]}, _] :>
+                  <|"context" -> normalizeContextString[fullCtx], "alias" -> normalizeContextString[aliasCtx]|>,
+                _ :> <||>
               }
             ];
+            context = Lookup[importSpec, "context", None];
+            alias = Lookup[importSpec, "alias", None];
             If[StringQ[context],
               symbols = If[Length[args] >= 2,
                 extractSymbolNamesFromValue[args[[2]]],
                 {}
               ];
-              Sow[<|
+              record = <|
                 "context" -> context,
                 "source" -> Replace[
                   call,
@@ -3570,7 +3666,11 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, structuredIn
                 ],
                 "method" -> "PackageImport",
                 "symbols" -> symbols
-              |>]
+              |>;
+              If[StringQ[alias],
+                record = Append[record, "alias" -> alias]
+              ];
+              Sow[record]
             ]
           ]
         ]
@@ -3595,19 +3695,41 @@ Module[{loads, packageLoads, needsLoads, needsAliasLoads, getLoads, structuredIn
 
 (*
 Extract context alias mappings from AST.
-Handles the form Needs["FullContext`" -> "Alias`"] which sets up $ContextAliases.
+Handles Needs["FullContext`" -> "Alias`"], PackageImport["FullContext`" -> "Alias`"],
+and direct $ContextAliases["Alias`"] = "FullContext`" assignments.
 Returns a list of associations: <| "fullContext" -> "FullContext`", "alias" -> "Alias`" |>
 *)
 extractContextAliases[ast_] :=
-Module[{aliases},
+Module[{needsAliases, packageImportAliases, contextAliasAssignments, aliases},
   (* After Abstract, -> becomes CallNode[LeafNode[Symbol, "Rule", _], ...] *)
-  aliases = Cases[ast,
+  needsAliases = Cases[ast,
     CallNode[LeafNode[Symbol, "Needs", _],
       {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, fullCtx_String, _], LeafNode[String, aliasCtx_String, _]}, _]},
       _] :>
       <| "fullContext" -> normalizeContextString[fullCtx], "alias" -> normalizeContextString[aliasCtx] |>,
     Infinity
   ];
+
+  packageImportAliases = Cases[ast,
+    CallNode[LeafNode[Symbol, "PackageImport", _],
+      {CallNode[LeafNode[Symbol, "Rule", _], {LeafNode[String, fullCtx_String, _], LeafNode[String, aliasCtx_String, _]}, _], ___},
+      _] :>
+      <| "fullContext" -> normalizeContextString[fullCtx], "alias" -> normalizeContextString[aliasCtx] |>,
+    Infinity
+  ];
+
+  contextAliasAssignments = Cases[ast,
+    CallNode[LeafNode[Symbol, "Set", _],
+      {
+        CallNode[LeafNode[Symbol, "$ContextAliases" | "System`$ContextAliases", _],
+          {LeafNode[String, aliasCtx_String, _]}, _],
+        LeafNode[String, fullCtx_String, _]
+      }, _] :>
+      <| "fullContext" -> normalizeContextString[fullCtx], "alias" -> normalizeContextString[aliasCtx] |>,
+    Infinity
+  ];
+
+  aliases = Join[needsAliases, packageImportAliases, contextAliasAssignments];
   Select[aliases, StringQ[#["fullContext"]] && StringQ[#["alias"]] &]
 ]
 
@@ -3826,6 +3948,95 @@ Which[
 ]
 
 
+definitionSourceKey[src : {{_Integer, _Integer}, {_Integer, _Integer}}] :=
+  ToString[First[src], InputForm]
+definitionSourceKey[_] := None
+
+
+localSymbolSourceSet[ast_] :=
+Module[{hasUnannotatedDefinitions, scopingData, sources},
+  hasUnannotatedDefinitions = Length[Cases[
+    ast,
+    CallNode[
+      LeafNode[Symbol, "Set" | "SetDelayed", _],
+      {LeafNode[Symbol, _, _] | CallNode[_, _, _], _},
+      metadata_Association
+    ] /; !KeyExistsQ[metadata, "Definitions"],
+    Infinity,
+    1
+  ]] > 0;
+
+  If[!hasUnannotatedDefinitions,
+    Return[<||>]
+  ];
+
+  scopingData = Replace[
+    Check[CodeParser`Scoping`ScopingData[ast], {}],
+    Except[_List] -> {}
+  ];
+  sources = Cases[
+    scopingData,
+    _[src : {{_Integer, _Integer}, {_Integer, _Integer}}, _, _, _] :> src
+  ];
+
+  AssociationMap[True &, definitionSourceKey /@ sources]
+]
+
+
+$nonSymbolDefinitionHeads = AssociationMap[
+  True &,
+  {"Attributes", "MessageName", "Options", "Part"}
+];
+
+
+setDefinitionSymbolNodes[node_, structuredContexts_] :=
+Module[{metadata, annotatedDefinitions, lhs, lhsCall, symbolNode, sourceKey},
+  If[!MatchQ[node,
+    CallNode[
+      LeafNode[Symbol, "Set" | "SetDelayed", _],
+      {_, _},
+      _Association
+    ]
+  ],
+    Return[{}]
+  ];
+
+  metadata = node[[3]];
+  annotatedDefinitions = Lookup[metadata, "Definitions", Missing["NotFound"]];
+  If[ListQ[annotatedDefinitions],
+    Return[annotatedDefinitions]
+  ];
+
+  lhs = node[[2, 1]];
+  sourceKey = definitionSourceKey[Lookup[lhs[[3]], Source, None]];
+  If[TrueQ[Lookup[
+    Lookup[structuredContexts, "LocalSymbolSourceSet", <||>],
+    sourceKey,
+    False
+  ]],
+    Return[{}]
+  ];
+
+  symbolNode = Which[
+    MatchQ[lhs, LeafNode[Symbol, _String, _]],
+      lhs,
+    True,
+      lhsCall = definitionConditionLHSCallNode[lhs];
+      If[MatchQ[lhsCall, CallNode[LeafNode[Symbol, _String, _], _, _]],
+        lhsCall[[1]],
+        None
+      ]
+  ];
+
+  If[
+    MatchQ[symbolNode, LeafNode[Symbol, _String, _]] &&
+      !KeyExistsQ[$nonSymbolDefinitionHeads, symbolNode[[2]]],
+    {symbolNode},
+    {}
+  ]
+]
+
+
 (*
 Leaf fast-path: a LeafNode can match no definition/context pattern and has no
 children — visiting it must cost nothing. The bulk of AST nodes are leaves.
@@ -3833,7 +4044,8 @@ children — visiting it must cost nothing. The bulk of AST nodes are leaves.
 walkASTForDefinitions[_, LeafNode[_, _, _], _, _, _, _, _] := Null
 
 walkASTForDefinitions[bag_, node_, currentContext_, inPrivate_, uri_, docComments_, structuredContexts_] :=
-Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
+Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext,
+  definitionNodes},
 
   newContext = currentContext;
   newInPrivate = inPrivate;
@@ -3843,6 +4055,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
     newContext = structuredPrivateContext;
     newInPrivate = True
   ];
+
+  definitionNodes = setDefinitionSymbolNodes[node, structuredContexts];
 
   (*
   Track context from PackageNode/ContextNode
@@ -3903,7 +4117,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
     (*
     Function definition: f[x_] := ...
     *)
-    MatchQ[node, CallNode[LeafNode[Symbol, "SetDelayed" | "Set", _], {CallNode[_, _, _], _}, KeyValuePattern["Definitions" -> _List]]],
+    MatchQ[node, CallNode[LeafNode[Symbol, "SetDelayed" | "Set", _],
+      {CallNode[_, _, _], _}, _]] && Length[definitionNodes] > 0,
       Module[{src, defStartLine, docComment},
         src = node[[3, Key[Source]]];
         defStartLine = src[[1, 1]];
@@ -3944,6 +4159,7 @@ Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
                   "visibility" -> walkDefinitionVisibilityFor[def[[2]], structuredContexts, newInPrivate],
                   "DocComment" -> docComment,
                   "InputPatterns" -> signatureInfo["InputPatterns"],
+                  "OptionalPositions" -> signatureInfo["OptionalPositions"],
                   "Variadic" -> signatureInfo["Variadic"],
                   "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
                   "OptionTargets" -> signatureInfo["OptionTargets"],
@@ -3956,7 +4172,7 @@ Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
                 ]
               ]
             ],
-            node[[3, Key["Definitions"]]]
+            definitionNodes
           ]
         ]
       ]
@@ -3996,6 +4212,7 @@ Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
           "visibility" -> walkDefinitionVisibilityFor[lhsHead, structuredContexts, newInPrivate],
           "DocComment" -> docComment,
           "InputPatterns" -> signatureInfo["InputPatterns"],
+          "OptionalPositions" -> signatureInfo["OptionalPositions"],
           "Variadic" -> signatureInfo["Variadic"],
           "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
           "OptionTargets" -> signatureInfo["OptionTargets"],
@@ -4010,7 +4227,8 @@ Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
     (*
     Constant definition: c = 5
     *)
-    MatchQ[node, CallNode[LeafNode[Symbol, "Set", _], {LeafNode[Symbol, _, _], _}, KeyValuePattern["Definitions" -> _List]]],
+    MatchQ[node, CallNode[LeafNode[Symbol, "Set", _],
+      {LeafNode[Symbol, _, _], _}, _]] && Length[definitionNodes] > 0,
       Module[{src, defStartLine, docComment, rhsNode, inferredPat, rhsCallHead, rhsCallArgs},
         src = node[[3, Key[Source]]];
         defStartLine = src[[1, 1]];
@@ -4040,7 +4258,7 @@ Module[{newContext, contextStrings, newInPrivate, structuredPrivateContext},
               |>]
             ]
           ],
-          node[[3, Key["Definitions"]]]
+          definitionNodes
         ]
       ]
     ,
@@ -4409,29 +4627,38 @@ structuredPackageHiddenImports[ast_] :=
 
 
 structuredPackageImportRecords[ast_] :=
-Module[{calls, args, context, symbols, reaped},
+Module[{calls, args, importSpec, context, alias, symbols, record, reaped},
   calls = structuredPackageCallNodes[ast, "PackageImport"];
   reaped = Reap[
     Scan[
       Function[{call},
         args = callNodeArguments[call];
         If[Length[args] >= 1,
-          context = Replace[
-            stringNodeValue[args[[1]]],
+          importSpec = Replace[args[[1]],
             {
-              value_String /; validContextStringQ[value] :> normalizeContextString[value],
-              _ :> Missing["NotAvailable"]
+              LeafNode[String, value_String, _] :>
+                <|"context" -> normalizeContextString[value]|>,
+              CallNode[LeafNode[Symbol, "Rule", _],
+                {LeafNode[String, fullCtx_String, _], LeafNode[String, aliasCtx_String, _]}, _] :>
+                <|"context" -> normalizeContextString[fullCtx], "alias" -> normalizeContextString[aliasCtx]|>,
+              _ :> <||>
             }
           ];
+          context = Lookup[importSpec, "context", Missing["NotAvailable"]];
+          alias = Lookup[importSpec, "alias", Missing["NotAvailable"]];
           If[StringQ[context],
             symbols = If[Length[args] >= 2,
               extractSymbolNamesFromValue[args[[2]]],
               {}
             ];
-            Sow[<|
+            record = <|
               "context" -> context,
               "symbols" -> symbols
-            |>]
+            |>;
+            If[StringQ[alias],
+              record = Append[record, "alias" -> alias]
+            ];
+            Sow[record]
           ]
         ]
       ],
@@ -4444,7 +4671,7 @@ Module[{calls, args, context, symbols, reaped},
 
   DeleteDuplicatesBy[
     reaped[[2, 1]],
-    {Lookup[#, "context", Missing[]], Sort[Lookup[#, "symbols", {}]]} &
+    {Lookup[#, "context", Missing[]], Lookup[#, "alias", Missing[]], Sort[Lookup[#, "symbols", {}]]} &
   ]
 ]
 
@@ -4521,7 +4748,7 @@ Module[{cached, searchRoots, candidateForRoot},
           FileNames["init.wl", searchRoot, 1],
           FileNames["*.wl" | "*.m", searchRoot, 1]
         ],
-        !shouldExcludeFile[#] &
+        !shouldExcludeFile[#] && structuredPackageLoaderCandidateQ[#] &
       ];
       SelectFirst[
         SortBy[candidates, {If[FileNameTake[#] === "init.wl", 0, 1] &, StringLength}],
@@ -4540,10 +4767,31 @@ Module[{cached, searchRoots, candidateForRoot},
 ]
 
 
+(* -------------------------------------------------------------------------- *)
+(* ::Section:: *)(* structuredPackageLoaderCandidateQ *)
+(* Description: Cheaply reject files that cannot contain a loader call.
+ * Return:       True | False
+ *)
+structuredPackageLoaderCandidateQ[filePath_String] :=
+Module[{text},
+  text = If[FileExistsQ[filePath], ReadString[filePath], $Failed];
+  StringQ[text] && StringContainsQ[
+    text,
+    "PackageInitialize" ~~ WhitespaceCharacter... ~~ "["
+  ]
+]
+
+
 structuredPackageMetadata[filePath_String, ast_] :=
-Module[{packageContext, hiddenImports, importRecords, loaderPath, privateContext, packageScopeContext, loaderAst},
-  packageContext = structuredPackagePackageContext[ast];
-  hiddenImports = structuredPackageHiddenImports[ast];
+Module[{initializeMetadata, packageContext, hiddenImports, importRecords,
+  loaderPath, privateContext, packageScopeContext, loaderAst},
+  initializeMetadata = structuredPackageInitializeMetadata[ast];
+  packageContext = Lookup[
+    initializeMetadata,
+    "PackageContext",
+    Missing["NotAvailable"]
+  ];
+  hiddenImports = Lookup[initializeMetadata, "HiddenImports", {}];
   importRecords = structuredPackageImportRecords[ast];
   loaderPath = Missing["NotAvailable"];
 
@@ -4551,8 +4799,13 @@ Module[{packageContext, hiddenImports, importRecords, loaderPath, privateContext
     loaderPath = structuredPackageLoaderPath[DirectoryName[filePath]];
     If[StringQ[loaderPath],
       loaderAst = parseAst[loaderPath, LSPServer`SourceFileFormat[loaderPath]];
-      packageContext = structuredPackagePackageContext[loaderAst];
-      hiddenImports = structuredPackageHiddenImports[loaderAst]
+      initializeMetadata = structuredPackageInitializeMetadata[loaderAst];
+      packageContext = Lookup[
+        initializeMetadata,
+        "PackageContext",
+        Missing["NotAvailable"]
+      ];
+      hiddenImports = Lookup[initializeMetadata, "HiddenImports", {}]
     ]
   ];
 

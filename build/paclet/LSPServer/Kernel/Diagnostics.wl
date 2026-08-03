@@ -302,6 +302,16 @@ Join[
 ]
 
 
+fastDiagnosticsCurrentQ[entry_?AssociationQ] :=
+Module[{lastChange = Lookup[entry, "LastChange", Missing["NotAvailable"]]},
+  Lookup[entry, "FastDiagnosticsLastChange", Missing["NotAvailable"]] === lastChange &&
+    ListQ[Lookup[entry, "CSTLints", Null]] &&
+    ListQ[Lookup[entry, "AggLints", Null]] &&
+    ListQ[Lookup[entry, "ASTLints", Null]] &&
+    ListQ[Lookup[entry, "ScopingLints", Null]]
+]
+
+
 associationEntries[value_] :=
   Cases[Replace[value, Except[_List] -> {}], _Association]
 
@@ -367,12 +377,33 @@ Build a serialisable snapshot of mutable global state for the background
 diagnostics worker kernel.  The worker installs this state into a Block so the
 existing workspace-diagnostics implementation can run unchanged.
 *)
+(*
+Only small fields cross WSTP to the diagnostics worker; the worker re-derives
+CST/Agg/AST from Text itself (prepareHighlightWorkerEntry). Shipping the parse
+artifacts serialized to ~50 MB per dispatch for a 100 KB file and blocked the
+main thread longer than running the diagnostics synchronously would have.
+*)
+$DiagnosticsSnapshotEntryKeys =
+  {
+    "Text",
+    "PreprocessedText",
+    "LastChange",
+    "UserSymbols",
+    "PreviousUserSymbols",
+    "ScopingData",
+    "ScopingDataLastChange",
+    "SuppressedRegions",
+    "IgnoreData"
+  }
+
 LSPServer`buildWorkerSnapshot[uri_String] := <|
   "PacletIndex" -> $PacletIndex,
   "BuiltinPatterns" -> $BuiltinPatterns,
   "WorkspaceRootPath" -> $WorkspaceRootPath,
   "ConfidenceLevel" -> $ConfidenceLevel,
-  "OpenFileEntry" -> Lookup[$OpenFilesMap, uri, Null],
+  "OpenFileEntry" -> With[{e = Lookup[$OpenFilesMap, uri, Null]},
+    If[AssociationQ[e], KeyTake[e, $DiagnosticsSnapshotEntryKeys], e]
+  ],
   "IndexingWasActive" -> TrueQ[LSPServer`Private`$IndexingWasActive],
   "PendingIndexFiles" -> Replace[LSPServer`PacletIndex`$PendingIndexFiles, Except[_List] -> {}],
   "PendingExternalDepFiles" -> Replace[
@@ -382,22 +413,24 @@ LSPServer`buildWorkerSnapshot[uri_String] := <|
 |>
 
 
-queueWorkspaceDiagnosticsSync[uri_String] :=
-Module[{content, queuedQ},
-  content = <|
-    "method" -> "textDocument/runWorkspaceDiagnostics",
-    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
-  |>;
-
-  queuedQ = AnyTrue[
+workspaceDiagnosticsQueuedQ[uri_String] :=
+  AnyTrue[
     $ContentQueue,
     MatchQ[#, KeyValuePattern[{
       "method" -> "textDocument/runWorkspaceDiagnostics",
       "params" -> KeyValuePattern["textDocument" -> KeyValuePattern["uri" -> uri]]
     }]] &
-  ];
+  ]
 
-  If[!queuedQ,
+
+queueWorkspaceDiagnosticsSync[uri_String] :=
+Module[{content},
+  content = <|
+    "method" -> "textDocument/runWorkspaceDiagnostics",
+    "params" -> <|"textDocument" -> <|"uri" -> uri|>|>
+  |>;
+
+  If[!workspaceDiagnosticsQueuedQ[uri],
     AppendTo[$ContentQueue, content]
   ];
 
@@ -424,6 +457,11 @@ runWorkspaceDiagnosticsWorker[uri_String, snapshot_?AssociationQ] :=
 Module[{entry, workspaceLints},
   entry = Lookup[snapshot, "OpenFileEntry", Null];
   If[!AssociationQ[entry], Return[$Failed]];
+
+  (* The snapshot ships only small fields ($DiagnosticsSnapshotEntryKeys);
+     re-derive CST/Agg/AST from Text here on the worker. No-op when the entry
+     already carries parse artifacts. *)
+  entry = LSPServer`Private`prepareHighlightWorkerEntry[uri, entry];
 
   Quiet[Check[
     Block[{
@@ -454,7 +492,11 @@ Module[{entry, workspaceLints},
       ];
       If[!ListQ[workspaceLints],
         $Failed,
-        <|"URI" -> uri, "WorkspaceLints" -> workspaceLints|>
+        <|
+          "URI" -> uri,
+          "WorkspaceLints" -> workspaceLints,
+          "LastChange" -> Lookup[entry, "LastChange", Missing["NotAvailable"]]
+        |>
       ]
     ],
     $Failed
@@ -464,19 +506,33 @@ Module[{entry, workspaceLints},
 
 dispatchWorkspaceDiagnostics[uri_String] :=
 Module[{entry, ast, snapshot, task},
+  entry = Lookup[$OpenFilesMap, uri, Null];
+
+  (* Workspace lints already present for this entry: nothing to dispatch,
+     regardless of whether a worker kernel is available. *)
+  If[AssociationQ[entry] && ListQ[Lookup[entry, "WorkspaceLints", Null]],
+    Return[Null]
+  ];
+
   If[$DiagnosticsKernel === None || $DiagnosticsKernel === $Failed,
     Return[queueWorkspaceDiagnosticsSync[uri]]
   ];
 
-  entry = Lookup[$OpenFilesMap, uri, Null];
+  If[!AssociationQ[entry],
+    Return[queueWorkspaceDiagnosticsSync[uri]]
+  ];
   ast = Lookup[entry, "AST", Null];
-  If[!AssociationQ[entry] || ast === Null || FailureQ[ast],
+  If[ast === Null || FailureQ[ast],
     Return[queueWorkspaceDiagnosticsSync[uri]]
   ];
 
   snapshot = LSPServer`buildWorkerSnapshot[uri];
   If[!AssociationQ[snapshot],
     Return[queueWorkspaceDiagnosticsSync[uri]]
+  ];
+
+  If[workspaceDiagnosticsQueuedQ[uri],
+    Return[Null]
   ];
 
   LSPServer`Private`cancelCurrentDiagnosticsTask[];
@@ -527,7 +583,7 @@ Catch[
 Module[{params, doc, uri, entry, text, cst, agg, ast,
         suppressedRegions, ignoreData,
         cstLints, aggLints, astLints, scopingData, scopingLints,
-  fastLints, notification},
+  fastLints, notification, lastChange},
 
   log[1, "textDocument/runFastDiagnostics: enter"];
 
@@ -545,6 +601,15 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
     Throw[Failure["URINotFound", <|"URI" -> uri|>]]
   ];
 
+  lastChange = Lookup[entry, "LastChange", Missing["NotAvailable"]];
+
+  If[fastDiagnosticsCurrentQ[entry],
+    If[Lookup[entry, "WorkspaceLints", Null] === Null,
+      dispatchWorkspaceDiagnostics[uri]
+    ];
+    Throw[{}]
+  ];
+
   (* ── Parse (use UpdateFileIndex-cached artifacts if present) ── *)
   text = Lookup[entry, "PreprocessedText", entry["Text"]];
 
@@ -556,6 +621,8 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
     entry["ASTLints"] = {};
     entry["ScopingLints"] = {};
     entry["WorkspaceLints"] = {};
+    entry["WorkspaceLintsLastChange"] = lastChange;
+    entry["FastDiagnosticsLastChange"] = lastChange;
     $OpenFilesMap[uri] = entry;
     log[1, "runFastDiagnostics: skipped large open file ", uri,
       " chars=", StringLength[text]];
@@ -583,8 +650,7 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
   ast = Lookup[entry, "AST", Null];
   If[ast === Null,
     ast = CodeParser`Abstract`Abstract[agg];
-    entry["AST"] = ast;
-    entry["PreviousAST"] = ast
+    entry["AST"] = ast
   ];
 
   (* Save parse artifacts so hover can use them even if we abort *)
@@ -680,20 +746,36 @@ Module[{params, doc, uri, entry, text, cst, agg, ast,
   scopingData = {};
   scopingLints = {};
   If[!FailureQ[ast],
-    scopingData = safeDiagnosticsScopingData[ast];
+    (* Reuse scoping computed by the semantic-token pass for this same text
+       version; only recompute when no successfully computed (non-timed-out)
+       scoping is cached for the current LastChange. *)
+    scopingData = Lookup[entry, "ScopingData", Null];
+    If[!ListQ[scopingData] ||
+      Lookup[entry, "ScopingDataLastChange", Missing["NotAvailable"]] =!= lastChange,
+      scopingData = safeDiagnosticsScopingData[ast];
+      If[scopingData =!= {},
+        entry["ScopingDataLastChange"] = lastChange
+      ]
+    ];
     entry["ScopingData"] = scopingData;
     scopingLints = convertScopingDataToLints[uri, entry, suppressedRegions];
     If[!ListQ[scopingLints], scopingLints = {}];
     entry["ScopingLints"] = scopingLints
   ];
 
-  (* Clear workspace lints — slow tier will repopulate *)
-  entry["WorkspaceLints"] = Null;
+  (* Clear workspace lints — slow tier will repopulate — unless the slow tier
+     already produced lints for this exact text version (it can legitimately
+     run first when a cross-file index update re-dispatched it). *)
+  If[Lookup[entry, "WorkspaceLintsLastChange", Missing["NotAvailable"]] =!= lastChange,
+    entry["WorkspaceLints"] = Null
+  ];
+  entry["FastDiagnosticsLastChange"] = lastChange;
 
   $OpenFilesMap[uri] = entry;
 
-  (* ── Publish partial results immediately ── *)
-  fastLints = cstLints ~Join~ aggLints ~Join~ astLints ~Join~ scopingLints;
+  (* ── Publish partial results immediately (plus any workspace lints that
+        survived because they are already current for this text version) ── *)
+  fastLints = allEntryDiagnosticsLints[entry];
   notification = buildPublishNotification[uri, entry, fastLints];
 
   If[TrueQ[$SemanticTokens],
@@ -741,6 +823,11 @@ Module[{params, doc, uri, entry, taskResult, workspaceLints},
   ];
 
   entry["WorkspaceLints"] = workspaceLints;
+  (* The worker reports the LastChange of the snapshot it processed. A
+     mismatch with the live entry means the user edited while the worker ran:
+     the result is stale and the next fast tier will clear + re-dispatch. *)
+  entry["WorkspaceLintsLastChange"] =
+    Lookup[taskResult, "LastChange", Missing["NotAvailable"]];
   $OpenFilesMap[uri] = entry;
 
   {buildPublishNotification[uri, entry, allEntryDiagnosticsLints[entry]]}
@@ -1417,6 +1504,17 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   pacletSymbols = GetPacletSymbols[];
 
   (*
+  Definitions nested inside expressions may not appear in ScopingData. The
+  PacletIndex extracts those definitions from Set/SetDelayed directly, so keep
+  the current file's indexed definition names available to classification.
+  *)
+  localSymbols = Lookup[
+    Lookup[LSPServer`PacletIndex`$PacletIndex["Files"], uri, <||>],
+    "Symbols",
+    {}
+  ];
+
+  (*
   Build the short-name symbol sets that are actually available in this file.
   GetLoadedDependencySymbols respects structured PackageImport records, including
   import-by-name, while GetFileBareNameContexts covers workspace contexts that
@@ -1478,6 +1576,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
           MemberQ[systemSymbols, name],
           MemberQ[structuredPackageDirectiveSymbols, name],
           MemberQ[locallyDefinedSymbols, name],
+          MemberQ[localSymbols, name],
           KeyExistsQ[accessibleWorkspaceSymbolSet, name],
           KeyExistsQ[dependencySymbolSet, name],
           StringMatchQ[name, LetterCharacter],
@@ -1616,7 +1715,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
           Cases[
             {lhsNode, definitionConditionLHSCallNode[lhsNode]},
             CallNode[_, _, KeyValuePattern[Source -> src_]] :> src,
-            {1}
+            Infinity
           ]
         ]
       ];
@@ -1659,6 +1758,7 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
                       <|
                         "name" -> funcName,
                         "InputPatterns" -> signatureInfo["InputPatterns"],
+                        "OptionalPositions" -> signatureInfo["OptionalPositions"],
                         "Variadic" -> signatureInfo["Variadic"],
                         "HasOptionsPattern" -> signatureInfo["HasOptionsPattern"],
                         "OptionTargets" -> signatureInfo["OptionTargets"]
@@ -3416,6 +3516,10 @@ Module[{params, doc, uri, entry, cst, workspaceLints, symbolRefs, undefined,
   ];
 
   entry["WorkspaceLints"] = workspaceLints;
+  (* Mark which text version these lints were computed against so the fast
+     tier does not clear + re-dispatch a result that is already current. *)
+  entry["WorkspaceLintsLastChange"] =
+    Lookup[entry, "LastChange", Missing["NotAvailable"]];
 
   $OpenFilesMap[uri] = entry;
 

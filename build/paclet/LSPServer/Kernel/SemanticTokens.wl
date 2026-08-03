@@ -514,12 +514,20 @@ Module[{params, id, doc, uri, entry, res, supersededIDs, supersededFenceposts},
     Throw[Join[supersededFenceposts, {<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params, "stale" -> True |>}] ]
   ];
 
-  If[semanticTokensEntryWaitingForReindexQ[entry],
-    log[0, "DBG-ST expand: BUILDING PARSE PIPELINE id=", id, " uri=", uri];
-    log[1, "textDocument/semanticTokens/full: exit"];
-    Throw[Join[
-      supersededFenceposts,
-      <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
+	  If[semanticTokensEntryWaitingForReindexQ[entry],
+	    log[0, "DBG-ST expand: BUILDING PARSE PIPELINE id=", id, " uri=", uri];
+	    log[1, "textDocument/semanticTokens/full: exit"];
+	    If[LSPServer`Private`highlightKernelAvailableQ[],
+	      Throw[
+	        Join[
+	          supersededFenceposts,
+	          {<| "method" -> "textDocument/semanticTokens/fullFencepost", "id" -> id, "params" -> params |>}
+	        ]
+	      ]
+	    ];
+	    Throw[Join[
+	      supersededFenceposts,
+	      <| "method" -> #, "id" -> id, "params" -> params |>& /@ {
         "textDocument/concreteParse",
         "textDocument/aggregateParse",
         "textDocument/abstractParse",
@@ -727,7 +735,13 @@ Module[{entry, cst, ast, rawScopingData, scopingData, scopingTimedOut, scopingEl
   If[!ListQ[rawScopingData],
     If[scopingEligibleQ,
       rawScopingData = safeScopingData[ast];
-      scopingTimedOut = TrueQ[$LastSemanticTokensScopingTimedOut],
+      scopingTimedOut = TrueQ[$LastSemanticTokensScopingTimedOut];
+      (* Mark the text version this scoping was computed against so the
+         diagnostics tier can reuse it instead of recomputing. *)
+      If[!scopingTimedOut,
+        entry["ScopingDataLastChange"] =
+          Lookup[entry, "LastChange", Missing["NotAvailable"]]
+      ],
       rawScopingData = {}
     ];
     entry["ScopingData"] = rawScopingData;
@@ -814,10 +828,15 @@ Module[{entry, cst, ast, rawScopingData, scopingData, scopingTimedOut, scopingEl
 
 
 semanticTokenScopingFollowupQueuedQ[uri_String] :=
+  TrueQ[
+    LSPServer`$HighlightTaskKind === "scoping-data" &&
+    LSPServer`$HighlightTaskURI === uri
+  ] ||
   AnyTrue[
     Join[
       Replace[LSPServer`$PreExpandContentQueue, Except[_List] -> {}],
-      Replace[LSPServer`$ContentQueue, Except[_List] -> {}]
+      Replace[LSPServer`$ContentQueue, Except[_List] -> {}],
+      Replace[LSPServer`$HighlightPendingContents, Except[_List] -> {}]
     ],
     AssociationQ[#] &&
       Lookup[#, "method", None] === "textDocument/runScopingData" &&
@@ -826,14 +845,28 @@ semanticTokenScopingFollowupQueuedQ[uri_String] :=
 
 
 queueSemanticTokenScopingFollowup[uri_String] :=
-  If[!semanticTokenScopingFollowupQueuedQ[uri],
-    LSPServer`Private`appendContentsToContentQueue[{
-      <|
-        "method" -> "textDocument/runScopingData",
-        "params" -> <|"textDocument" -> <|"uri" -> uri|>|>,
-        "deferrable" -> True
-      |>
-    }]
+  Module[{entry = Lookup[LSPServer`$OpenFilesMap, uri, Null]},
+    (*
+    While a didChange's debounced index update is still pending, skip the
+    scoping followup: each keystroke would pay ~0.5 s of ScopingData for
+    reclassification that the next keystroke immediately invalidates. Fast
+    tokens are already served; the post-index pipeline re-queues token
+    fenceposts, which re-trigger this followup once the text settles.
+    *)
+    If[AssociationQ[entry] &&
+      TrueQ[Lookup[entry, "IndexUpdatePending", False]] &&
+      Lookup[entry, "ScheduledJobs", {}] =!= {},
+      Return[Null]
+    ];
+    If[!semanticTokenScopingFollowupQueuedQ[uri],
+      LSPServer`Private`appendContentsToContentQueue[{
+        <|
+          "method" -> "textDocument/runScopingData",
+          "params" -> <|"textDocument" -> <|"uri" -> uri|>|>,
+          "deferrable" -> True
+        |>
+      }]
+    ]
   ]
 
 
@@ -935,17 +968,26 @@ Module[{id, params, doc, uri, entry, semanticTokens, scopingData, cst, allSymbol
     Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
   ];
 
-  If[semanticTokensEntryWaitingForReindexQ[entry],
-    If[semanticTokens =!= Null,
-      clearPending[];
-      log[0, "DBG-ST fencepost: SERVE STALE (reindex pending) id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
-      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
-    ];
-    log[0, "DBG-ST fencepost: WAITING FOR REINDEX id=", id, " uri=", uri];
-    Throw[{}]
-  ];
+	  If[semanticTokensEntryWaitingForReindexQ[entry],
+	    If[semanticTokens =!= Null,
+	      clearPending[];
+	      log[0, "DBG-ST fencepost: SERVE STALE (reindex pending) id=", id, " tokens=", Length[semanticTokens], " uri=", uri];
+	      Throw[{<| "jsonrpc" -> "2.0", "id" -> id, "result" -> <| "data" -> semanticTokens |> |>}]
+	    ];
+	    If[LSPServer`Private`dispatchHighlightSemanticTokens[content],
+	      log[0, "DBG-ST fencepost: DISPATCHED HIGHLIGHT WORKER (reindex pending) id=", id, " uri=", uri];
+	      Throw[{}]
+	    ];
+	    log[0, "DBG-ST fencepost: WAITING FOR REINDEX id=", id, " uri=", uri];
+	    Throw[{}]
+	  ];
 
-  scopingData = Lookup[entry, "ScopingData", Null];
+	  If[LSPServer`Private`dispatchHighlightSemanticTokens[content],
+	    log[0, "DBG-ST fencepost: DISPATCHED HIGHLIGHT WORKER id=", id, " uri=", uri];
+	    Throw[{}]
+	  ];
+
+	  scopingData = Lookup[entry, "ScopingData", Null];
   cst = Lookup[entry, "CST", Null];
   scopingEligibleQ = semanticTokensScopingEligibleQ[entry];
   needsScopingFollowupQ =
@@ -1252,15 +1294,20 @@ Module[{params, doc, uri, entry, ast, scopingData, scopingTimedOut},
     Throw[Failure["URINotFound", <| "URI" -> uri, "OpenFilesMapKeys" -> Keys[$OpenFilesMap] |>]]
   ];
 
-  If[!semanticTokensScopingEligibleQ[entry],
-    entry["ScopingData"] = {};
-    entry = KeyDrop[entry, "SemanticTokensIncomplete"];
-    $OpenFilesMap[uri] = entry;
-    log[0, "DBG-ST runScopingData: skipped large file; keeping fast semantic tokens uri=", uri];
-    Throw[{}]
-  ];
+	  If[!semanticTokensScopingEligibleQ[entry],
+	    entry["ScopingData"] = {};
+	    entry = KeyDrop[entry, "SemanticTokensIncomplete"];
+	    $OpenFilesMap[uri] = entry;
+	    log[0, "DBG-ST runScopingData: skipped large file; keeping fast semantic tokens uri=", uri];
+	    Throw[{}]
+	  ];
 
-  scopingData = Lookup[entry, "ScopingData", Null];
+	  If[LSPServer`Private`dispatchHighlightScopingData[content],
+	    log[0, "DBG-ST runScopingData: DISPATCHED HIGHLIGHT WORKER uri=", uri];
+	    Throw[{}]
+	  ];
+
+	  scopingData = Lookup[entry, "ScopingData", Null];
 
   If[ListQ[scopingData],
     If[TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]],
@@ -1296,6 +1343,12 @@ Module[{params, doc, uri, entry, ast, scopingData, scopingTimedOut},
   log[2, "after ScopingData"];
 
   entry["ScopingData"] = scopingData;
+  (* Mark the text version this scoping was computed against so the
+     diagnostics tier can reuse it instead of recomputing. *)
+  If[!scopingTimedOut,
+    entry["ScopingDataLastChange"] =
+      Lookup[entry, "LastChange", Missing["NotAvailable"]]
+  ];
   If[TrueQ[Lookup[entry, "SemanticTokensIncomplete", False]],
     If[scopingTimedOut,
       entry = KeyDrop[entry, {"SemanticTokensIncomplete", "SemanticTokensStale"}];
