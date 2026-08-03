@@ -116,6 +116,7 @@ Module[{id, params, doc, uri, cst, entry, foldingRange, outlineFolds, cstFolds,
   Collect additional folding ranges from the CST (expression blocks, comments, lists, etc.)
   *)
   cstFolds = If[cst === Null, {}, collectCSTFoldingRanges[cst]];
+  cstFolds = If[cst === Null, {}, filterAssignmentAnchoredFoldingRanges[cst, cstFolds]];
 
   (*
   Combine and deduplicate folding ranges
@@ -136,6 +137,38 @@ Module[{ranges},
   ranges = Internal`Bag[];
   walkCSTForFolding[ranges, cst];
   Internal`BagPart[ranges, All]
+]
+
+
+(*
+Disable fold ranges that start on a plain Set assignment line.
+
+In code like:
+
+  config = Module[...]
+  data = <| ... |>
+
+VS Code shows the fold control on the assignment line. Users expect that line to
+be a variable definition, not a synthetic fold anchor for the whole RHS block.
+We therefore drop any CST-derived fold whose start line matches a multi-line
+plain Set expression. Delayed definitions (foo[] := ...) keep their folds.
+*)
+filterAssignmentAnchoredFoldingRanges[cst_, folds_List] :=
+Module[{setStartLines},
+  setStartLines = DeleteDuplicates @ Cases[
+    cst,
+    BinaryNode[Set, _, data:KeyValuePattern[Source -> src_]] /; src[[2, 1]] > src[[1, 1]] :>
+      (src[[1, 1]] - 1),
+    Infinity
+  ];
+
+  If[setStartLines === {},
+    folds,
+    Select[
+      folds,
+      !MemberQ[setStartLines, Lookup[#, "startLine", Missing["NotFound"]]] &
+    ]
+  ]
 ]
 
 (*

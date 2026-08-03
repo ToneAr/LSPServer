@@ -6,10 +6,10 @@ Paclet[
 
   Description -> "Language Server Protocol implementation for Wolfram Language.",
   Creator -> "Brenton Bostick <brenton@wolfram.com>",
-  BuildDate -> "Tue 14 Jul 2026 17:10:39",
+  BuildDate -> "Mon 03 Aug 2026 11:50:32",
   BuildNumber -> 0,
-  BuildWolframVersionNumber -> 1510,
-  BuildWolframLibraryVersion -> 8,
+  BuildWolframVersionNumber -> 1410,
+  BuildWolframLibraryVersion -> 0,
   Updating -> Automatic,
   Extensions -> {
     {"Kernel", Root -> "Kernel", Context -> "LSPServer`"},
@@ -36,5 +36,5 @@ Paclet[
     }
   },
   PlatformQualifier -> "",
-  SystemID -> {"Linux-x86-64"}
+  SystemID -> {"Linux-ARM64", "Linux-x86-64", "MacOSX-ARM64", "MacOSX-x86-64", "Windows-ARM64", "Windows-x86-64"}
 ]

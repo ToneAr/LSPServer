@@ -149,9 +149,57 @@ Module[{params, id, command, res},
 
 
 handleContent[content:KeyValuePattern["method" -> "workspace/didChangeWatchedFiles"]] :=
-Module[{},
+Module[{params, changes, queuedPaths = {}, changedClosedURIs = {}},
 
   log[1, "workspace/didChangeWatchedFiles: enter"];
+
+  params = Lookup[content, "params", <||>];
+  changes = Replace[Lookup[params, "changes", {}], Except[_List] -> {}];
+
+  Scan[
+    Function[{change},
+      Catch[
+      Module[{uri, changeType, path, sourceFileQ, openQ},
+        If[!AssociationQ[change], Throw[Null, "skipChange"]];
+        uri = Lookup[change, "uri", None];
+        If[!StringQ[uri], Throw[Null, "skipChange"]];
+
+        openQ = KeyExistsQ[$OpenFilesMap, uri];
+        If[openQ, Throw[Null, "skipChange"]];
+
+        path = normalizeURI[uri];
+        sourceFileQ =
+          StringQ[$WorkspaceRootPath] &&
+          StringStartsQ[path, $WorkspaceRootPath] &&
+          AnyTrue[
+            LSPServer`Private`workspaceSourceFilePatterns[],
+            StringMatchQ[FileNameTake[path], #]&
+          ];
+        If[!sourceFileQ, Throw[Null, "skipChange"]];
+
+        changeType = Lookup[change, "type", 2];
+        If[changeType === 3 || !FileExistsQ[path],
+          RemoveFileFromIndex[uri],
+          RemoveFileFromIndex[uri];
+          AppendTo[queuedPaths, path];
+          AppendTo[changedClosedURIs, uri]
+        ]
+      ],
+      "skipChange"]
+    ],
+    changes
+  ];
+
+  If[queuedPaths =!= {},
+    LSPServer`PacletIndex`$PendingIndexFiles = DeleteDuplicates[
+      Join[LSPServer`PacletIndex`$PendingIndexFiles, queuedPaths]
+    ];
+    LSPServer`Private`queueWorkspaceDiagnosticsSweep[changedClosedURIs];
+    LSPServer`Private`queueWorkspaceIndexing[
+      "workspace/didChangeWatchedFiles: queued changed files for indexing"
+    ]
+  ];
+
   log[1, "workspace/didChangeWatchedFiles: exit"];
 
   {}
