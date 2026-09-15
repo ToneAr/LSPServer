@@ -4481,7 +4481,7 @@ $BuiltinPatterns =
 		"ServiceDisconnect" -> {{{_}, None}},
 		"ServiceExecute" -> {
 			{{_String | _ServiceObject, _String}, None},
-			{{_String | _ServiceObject, _String, KeyValuePattern[]}, None}
+			{{_String | _ServiceObject, _String, KeyValuePattern[{}]}, None}
 		},
 		"ServiceObject" -> {},
 		"ServiceObjects" -> {{{}, _List}, {{_String}, _List}},

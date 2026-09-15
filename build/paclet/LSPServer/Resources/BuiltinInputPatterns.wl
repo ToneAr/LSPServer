@@ -1567,10 +1567,7 @@ $BuiltinPatterns =
 			{{_, _String}, _ByteArray},
 			{{_, _String, _List}, _ByteArray}
 		},
-		"ExportString" -> {
-			{{_, _String}, _String},
-			{{_, _List}, _String}
-		},
+		"ExportString" -> {{{_, _String}, _String}, {{_, _List}, _String}},
 		"ExpressionCell" -> {{{_, _String}, None}},
 		"ExpressionGraph" -> {{{_}, _Graph}, {{_, _Integer}, _Graph}},
 		"ExtendedEntityClass" -> {{{_, _String}, None}},
@@ -4335,7 +4332,12 @@ $BuiltinPatterns =
 				"RGBColor[_[1], _[2], _[3]]"
 			},
 			{
-				{_Real | _Integer, _Real | _Integer, _Real | _Integer, _Real | _Integer},
+				{
+					_Real | _Integer,
+					_Real | _Integer,
+					_Real | _Integer,
+					_Real | _Integer
+				},
 				"RGBColor[_[1], _[2], _[3], _[4]]"
 			}
 		},
@@ -4479,7 +4481,7 @@ $BuiltinPatterns =
 		"ServiceDisconnect" -> {{{_}, None}},
 		"ServiceExecute" -> {
 			{{_String | _ServiceObject, _String}, None},
-			{{_String | _ServiceObject, _String, KeyValuePattern[]}, None}
+			{{_String | _ServiceObject, _String, KeyValuePattern[{}]}, None}
 		},
 		"ServiceObject" -> {},
 		"ServiceObjects" -> {{{}, _List}, {{_String}, _List}},
@@ -5523,9 +5525,7 @@ $BuiltinPatterns =
 		"$DefaultProxyRules" -> {{{_String}, None}},
 		"$WCSConfiguration" -> {{{___}, None}},
 		"Identity" -> {{{_}, "_[1]"}},
-		"List" -> {
-			{{___}, "{___[1]}" }
-		},
+		"List" -> {{{___}, "{___[1]}"}},
 		"Most" -> {{{_List}, _List}},
 		"Rest" -> {{{_List}, _List}},
 		"First" -> {{{_}, "_[1]"}, {{_, _}, "_[1]"}},
@@ -5561,7 +5561,10 @@ $BuiltinPatterns =
 		"Minus" -> {{{_}, _?NumericQ}},
 		"Plus" -> {
 			{{(_Integer | _Real | _Complex | _?NumericQ)..}, _?NumericQ},
-			{{List[(_Integer | _Real | _Complex | _?NumericQ)..]}, List[__?NumericQ]}
+			{
+				{List[(_Integer | _Real | _Complex | _?NumericQ)..]},
+				List[__?NumericQ]
+			}
 		},
 		"Subtract" -> {{{_, _}, _?NumericQ}},
 		"Times" -> {
@@ -5953,9 +5956,7 @@ $BuiltinPatterns =
 		"ASATriangle" -> {{{_, _, _}, None}},
 		"AskFunction" -> {{{_}, None}},
 		"AssociateTo" -> {{{_, _}, None}},
-		"Association" -> {
-			{{___}, _Association}
-		},
+		"Association" -> {{{___}, _Association}},
 		"AssociationComap" -> {
 			{{_, _Association}, _Association},
 			{{_, _}, _Association}
@@ -6172,7 +6173,9 @@ $BuiltinPatterns =
 		"ComponentExpand" -> {{{__}, "_[1]"}},
 		"ComposeSeries" -> {{{__, __}, "_[1]"}},
 		"Composition" -> {{{_, __}, None}},
-		"CompoundExpression" -> {{{__}, "_[1]"}},
+		"CompoundExpression" -> {
+			{{__}, "_[-1]"}
+		},
 		"CompoundPoissonDistribution" -> {{{}, None}},
 		"CompoundPoissonProcess" -> {{{}, None}},
 		"CompoundRenewalProcess" -> {{{}, None}},
@@ -6290,7 +6293,11 @@ $BuiltinPatterns =
 		"DayRange" -> {{{_, _}, _List}, {{_, _, _String}, _List}},
 		"DecisionTreeModel" -> {{{_}, None}, {{_, _}, None}},
 		"Decompose" -> {{{_, _}, _List}},
-		"Decrement" -> {{{_Integer}, _Integer}, {{_Real}, _Real}, {{_Complex}, _Complex}},
+		"Decrement" -> {
+			{{_Integer}, _Integer},
+			{{_Real}, _Real},
+			{{_Complex}, _Complex}
+		},
 		"Decrypt" -> {},
 		"DecryptFile" -> {
 			{{_String, _}, _String},
@@ -6485,7 +6492,7 @@ $BuiltinPatterns =
 		"FeatureSpacePlot" -> {{{_}, _Graphics}},
 		"FeatureSpacePlot3D" -> {{{_}, _Graphics3D}},
 		"FilledCurve" -> {{{_}, None}},
-		"FilterRules" -> { {{{___Rule} , _}, {___Rule} } },
+		"FilterRules" -> {{{{___Rule}, _}, {___Rule}}},
 		"FinancialBond" -> {
 			{{_}, None},
 			{{_, _}, None},
@@ -6722,7 +6729,11 @@ $BuiltinPatterns =
 		"ImportedObject" -> {{{_}, None}},
 		"Inactivate" -> {{{_}, None}},
 		"Inactive" -> {{{_}, None}},
-		"Increment" -> {{{_Integer}, _Integer}, {{_Real}, _Real}, {{_Complex}, _Complex}},
+		"Increment" -> {
+			{{_Integer}, _Integer},
+			{{_Real}, _Real},
+			{{_Complex}, _Complex}
+		},
 		"IncrementalFunction" -> {{{_}, None}},
 		"IncrementalObject" -> {{{__}, None}},
 		"IncrementalReceive" -> {{{_, _}, None}},
@@ -6873,7 +6884,10 @@ $BuiltinPatterns =
 		"ListCurvePathPlot" -> {{{_List}, _Graphics}, {{_List, _}, _Graphics}},
 		"ListFitPlot" -> {{{_}, _Graphics}},
 		"ListFitPlot3D" -> {{{_}, _Graphics3D}},
-		"ListLinePlot" -> {{{_List}, _Graphics}, {{_List, __}, _Graphics}},
+		"ListLinePlot" -> {
+			{{_Association, ___}, _Graphics},
+			{{_List, ___}, _Graphics}
+		},
 		"ListLinePlot3D" -> {{{_}, _Graphics3D}},
 		"ListLogLinearPlot" -> {{{_List}, _Graphics}, {{_List, __}, _Graphics}},
 		"ListLogLogPlot" -> {{{_List}, _Graphics}, {{_List, __}, _Graphics}},
@@ -6979,7 +6993,11 @@ $BuiltinPatterns =
 		"MeijerGReduce" -> {{{_, _}, None}},
 		"MellinConvolve" -> {{{_, _, _, _}, None}},
 		"MemoryConstrained" -> {{{_, _Integer}, None}},
-		"Merge" -> {{{ {___Association}, _ }, _Association}, {{ {__Rules}, _ }, _Association}, {{_}, _Merge} },
+		"Merge" -> {
+			{{{___Association}, _}, _Association},
+			{{{__Rules}, _}, _Association},
+			{{_}, _Merge}
+		},
 		"Message" -> {{{__}, None}},
 		"MessageName" -> {{{_Symbol, _String}, None}},
 		"Messages" -> {{{_Symbol}, _Association}},
@@ -7295,13 +7313,21 @@ $BuiltinPatterns =
 		"PrecedesSlantEqual" -> {},
 		"PrecedesTilde" -> {},
 		"Precision" -> {{{_}, _?NumericQ}},
-		"PreDecrement" -> {{{_Integer}, _Integer}, {{_Real}, _Real}, {{_Complex}, _Complex}},
+		"PreDecrement" -> {
+			{{_Integer}, _Integer},
+			{{_Real}, _Real},
+			{{_Complex}, _Complex}
+		},
 		"PredictorFunction" -> {{{__}, None}},
 		"PredictorInformation" -> {{{_}, _Association}, {{_, _}, _Association}},
 		"PredictorMeasurementsObject" -> {{{__}, None}},
 		"PreemptProtect" -> {{{_}, None}},
 		"Prefix" -> {{{_}, None}},
-		"PreIncrement" -> {{{_Integer}, _Integer}, {{_Real}, _Real}, {{_Complex}, _Complex}},
+		"PreIncrement" -> {
+			{{_Integer}, _Integer},
+			{{_Real}, _Real},
+			{{_Complex}, _Complex}
+		},
 		"PrependTo" -> {{{_Symbol, _}, _List}},
 		"Print" -> {{{}, None}, {{_}, None}, {{_, _}, None}, {{_, _, _}, None}},
 		"Prism" -> {{{_List}, None}},
@@ -7478,9 +7504,13 @@ $BuiltinPatterns =
 		"Series" -> {{{_, _List}, None}, {{_, _List, __}, None}},
 		"ServiceRequest" -> {{{_, _String}, None}, {{_, _String, _}, None}},
 		"SessionSubmit" -> {{{_}, None}, {{_, _}, None}},
-		"Set" -> {},
+		"Set" -> {
+			{{_, _}, "_[2]"}
+		},
 		"SetAccuracy" -> {{{_, _Integer}, _?NumericQ}},
-		"SetDelayed" -> {},
+		"SetDelayed" -> {
+			{{_, _}, Null}
+		},
 		"SetProperty" -> {{{_, _Rule}, None}},
 		"SetSharedFunction" -> {{{_, __}, None}},
 		"SetSystemModel" -> {{{_}, None}},

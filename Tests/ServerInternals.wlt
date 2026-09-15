@@ -2494,6 +2494,47 @@ VerificationTest[
 
 
 VerificationTest[
+  Module[{uri, params, result},
+    uri = "file:///tmp/test_batched_superseded_semantic_tokens.wl";
+    params = <|"textDocument" -> <|"uri" -> uri|>|>;
+
+    Block[{
+      LSPServer`$ContentQueue = {},
+      LSPServer`$PreExpandContentQueue = {},
+      LSPServer`$OpenFilesMap = <|uri -> <|"Text" -> "x = 1\n"|>|>,
+      LSPServer`$CancelMap = <|42 -> True|>,
+      LSPServer`$PendingSemanticTokenRequests = <||>
+    },
+      result = LSPServer`expandContents[{
+        <|
+          "jsonrpc" -> "2.0",
+          "method" -> "textDocument/semanticTokens/full",
+          "id" -> 42,
+          "params" -> params
+        |>,
+        <|
+          "jsonrpc" -> "2.0",
+          "method" -> "textDocument/semanticTokens/full",
+          "id" -> 43,
+          "params" -> params
+        |>
+      }];
+
+      Cases[
+        result,
+        content : KeyValuePattern[{
+          "method" -> "textDocument/semanticTokens/fullFencepost",
+          "id" -> id : (42 | 43)
+        }] :> {id, TrueQ[Lookup[content, "superseded", False]]}
+      ]
+    ]
+  ],
+  {{42, True}, {43, False}},
+  TestID -> "SemanticTokens-Batched-Superseded-Request-Has-One-Fencepost"
+]
+
+
+VerificationTest[
   Module[{uri, otherURI},
     uri = "file:///tmp/test_didclose_queue_cleanup.wl";
     otherURI = "file:///tmp/test_didclose_queue_cleanup_other.wl";

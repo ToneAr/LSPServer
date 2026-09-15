@@ -1108,13 +1108,12 @@ StartServer[logDir_String : "", OptionsPattern[]] :=
 				$ClosedFileDiagnosticsLastRun = 0;
 				If[(logDir != ""),
 					(
-						(* :!CodeAnalysis::BeginBlock:: *)
-						(* :!CodeAnalysis::Disable::BackwardsCompatibility:: *)
+						(* wl-disable BackwardsCompatibility:: *)
 						Quiet[
 							CreateDirectory[logDir],
 							{CreateDirectory::eexist, CreateDirectory::filex}
 						];
-						(* :!CodeAnalysis::EndBlock:: *)
+						(* wl-enable *)
 					);
 					(*
 					Cleanup existing log files
@@ -1290,6 +1289,43 @@ preScanForCancels[contents : {_?AssociationQ...}] :=
 		log[2, "$CancelMap: ", $CancelMap];
 	]
 
+(* -------------------------------------------------------------------------- *)
+(* ::Section:: *)(* coalesceSupersededSemanticTokenFenceposts *)
+(* Description: Removes ordinary fenceposts shadowed by a superseded response.
+ * Return:       A list without ordinary/superseded fencepost pairs.
+ *)
+coalesceSupersededSemanticTokenFenceposts[contents_List] :=
+	Module[{method, supersededKeys},
+		method = "textDocument/semanticTokens/fullFencepost";
+		supersededKeys =
+			Function[{content},
+				{contentURI[content], Lookup[content, "id", None]}
+			] /@
+				Select[
+					contents,
+					Function[{content},
+						AssociationQ[content] &&
+						Lookup[content, "method", None] === method &&
+						TrueQ[Lookup[content, "superseded", False]]
+					]
+				];
+		If[supersededKeys === {}, Return[contents]];
+		Select[
+			contents,
+			Function[{content},
+				!(
+					AssociationQ[content] &&
+					Lookup[content, "method", None] === method &&
+					!TrueQ[Lookup[content, "superseded", False]] &&
+					MemberQ[
+						supersededKeys,
+						{contentURI[content], Lookup[content, "id", None]}
+					]
+				)
+			]
+		]
+	]
+
 (*
 Input: list of Associations
 Returns: list of Associations
@@ -1357,6 +1393,10 @@ expandContents[contentsIn_] :=
 				log[2, "..."];
 			];
 			log[2, "after expandContent"];
+			$PreExpandContentQueue =
+				coalesceSupersededSemanticTokenFenceposts[
+					$PreExpandContentQueue
+				];
 			contents = $PreExpandContentQueue;
 		];
 		If[!MatchQ[contents, {_?AssociationQ...}],
